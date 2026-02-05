@@ -1,6 +1,6 @@
 # sqlsurge
 
-[![CI](https://github.com/yukikotani/sqlsurge/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani/sqlsurge/actions/workflows/ci.yml)
+[![CI](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/sqlsurge.svg)](https://crates.io/crates/sqlsurge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
