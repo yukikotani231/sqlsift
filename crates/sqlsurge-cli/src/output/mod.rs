@@ -37,7 +37,12 @@ impl OutputFormatter {
 
             // Print file location if we have a span
             if let Some(span) = &diag.span {
-                let (line, col) = offset_to_line_col(source, span.offset);
+                // Use line/column from span if available, otherwise compute from offset
+                let (line, col) = if span.line > 0 {
+                    (span.line, span.column)
+                } else {
+                    offset_to_line_col(source, span.offset)
+                };
                 eprintln!("  --> {}:{}:{}", self.file_name, line, col);
 
                 // Print source line with annotation
@@ -47,7 +52,11 @@ impl OutputFormatter {
 
                     // Print caret annotation
                     let padding = " ".repeat(col.saturating_sub(1));
-                    let underline = "^".repeat(span.length.min(source_line.len() - col + 1).max(1));
+                    let underline = "^".repeat(
+                        span.length
+                            .min(source_line.len().saturating_sub(col) + 1)
+                            .max(1),
+                    );
                     eprintln!("   | {}{}", padding, underline);
                 }
             }
@@ -73,6 +82,23 @@ impl OutputFormatter {
         let results: Vec<serde_json::Value> = diagnostics
             .iter()
             .map(|d| {
+                let mut location = serde_json::json!({
+                    "artifactLocation": {
+                        "uri": self.file_name
+                    }
+                });
+
+                // Add region if we have span information
+                if let Some(span) = &d.span {
+                    if span.line > 0 {
+                        location["region"] = serde_json::json!({
+                            "startLine": span.line,
+                            "startColumn": span.column,
+                            "endColumn": span.column + span.length
+                        });
+                    }
+                }
+
                 serde_json::json!({
                     "ruleId": d.code(),
                     "level": match d.severity {
@@ -84,11 +110,7 @@ impl OutputFormatter {
                         "text": d.message
                     },
                     "locations": [{
-                        "physicalLocation": {
-                            "artifactLocation": {
-                                "uri": self.file_name
-                            }
-                        }
+                        "physicalLocation": location
                     }]
                 })
             })
