@@ -33,10 +33,10 @@ sqlsurge/
 
 ### Key Components
 
-1. **SchemaBuilder** (`schema/builder.rs`): Parses CREATE TABLE statements using sqlparser-rs and builds a `Catalog`
-2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints)
-3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (35 comprehensive tests)
-4. **NameResolver** (`analyzer/resolver.rs`): Resolves table and column references, supports CTEs with scope isolation
+1. **SchemaBuilder** (`schema/builder.rs`): Parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) using sqlparser-rs and builds a `Catalog`. Supports resilient parsing to skip unsupported syntax.
+2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints, views, enums)
+3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (57 comprehensive tests)
+4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
 
@@ -54,7 +54,7 @@ Query SQL  → sqlparser → AST → Analyzer → NameResolver → Diagnostics
 # Build
 cargo build
 
-# Run tests (28 tests covering SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries)
+# Run tests (57 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs)
 cargo test
 
 # Run with example
@@ -118,7 +118,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Unit tests are colocated with modules (`#[cfg(test)] mod tests`)
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage: 35 tests covering SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries
+- Comprehensive test coverage: 57 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines
@@ -133,9 +133,9 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 - Only PostgreSQL dialect is fully supported
 - Subquery column resolution is incomplete (basic support exists)
-- No support for VIEWs, functions, or stored procedures
 - Type checking is basic (existence only, not full type inference)
 - No support for window functions, GROUPING SETS, or advanced SQL features
+- Functions and stored procedures are skipped (not analyzed)
 
 ## Supported Features
 
@@ -144,6 +144,12 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ JOINs (INNER, LEFT, RIGHT, FULL, CROSS)
 - ✅ Subqueries (WHERE, FROM)
 - ✅ Column and table name resolution
+- ✅ CREATE VIEW with column inference and wildcard expansion
+- ✅ ALTER TABLE (ADD/DROP/RENAME COLUMN, ADD CONSTRAINT, RENAME TABLE)
+- ✅ CREATE TYPE AS ENUM
+- ✅ CHECK constraints (column-level and table-level)
+- ✅ GENERATED AS IDENTITY columns
+- ✅ Resilient parsing (gracefully skips unsupported DDL)
 - ✅ Configuration file (sqlsurge.toml)
 - ✅ Rule disabling (--disable flag)
 - ✅ Multiple output formats (human, JSON, SARIF)

@@ -5,6 +5,6 @@ mod catalog;
 
 pub use builder::SchemaBuilder;
 pub use catalog::{
-    Catalog, ColumnDef, DefaultValue, ForeignKeyDef, PrimaryKeyDef, QualifiedName, Schema,
-    TableDef, UniqueConstraintDef,
+    Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
+    PrimaryKeyDef, QualifiedName, Schema, TableDef, UniqueConstraintDef, ViewDef,
 };

@@ -12,6 +12,8 @@ pub struct Catalog {
     pub schemas: IndexMap<String, Schema>,
     /// Default schema name (e.g., "public" for PostgreSQL)
     pub default_schema: String,
+    /// Enum type definitions (name -> EnumTypeDef)
+    pub enums: IndexMap<String, EnumTypeDef>,
 }
 
 impl Catalog {
@@ -19,6 +21,7 @@ impl Catalog {
         let mut catalog = Self {
             schemas: IndexMap::new(),
             default_schema: "public".to_string(),
+            enums: IndexMap::new(),
         };
         // Create default schema
         catalog.schemas.insert(
@@ -26,6 +29,7 @@ impl Catalog {
             Schema {
                 name: "public".to_string(),
                 tables: IndexMap::new(),
+                views: IndexMap::new(),
             },
         );
         catalog
@@ -39,6 +43,7 @@ impl Catalog {
                 Schema {
                     name: name.to_string(),
                     tables: IndexMap::new(),
+                    views: IndexMap::new(),
                 },
             );
         }
@@ -64,9 +69,56 @@ impl Catalog {
             .and_then(|s| s.tables.get(&name.name))
     }
 
+    /// Look up a table by name (mutable)
+    pub fn get_table_mut(&mut self, name: &QualifiedName) -> Option<&mut TableDef> {
+        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema).clone();
+        self.schemas
+            .get_mut(&schema_name)
+            .and_then(|s| s.tables.get_mut(&name.name))
+    }
+
     /// Check if a table exists
     pub fn table_exists(&self, name: &QualifiedName) -> bool {
         self.get_table(name).is_some()
+    }
+
+    /// Add an enum type to the catalog
+    pub fn add_enum(&mut self, enum_def: EnumTypeDef) {
+        self.enums.insert(enum_def.name.clone(), enum_def);
+    }
+
+    /// Get an enum type by name
+    pub fn get_enum(&self, name: &str) -> Option<&EnumTypeDef> {
+        self.enums.get(name)
+    }
+
+    /// Check if an enum type exists
+    pub fn enum_exists(&self, name: &str) -> bool {
+        self.enums.contains_key(name)
+    }
+
+    /// Add a view to the catalog
+    pub fn add_view(&mut self, view: ViewDef) {
+        let schema_name = view
+            .name
+            .schema
+            .clone()
+            .unwrap_or_else(|| self.default_schema.clone());
+        let schema = self.get_or_create_schema(&schema_name);
+        schema.views.insert(view.name.name.clone(), view);
+    }
+
+    /// Look up a view by name
+    pub fn get_view(&self, name: &QualifiedName) -> Option<&ViewDef> {
+        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
+        self.schemas
+            .get(schema_name)
+            .and_then(|s| s.views.get(&name.name))
+    }
+
+    /// Check if a view exists
+    pub fn view_exists(&self, name: &QualifiedName) -> bool {
+        self.get_view(name).is_some()
     }
 
     /// Get all table names
@@ -81,6 +133,24 @@ impl Catalog {
             })
             .collect()
     }
+
+    /// Get all table and view names (for typo suggestions)
+    pub fn table_or_view_names(&self) -> Vec<QualifiedName> {
+        self.schemas
+            .iter()
+            .flat_map(|(schema_name, schema)| {
+                let tables = schema.tables.keys().map(move |name| QualifiedName {
+                    schema: Some(schema_name.clone()),
+                    name: name.clone(),
+                });
+                let views = schema.views.keys().map(move |name| QualifiedName {
+                    schema: Some(schema_name.clone()),
+                    name: name.clone(),
+                });
+                tables.chain(views)
+            })
+            .collect()
+    }
 }
 
 /// A database schema (namespace)
@@ -88,6 +158,7 @@ impl Catalog {
 pub struct Schema {
     pub name: String,
     pub tables: IndexMap<String, TableDef>,
+    pub views: IndexMap<String, ViewDef>,
 }
 
 /// Qualified name (schema.table or just table)
@@ -140,6 +211,7 @@ pub struct TableDef {
     pub primary_key: Option<PrimaryKeyDef>,
     pub foreign_keys: Vec<ForeignKeyDef>,
     pub unique_constraints: Vec<UniqueConstraintDef>,
+    pub check_constraints: Vec<CheckConstraintDef>,
 }
 
 impl TableDef {
@@ -150,6 +222,7 @@ impl TableDef {
             primary_key: None,
             foreign_keys: Vec::new(),
             unique_constraints: Vec::new(),
+            check_constraints: Vec::new(),
         }
     }
 
@@ -181,6 +254,7 @@ pub struct ColumnDef {
     pub nullable: bool,
     pub default: Option<DefaultValue>,
     pub is_primary_key: bool,
+    pub identity: Option<IdentityKind>,
 }
 
 impl ColumnDef {
@@ -191,6 +265,7 @@ impl ColumnDef {
             nullable: true,
             default: None,
             is_primary_key: false,
+            identity: None,
         }
     }
 
@@ -242,6 +317,35 @@ pub struct ForeignKeyDef {
 pub struct UniqueConstraintDef {
     pub name: Option<String>,
     pub columns: Vec<String>,
+}
+
+/// CHECK constraint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckConstraintDef {
+    pub name: Option<String>,
+    pub expression: String,
+}
+
+/// Enum type definition (CREATE TYPE ... AS ENUM)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumTypeDef {
+    pub name: String,
+    pub values: Vec<String>,
+}
+
+/// Identity column kind (GENERATED ... AS IDENTITY)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum IdentityKind {
+    Always,
+    ByDefault,
+}
+
+/// View definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewDef {
+    pub name: QualifiedName,
+    pub columns: Vec<String>,
+    pub materialized: bool,
 }
 
 #[cfg(test)]

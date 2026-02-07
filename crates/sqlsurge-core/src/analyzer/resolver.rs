@@ -17,6 +17,8 @@ struct TableRef {
     /// Alias used in the query (if any)
     #[allow(dead_code)]
     alias: Option<String>,
+    /// If this is a VIEW reference, the column names from the VIEW definition
+    view_columns: Option<Vec<String>>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -411,8 +413,9 @@ impl<'a> NameResolver<'a> {
                 // Check if it's a CTE first
                 let is_cte = self.ctes.contains_key(&table_name.name);
 
-                // Check if table exists (in catalog or as CTE)
-                if !is_cte && !self.catalog.table_exists(&table_name) {
+                // Check if table or view exists (in catalog or as CTE)
+                let is_view = !is_cte && self.catalog.view_exists(&table_name);
+                if !is_cte && !is_view && !self.catalog.table_exists(&table_name) {
                     // Get span from the last identifier (table name)
                     let table_span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
                     let mut diag = Diagnostic::error(
@@ -427,6 +430,15 @@ impl<'a> NameResolver<'a> {
                     return;
                 }
 
+                // Get view columns if this is a view reference
+                let view_columns = if is_view {
+                    self.catalog
+                        .get_view(&table_name)
+                        .map(|v| v.columns.clone())
+                } else {
+                    None
+                };
+
                 // Register table in scope
                 let alias_name = alias.as_ref().map(|a| a.name.value.clone());
                 let lookup_name = alias_name
@@ -438,6 +450,7 @@ impl<'a> NameResolver<'a> {
                     TableRef {
                         table: table_name,
                         alias: alias_name,
+                        view_columns,
                     },
                 );
             }
@@ -604,6 +617,23 @@ impl<'a> NameResolver<'a> {
                             .with_span(column_span),
                         );
                     }
+                } else if let Some(view_cols) = &table_ref.view_columns {
+                    // Validate against VIEW columns
+                    if !view_cols
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                    {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::ColumnNotFound,
+                                format!(
+                                    "Column '{}' not found in view '{}'",
+                                    column_name, table_ref.table
+                                ),
+                            )
+                            .with_span(column_span),
+                        );
+                    }
                 } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
                     if !table_def.column_exists(column_name) {
                         let similar = find_similar_column(table_def, column_name);
@@ -639,6 +669,14 @@ impl<'a> NameResolver<'a> {
                 // Check CTE first
                 if let Some(cte) = self.ctes.get(&table_ref.table.name) {
                     if cte.columns.contains(column_name) {
+                        found_in.push(name);
+                    }
+                } else if let Some(view_cols) = &table_ref.view_columns {
+                    // Check VIEW columns
+                    if view_cols
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                    {
                         found_in.push(name);
                     }
                 } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
