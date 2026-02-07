@@ -1,12 +1,12 @@
 //! Name resolver - resolves table and column references
 
 use sqlparser::ast::{
-    Expr, FunctionArguments, GroupByExpr, ObjectName, Query, Select, SelectItem, SetExpr,
-    Statement, TableFactor, TableWithJoins,
+    Assignment, AssignmentTarget, Delete, Expr, FunctionArguments, GroupByExpr, Ident, Insert,
+    ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Values,
 };
 use std::collections::HashMap;
 
-use crate::error::{Diagnostic, DiagnosticKind};
+use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{Catalog, QualifiedName, TableDef};
 
 /// Resolved table reference in a query
@@ -19,11 +19,23 @@ struct TableRef {
     alias: Option<String>,
 }
 
+/// CTE (Common Table Expression) definition
+#[derive(Debug, Clone)]
+struct CteDefinition {
+    /// CTE name
+    #[allow(dead_code)]
+    name: String,
+    /// Column names inferred from the CTE query
+    columns: Vec<String>,
+}
+
 /// Name resolver for SQL queries
 pub struct NameResolver<'a> {
     catalog: &'a Catalog,
     /// Current scope's table references (alias/name -> TableRef)
     tables: HashMap<String, TableRef>,
+    /// CTEs available in current scope (name -> CteDefinition)
+    ctes: HashMap<String, CteDefinition>,
     /// Collected diagnostics
     diagnostics: Vec<Diagnostic>,
 }
@@ -33,6 +45,7 @@ impl<'a> NameResolver<'a> {
         Self {
             catalog,
             tables: HashMap::new(),
+            ctes: HashMap::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -42,87 +55,267 @@ impl<'a> NameResolver<'a> {
         match stmt {
             Statement::Query(query) => self.resolve_query(query),
             Statement::Insert(insert) => {
-                // Resolve table name
-                let table_name = object_name_to_qualified(&insert.table_name);
-                if !self.catalog.table_exists(&table_name) {
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            DiagnosticKind::TableNotFound,
-                            format!("Table '{}' not found", table_name),
-                        )
-                        .with_help("Check that the table exists in your schema definition"),
-                    );
-                }
-                // TODO: Resolve column names and values
+                self.resolve_insert(insert);
             }
-            Statement::Update { table, .. } => {
-                // Resolve table name
-                let table_name = table_with_joins_to_name(&table.relation);
-                if let Some(name) = table_name {
-                    if !self.catalog.table_exists(&name) {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::TableNotFound,
-                                format!("Table '{}' not found", name),
-                            )
-                            .with_help("Check that the table exists in your schema definition"),
-                        );
-                    }
-                }
-                // TODO: Resolve column names in SET clause
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => {
+                self.resolve_update(table, assignments, selection.as_ref());
             }
             Statement::Delete(delete) => {
-                // Resolve table name from the from clause
-                match &delete.from {
-                    sqlparser::ast::FromTable::WithFromKeyword(tables) => {
-                        if let Some(from_table) = tables.first() {
-                            let table_name = table_with_joins_to_name(&from_table.relation);
-                            if let Some(name) = table_name {
-                                if !self.catalog.table_exists(&name) {
-                                    self.diagnostics.push(
-                                        Diagnostic::error(
-                                            DiagnosticKind::TableNotFound,
-                                            format!("Table '{}' not found", name),
-                                        )
-                                        .with_help(
-                                            "Check that the table exists in your schema definition",
-                                        ),
-                                    );
-                                }
-                            }
-                        }
+                self.resolve_delete(delete);
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve names in an INSERT statement
+    fn resolve_insert(&mut self, insert: &Insert) {
+        let table_name = object_name_to_qualified(&insert.table_name);
+
+        // Check if table exists
+        let table_def = if let Some(def) = self.catalog.get_table(&table_name) {
+            def
+        } else {
+            let table_span = insert
+                .table_name
+                .0
+                .last()
+                .map(|id| Span::from_sqlparser(&id.span));
+            let mut diag = Diagnostic::error(
+                DiagnosticKind::TableNotFound,
+                format!("Table '{}' not found", table_name),
+            )
+            .with_help("Check that the table exists in your schema definition");
+            if let Some(span) = table_span {
+                diag = diag.with_span(span);
+            }
+            self.diagnostics.push(diag);
+            return;
+        };
+
+        // Check if specified columns exist
+        let specified_columns: Vec<&Ident> = insert.columns.iter().collect();
+        for col_ident in &specified_columns {
+            if !table_def.column_exists(&col_ident.value) {
+                let similar = find_similar_column(table_def, &col_ident.value);
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::ColumnNotFound,
+                    format!(
+                        "Column '{}' not found in table '{}'",
+                        col_ident.value, table_name
+                    ),
+                )
+                .with_span(Span::from_sqlparser(&col_ident.span));
+                if let Some(suggestion) = similar {
+                    diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+                }
+                self.diagnostics.push(diag);
+            }
+        }
+
+        // Check column count vs value count
+        if let Some(source) = &insert.source {
+            if let SetExpr::Values(Values { rows, .. }) = source.body.as_ref() {
+                let expected_count = if specified_columns.is_empty() {
+                    table_def.columns.len()
+                } else {
+                    specified_columns.len()
+                };
+
+                for row in rows {
+                    if row.len() != expected_count {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::ColumnCountMismatch,
+                                format!(
+                                    "INSERT has {} value(s) but {} column(s) were specified",
+                                    row.len(),
+                                    expected_count
+                                ),
+                            )
+                            .with_help(if specified_columns.is_empty() {
+                                format!(
+                                    "Table '{}' has {} columns. Specify columns explicitly or provide {} values",
+                                    table_name, expected_count, expected_count
+                                )
+                            } else {
+                                format!("Provide {} value(s) to match the column list", expected_count)
+                            }),
+                        );
                     }
-                    sqlparser::ast::FromTable::WithoutKeyword(tables) => {
-                        if let Some(from_table) = tables.first() {
-                            let table_name = table_with_joins_to_name(&from_table.relation);
-                            if let Some(name) = table_name {
-                                if !self.catalog.table_exists(&name) {
-                                    self.diagnostics.push(
-                                        Diagnostic::error(
-                                            DiagnosticKind::TableNotFound,
-                                            format!("Table '{}' not found", name),
-                                        )
-                                        .with_help(
-                                            "Check that the table exists in your schema definition",
-                                        ),
-                                    );
+
+                    // Resolve expressions in values (for subqueries, etc.)
+                    for expr in row {
+                        self.resolve_expr(expr);
+                    }
+                }
+            } else {
+                // INSERT ... SELECT - resolve the subquery
+                self.resolve_set_expr(&source.body);
+            }
+        }
+    }
+
+    /// Resolve names in an UPDATE statement
+    fn resolve_update(
+        &mut self,
+        table: &TableWithJoins,
+        assignments: &[Assignment],
+        selection: Option<&Expr>,
+    ) {
+        // Resolve and register the table
+        self.resolve_table_with_joins(table);
+
+        // Get table definition for column validation
+        let table_name = table_with_joins_to_name(&table.relation);
+        let table_def = table_name.as_ref().and_then(|n| self.catalog.get_table(n));
+
+        // Resolve SET clause columns
+        for assignment in assignments {
+            match &assignment.target {
+                AssignmentTarget::ColumnName(col_name) => {
+                    // Get the column identifier
+                    if let Some(col_ident) = col_name.0.last() {
+                        if let Some(def) = table_def {
+                            if !def.column_exists(&col_ident.value) {
+                                let similar = find_similar_column(def, &col_ident.value);
+                                let mut diag = Diagnostic::error(
+                                    DiagnosticKind::ColumnNotFound,
+                                    format!(
+                                        "Column '{}' not found in table '{}'",
+                                        col_ident.value,
+                                        table_name
+                                            .as_ref()
+                                            .map(|n| n.to_string())
+                                            .unwrap_or_default()
+                                    ),
+                                )
+                                .with_span(Span::from_sqlparser(&col_ident.span));
+                                if let Some(suggestion) = similar {
+                                    diag =
+                                        diag.with_help(format!("Did you mean '{}'?", suggestion));
                                 }
+                                self.diagnostics.push(diag);
                             }
                         }
                     }
                 }
+                AssignmentTarget::Tuple(_) => {
+                    // Tuple assignment (col1, col2) = (val1, val2) - not commonly used
+                }
             }
-            _ => {}
+
+            // Resolve the value expression
+            self.resolve_expr(&assignment.value);
+        }
+
+        // Resolve WHERE clause
+        if let Some(where_expr) = selection {
+            self.resolve_expr(where_expr);
+        }
+    }
+
+    /// Resolve names in a DELETE statement
+    fn resolve_delete(&mut self, delete: &Delete) {
+        // Get the table from the FROM clause
+        let tables = match &delete.from {
+            sqlparser::ast::FromTable::WithFromKeyword(tables) => tables,
+            sqlparser::ast::FromTable::WithoutKeyword(tables) => tables,
+        };
+
+        // Resolve and register tables from FROM clause
+        for table in tables {
+            self.resolve_table_with_joins(table);
+        }
+
+        // Resolve WHERE clause
+        if let Some(where_expr) = &delete.selection {
+            self.resolve_expr(where_expr);
         }
     }
 
     /// Resolve names in a query
     fn resolve_query(&mut self, query: &Query) {
         // Handle CTEs (WITH clause)
-        // TODO: Handle CTEs properly
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                // Save current table scope
+                let saved_tables = self.tables.clone();
+
+                // Resolve the CTE query first (to validate it) in isolated scope
+                self.resolve_set_expr(&cte.query.body);
+
+                // Extract column names from the CTE
+                let cte_name = cte.alias.name.value.clone();
+                let columns = if !cte.alias.columns.is_empty() {
+                    // Explicit column list: WITH foo (a, b) AS ...
+                    cte.alias
+                        .columns
+                        .iter()
+                        .map(|c| c.name.value.clone())
+                        .collect()
+                } else {
+                    // Infer from SELECT projection
+                    self.infer_cte_columns(&cte.query.body)
+                };
+
+                // Restore table scope (CTEs shouldn't pollute outer scope with their internal tables)
+                self.tables = saved_tables;
+
+                // Register the CTE
+                self.ctes.insert(
+                    cte_name.clone(),
+                    CteDefinition {
+                        name: cte_name,
+                        columns,
+                    },
+                );
+            }
+        }
 
         // Resolve the main query body
         self.resolve_set_expr(&query.body);
+    }
+
+    /// Infer column names from a SELECT body
+    fn infer_cte_columns(&self, set_expr: &SetExpr) -> Vec<String> {
+        let mut columns = Vec::new();
+
+        if let SetExpr::Select(select) = set_expr {
+            for (idx, item) in select.projection.iter().enumerate() {
+                match item {
+                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                        columns.push(ident.value.clone());
+                    }
+                    SelectItem::ExprWithAlias { alias, .. } => {
+                        columns.push(alias.value.clone());
+                    }
+                    SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) => {
+                        // table.column -> use column name
+                        if let Some(col) = idents.last() {
+                            columns.push(col.value.clone());
+                        }
+                    }
+                    SelectItem::Wildcard(_) => {
+                        // Can't infer columns from * - would need to expand
+                        // For now, skip validation of CTE columns when * is used
+                    }
+                    SelectItem::QualifiedWildcard(_, _) => {
+                        // table.* - can't infer easily
+                    }
+                    _ => {
+                        // Other expressions - generate a name
+                        columns.push(format!("?column?{}", idx + 1));
+                    }
+                }
+            }
+        }
+
+        columns
     }
 
     /// Resolve names in a set expression (SELECT, UNION, etc.)
@@ -177,7 +370,35 @@ impl<'a> NameResolver<'a> {
 
         for join in &table.joins {
             self.resolve_table_factor(&join.relation);
-            // TODO: Resolve join condition
+            // Resolve join condition
+            self.resolve_join_condition(&join.join_operator);
+        }
+    }
+
+    /// Resolve JOIN condition (ON clause)
+    fn resolve_join_condition(&mut self, join_op: &sqlparser::ast::JoinOperator) {
+        use sqlparser::ast::JoinConstraint;
+        use sqlparser::ast::JoinOperator::*;
+
+        let constraint = match join_op {
+            Inner(c) | LeftOuter(c) | RightOuter(c) | FullOuter(c) | LeftSemi(c) | RightSemi(c)
+            | LeftAnti(c) | RightAnti(c) => Some(c),
+            CrossJoin | CrossApply | OuterApply | AsOf { .. } | Anti(_) | Semi(_) => None,
+        };
+
+        if let Some(constraint) = constraint {
+            match constraint {
+                JoinConstraint::On(expr) => {
+                    self.resolve_expr(expr);
+                }
+                JoinConstraint::Using(columns) => {
+                    // For USING clause, check that columns exist in both tables
+                    for col in columns {
+                        self.resolve_column(None, col);
+                    }
+                }
+                JoinConstraint::Natural | JoinConstraint::None => {}
+            }
         }
     }
 
@@ -187,15 +408,22 @@ impl<'a> NameResolver<'a> {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = object_name_to_qualified(name);
 
-                // Check if table exists
-                if !self.catalog.table_exists(&table_name) {
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            DiagnosticKind::TableNotFound,
-                            format!("Table '{}' not found", table_name),
-                        )
-                        .with_help("Check that the table exists in your schema definition"),
-                    );
+                // Check if it's a CTE first
+                let is_cte = self.ctes.contains_key(&table_name.name);
+
+                // Check if table exists (in catalog or as CTE)
+                if !is_cte && !self.catalog.table_exists(&table_name) {
+                    // Get span from the last identifier (table name)
+                    let table_span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
+                    let mut diag = Diagnostic::error(
+                        DiagnosticKind::TableNotFound,
+                        format!("Table '{}' not found", table_name),
+                    )
+                    .with_help("Check that the table exists in your schema definition");
+                    if let Some(span) = table_span {
+                        diag = diag.with_span(span);
+                    }
+                    self.diagnostics.push(diag);
                     return;
                 }
 
@@ -236,12 +464,18 @@ impl<'a> NameResolver<'a> {
             SelectItem::ExprWithAlias { expr, .. } => self.resolve_expr(expr),
             SelectItem::QualifiedWildcard(name, _) => {
                 // table.*
-                let table_name = name.0.first().map(|i| i.value.as_str()).unwrap_or("");
-                if !self.tables.contains_key(table_name) {
-                    self.diagnostics.push(Diagnostic::error(
-                        DiagnosticKind::TableNotFound,
-                        format!("Table or alias '{}' not found in FROM clause", table_name),
-                    ));
+                if let Some(first_ident) = name.0.first() {
+                    let table_name = &first_ident.value;
+                    if !self.tables.contains_key(table_name.as_str()) {
+                        let table_span = Span::from_sqlparser(&first_ident.span);
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::TableNotFound,
+                                format!("Table or alias '{}' not found in FROM clause", table_name),
+                            )
+                            .with_span(table_span),
+                        );
+                    }
                 }
             }
             SelectItem::Wildcard(_) => {
@@ -261,16 +495,16 @@ impl<'a> NameResolver<'a> {
         match expr {
             Expr::Identifier(ident) => {
                 // Simple column name - must exist in one of the tables
-                self.resolve_column(None, &ident.value);
+                self.resolve_column(None, ident);
             }
             Expr::CompoundIdentifier(idents) => {
                 // table.column or schema.table.column
                 match idents.as_slice() {
                     [table, column] => {
-                        self.resolve_column(Some(&table.value), &column.value);
+                        self.resolve_column(Some(table), column);
                     }
                     [_schema, table, column] => {
-                        self.resolve_column(Some(&table.value), &column.value);
+                        self.resolve_column(Some(table), column);
                     }
                     _ => {}
                 }
@@ -347,11 +581,30 @@ impl<'a> NameResolver<'a> {
     }
 
     /// Resolve a column reference
-    fn resolve_column(&mut self, table_alias: Option<&str>, column_name: &str) {
-        if let Some(alias) = table_alias {
+    fn resolve_column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
+        let column_name = &column_ident.value;
+        let column_span = Span::from_sqlparser(&column_ident.span);
+
+        if let Some(table_id) = table_ident {
+            let table_alias = &table_id.value;
             // Qualified column reference (table.column)
-            if let Some(table_ref) = self.tables.get(alias) {
-                if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
+            if let Some(table_ref) = self.tables.get(table_alias) {
+                // Check if it's a CTE first
+                if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+                    // Validate against CTE columns
+                    if !cte.columns.contains(column_name) {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::ColumnNotFound,
+                                format!(
+                                    "Column '{}' not found in CTE '{}'",
+                                    column_name, table_ref.table
+                                ),
+                            )
+                            .with_span(column_span),
+                        );
+                    }
+                } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
                     if !table_def.column_exists(column_name) {
                         let similar = find_similar_column(table_def, column_name);
                         let mut diag = Diagnostic::error(
@@ -360,7 +613,8 @@ impl<'a> NameResolver<'a> {
                                 "Column '{}' not found in table '{}'",
                                 column_name, table_ref.table
                             ),
-                        );
+                        )
+                        .with_span(column_span);
                         if let Some(suggestion) = similar {
                             diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
                         }
@@ -368,17 +622,26 @@ impl<'a> NameResolver<'a> {
                     }
                 }
             } else {
-                self.diagnostics.push(Diagnostic::error(
-                    DiagnosticKind::TableNotFound,
-                    format!("Table or alias '{}' not found in FROM clause", alias),
-                ));
+                let table_span = Span::from_sqlparser(&table_id.span);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::TableNotFound,
+                        format!("Table or alias '{}' not found in FROM clause", table_alias),
+                    )
+                    .with_span(table_span),
+                );
             }
         } else {
             // Unqualified column reference - search all tables in scope
             let mut found_in: Vec<&str> = Vec::new();
 
             for (name, table_ref) in &self.tables {
-                if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
+                // Check CTE first
+                if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+                    if cte.columns.contains(column_name) {
+                        found_in.push(name);
+                    }
+                } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
                     if table_def.column_exists(column_name) {
                         found_in.push(name);
                     }
@@ -400,7 +663,8 @@ impl<'a> NameResolver<'a> {
                     let mut diag = Diagnostic::error(
                         DiagnosticKind::ColumnNotFound,
                         format!("Column '{}' not found", column_name),
-                    );
+                    )
+                    .with_span(column_span);
                     if !suggestions.is_empty() {
                         diag = diag.with_help(format!("Did you mean '{}'?", suggestions[0]));
                     }
@@ -420,6 +684,7 @@ impl<'a> NameResolver<'a> {
                                 found_in.join(", ")
                             ),
                         )
+                        .with_span(column_span)
                         .with_help(format!(
                             "Qualify the column with a table name: {}.{}",
                             found_in[0], column_name
