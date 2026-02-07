@@ -66,11 +66,8 @@ fn run(args: Args) -> Result<bool> {
             let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &disable);
 
             // Get schema files from config or CLI
-            let mut schema_files: Vec<std::path::PathBuf> = config
-                .schema
-                .iter()
-                .map(|s| std::path::PathBuf::from(s))
-                .collect();
+            let mut schema_files: Vec<std::path::PathBuf> =
+                config.schema.iter().map(std::path::PathBuf::from).collect();
 
             if let Some(dir) = &config.schema_dir {
                 let pattern = format!("{}/**/*.sql", dir);
@@ -99,7 +96,8 @@ fn run(args: Args) -> Result<bool> {
             for schema_file in &schema_files {
                 let content = fs::read_to_string(schema_file).into_diagnostic()?;
                 if let Err(diags) = builder.parse(&content) {
-                    let formatter = OutputFormatter::new(output_format, schema_file.display().to_string());
+                    let formatter =
+                        OutputFormatter::new(output_format, schema_file.display().to_string());
                     formatter.print_diagnostics(&diags, &content);
                     return Ok(true);
                 }
@@ -116,7 +114,7 @@ fn run(args: Args) -> Result<bool> {
             // Collect query files from config or CLI
             let mut query_files = Vec::new();
             let file_patterns: Vec<std::path::PathBuf> = if !config.files.is_empty() {
-                config.files.iter().map(|s| std::path::PathBuf::from(s)).collect()
+                config.files.iter().map(std::path::PathBuf::from).collect()
             } else {
                 vec![]
             };
@@ -142,7 +140,8 @@ fn run(args: Args) -> Result<bool> {
             let mut analyzer = Analyzer::new(&catalog);
 
             // Get disabled rules
-            let disabled_rules: std::collections::HashSet<String> = config.disable.iter().cloned().collect();
+            let disabled_rules: std::collections::HashSet<String> =
+                config.disable.iter().cloned().collect();
 
             for query_file in &query_files {
                 let content = fs::read_to_string(query_file).into_diagnostic()?;
@@ -155,7 +154,8 @@ fn run(args: Args) -> Result<bool> {
                     .collect();
 
                 if !filtered_diagnostics.is_empty() {
-                    let formatter = OutputFormatter::new(output_format, query_file.display().to_string());
+                    let formatter =
+                        OutputFormatter::new(output_format, query_file.display().to_string());
                     formatter.print_diagnostics(&filtered_diagnostics, &content);
 
                     for diag in &filtered_diagnostics {

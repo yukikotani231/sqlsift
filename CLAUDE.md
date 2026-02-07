@@ -35,7 +35,7 @@ sqlsurge/
 
 1. **SchemaBuilder** (`schema/builder.rs`): Parses CREATE TABLE statements using sqlparser-rs and builds a `Catalog`
 2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints)
-3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (28 comprehensive tests)
+3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (35 comprehensive tests)
 4. **NameResolver** (`analyzer/resolver.rs`): Resolves table and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
@@ -118,7 +118,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Unit tests are colocated with modules (`#[cfg(test)] mod tests`)
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage: 28 tests covering SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries
+- Comprehensive test coverage: 35 tests covering SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines

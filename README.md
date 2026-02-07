@@ -1,12 +1,14 @@
 # sqlsurge
 
 [![CI](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/sqlsurge.svg)](https://crates.io/crates/sqlsurge)
+[![Crates.io](https://img.shields.io/crates/v/sqlsurge-cli.svg)](https://crates.io/crates/sqlsurge-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **SQL static analyzer that validates queries against schema definitions — no database connection required.**
 
 sqlsurge parses your schema DDL files and validates SQL queries at build time, catching errors like missing tables, unknown columns, and typos before they reach production.
+
+> **Note:** sqlsurge is in early development (alpha). APIs and diagnostics may change between versions. Feedback and contributions are welcome!
 
 ## Features
 
@@ -38,7 +40,7 @@ cargo install sqlsurge-cli
 
 ### From GitHub Releases
 
-Download the latest binary from [Releases](https://github.com/yukikotani/sqlsurge/releases).
+Download the latest binary from [Releases](https://github.com/yukikotani231/sqlsurge/releases).
 
 ## Quick Start
 
@@ -132,16 +134,19 @@ sqlsurge check --schema schema/*.sql queries/**/*.sql
 sqlsurge check [OPTIONS] <FILES>...
 
 Arguments:
-  <FILES>...              SQL files to validate (supports glob patterns)
+  <FILES>...                SQL files to validate (supports glob patterns)
 
 Options:
-  -s, --schema <FILE>     Schema definition file (can be specified multiple times)
-      --schema-dir <DIR>  Directory containing schema files
-  -d, --dialect <NAME>    SQL dialect [default: postgresql]
-  -f, --format <FORMAT>   Output format: human, json, sarif [default: human]
-  -v, --verbose           Enable verbose output
-  -q, --quiet             Suppress non-error output
-  -h, --help              Print help
+  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
+      --schema-dir <DIR>    Directory containing schema files
+  -c, --config <FILE>       Path to configuration file [default: sqlsurge.toml]
+      --disable <RULE>      Disable specific rules (e.g., E0001, E0002)
+  -d, --dialect <NAME>      SQL dialect [default: postgresql]
+  -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
+      --max-errors <N>      Maximum number of errors before stopping [default: 100]
+  -v, --verbose             Enable verbose output
+  -q, --quiet               Suppress non-error output
+  -h, --help                Print help
 ```
 
 ## Output Formats
@@ -178,7 +183,7 @@ sqlsurge check -s schema.sql -f sarif queries/*.sql > results.sarif
 
 ## Roadmap
 
-- [ ] Configuration file (`sqlsurge.toml`)
+- [x] Configuration file (`sqlsurge.toml`)
 - [ ] LSP server for editor integration
 - [ ] MySQL and SQLite dialect support
 - [ ] Type inference for expressions

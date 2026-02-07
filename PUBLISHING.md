@@ -73,7 +73,11 @@ This document describes how to publish sqlsurge to crates.io and npm.
 
 ## Publishing to npm
 
-See `npm/README.md` for npm publishing instructions.
+npm publishing is handled automatically by cargo-dist.
+When a version tag (e.g., `v0.1.0`) is pushed, the GitHub Actions release workflow
+builds platform-specific binaries and publishes the npm package (`sqlsurge-cli`).
+
+**Prerequisite:** Set `NPM_TOKEN` in GitHub repository secrets.
 
 ## Post-publish
 
