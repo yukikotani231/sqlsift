@@ -18,7 +18,19 @@ sqlsurge parses your schema DDL files and validates SQL queries at build time, c
 
 ## Installation
 
-### From source
+### via npm (Recommended)
+
+```bash
+npm install -g sqlsurge-cli
+```
+
+Or use directly with `npx`:
+
+```bash
+npx sqlsurge-cli check --schema schema.sql query.sql
+```
+
+### via Cargo
 
 ```bash
 cargo install sqlsurge-cli
