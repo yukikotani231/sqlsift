@@ -1,0 +1,22 @@
+# sqlsurge configuration file
+# Place this file in your project root
+
+# Schema definition files (supports glob patterns)
+schema = [
+    "tests/fixtures/schema.sql",
+]
+
+# Query files to check (supports glob patterns)
+# files = [
+#     "app/queries/**/*.sql",
+#     "db/queries/**/*.sql",
+# ]
+
+# Or use schema directory to automatically include all .sql files
+# schema_dir = "db/schema"
+
+# Output format: "human", "json", or "sarif"
+# format = "human"
+
+# Disable specific error codes
+# disable = ["E0001", "E0002"]
