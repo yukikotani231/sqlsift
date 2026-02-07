@@ -3,7 +3,12 @@ name = "sqlsurge-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "CLI tool for SQL static analysis against schema definitions"
+keywords = ["sql", "static-analysis", "linter", "cli", "postgresql"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
 
 [[bin]]
 name = "sqlsurge"

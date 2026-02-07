@@ -3,7 +3,12 @@ name = "sqlsurge-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Core library for SQL static analysis against schema definitions"
+keywords = ["sql", "static-analysis", "linter", "validation", "postgresql"]
+categories = ["development-tools", "database"]
+readme = "../../README.md"
 
 [dependencies]
 sqlparser.workspace = true
