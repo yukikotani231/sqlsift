@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-02-08
+
+### Added
+- **Derived table (subquery in FROM) support**: Resolve aliases and validate column references for `FROM (SELECT ...) AS sub`
+- **LATERAL vs non-LATERAL scope isolation**: Non-LATERAL subqueries correctly cannot see outer FROM tables
+- **UPDATE ... FROM / DELETE ... USING**: PostgreSQL-specific multi-table update/delete syntax
+- **Recursive CTE support**: CTEs can reference themselves in recursive queries
+- **Table-valued functions in FROM**: `generate_series()`, `unnest()` etc. recognized as table sources
+- **UNION/INTERSECT/EXCEPT column inference**: Infer output columns from set operations for CTE/derived table validation
+- **Comprehensive expression resolution**: AtTimeZone, Collate, Ceil/Floor, Overlay, IsDistinctFrom, IsUnknown, SimilarTo, Tuple, Array, Subscript, Method, GroupingSets/Cube/Rollup
+- **Function FILTER/OVER clause resolution**: Validate column references in `COUNT(*) FILTER (WHERE ...)` and `OVER (PARTITION BY ... ORDER BY ...)`
+- **ORDER BY column resolution**: Validate ORDER BY references including SELECT alias support
+- **Named function argument resolution**: Handle `func(name => value)` syntax
+- 72 PostgreSQL pattern test fixtures (basic, advanced, and expression coverage)
+
+### Fixed
+- WHERE subquery scope leak: subqueries in IN/EXISTS no longer pollute outer table scope
+- VALUES derived table column aliases now correctly applied
+- Empty derived_columns (table-valued functions) no longer cause false column-not-found errors
+
 ## [0.1.0-alpha.3] - 2026-02-08
 
 ### Added
@@ -71,7 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No support for VIEWs, functions, or stored procedures
 - Derived table (subquery in FROM) column resolution is incomplete
 
-[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/yukikotani231/sqlsurge/releases/tag/v0.1.0-alpha.1
