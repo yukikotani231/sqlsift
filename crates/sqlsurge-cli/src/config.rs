@@ -15,6 +15,10 @@ pub struct Config {
     #[serde(default)]
     pub files: Vec<String>,
 
+    /// SQL dialect (currently only "postgresql" is supported)
+    #[serde(default)]
+    pub dialect: Option<String>,
+
     /// Output format (human, json, sarif)
     #[serde(default)]
     pub format: Option<String>,

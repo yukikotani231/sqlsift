@@ -4,15 +4,14 @@ use sqlparser::dialect::{Dialect, PostgreSqlDialect};
 use std::str::FromStr;
 
 /// Supported SQL dialects
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqlDialect {
     #[default]
     PostgreSQL,
-    // Future: MySQL, SQLite, etc.
 }
 
 impl SqlDialect {
-    /// Get the sqlparser dialect
+    /// Get the sqlparser dialect for parsing
     pub fn parser_dialect(&self) -> Box<dyn Dialect> {
         match self {
             SqlDialect::PostgreSQL => Box::new(PostgreSqlDialect {}),
@@ -33,7 +32,18 @@ impl FromStr for SqlDialect {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "postgresql" | "postgres" | "pg" => Ok(SqlDialect::PostgreSQL),
-            _ => Err(format!("Unknown dialect: {}", s)),
+            "mysql" => Err(
+                "MySQL dialect is not yet supported. Currently only PostgreSQL is supported."
+                    .to_string(),
+            ),
+            "sqlite" => Err(
+                "SQLite dialect is not yet supported. Currently only PostgreSQL is supported."
+                    .to_string(),
+            ),
+            _ => Err(format!(
+                "Unknown dialect: '{}'. Currently only PostgreSQL is supported.",
+                s
+            )),
         }
     }
 }

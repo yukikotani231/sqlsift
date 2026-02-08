@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
 use sqlsurge_core::schema::SchemaBuilder;
-use sqlsurge_core::Analyzer;
+use sqlsurge_core::{Analyzer, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
 use crate::config::Config;
@@ -50,9 +50,12 @@ fn run(args: Args) -> Result<bool> {
             schema_dir,
             config: config_path,
             disable,
+            dialect,
             format,
             ..
         } => {
+            // Parse and validate dialect
+            let dialect: SqlDialect = dialect.parse().map_err(|e: String| miette::miette!(e))?;
             // Load configuration
             let config = if let Some(path) = config_path {
                 // Load from specified path
@@ -92,7 +95,7 @@ fn run(args: Args) -> Result<bool> {
             };
 
             // Build schema catalog
-            let mut builder = SchemaBuilder::new();
+            let mut builder = SchemaBuilder::with_dialect(dialect);
             for schema_file in &schema_files {
                 let content = fs::read_to_string(schema_file).into_diagnostic()?;
                 if let Err(diags) = builder.parse(&content) {
@@ -137,7 +140,7 @@ fn run(args: Args) -> Result<bool> {
             // Analyze each query file
             let mut total_errors = 0;
             let mut total_warnings = 0;
-            let mut analyzer = Analyzer::new(&catalog);
+            let mut analyzer = Analyzer::with_dialect(&catalog, dialect);
 
             // Get disabled rules
             let disabled_rules: std::collections::HashSet<String> =
@@ -218,11 +221,10 @@ fn run(args: Args) -> Result<bool> {
             // Parse and display AST (for debugging)
             let content = fs::read_to_string(&file).into_diagnostic()?;
 
-            use sqlparser::dialect::PostgreSqlDialect;
             use sqlparser::parser::Parser;
 
-            let dialect = PostgreSqlDialect {};
-            match Parser::parse_sql(&dialect, &content) {
+            let dialect = SqlDialect::default().parser_dialect();
+            match Parser::parse_sql(dialect.as_ref(), &content) {
                 Ok(statements) => {
                     for (i, stmt) in statements.iter().enumerate() {
                         println!("Statement {}:", i + 1);

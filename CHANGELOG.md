@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-02-08
+
+### Added
+- **`--dialect` flag wired up**: CLI `--dialect` option now correctly configures the SQL parser dialect (previously ignored)
+- **Real-world schema test fixtures**: Chinook, Pagila, Northwind schemas with comprehensive valid/invalid query tests covering SELECT, JOIN, INSERT, UPDATE, DELETE, subqueries, and CTEs
+- Third-party license file for test fixtures
+
+### Fixed
+- `--dialect` CLI flag was completely ignored; PostgreSQL dialect was hardcoded throughout
+- ALTER TABLE warnings for non-schema-affecting operations (e.g., `OWNER TO`) are now suppressed
+
 ## [0.1.0-alpha.2] - 2026-02-08
 
 ### Added
@@ -60,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No support for VIEWs, functions, or stored procedures
 - Derived table (subquery in FROM) column resolution is incomplete
 
-[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/yukikotani231/sqlsurge/releases/tag/v0.1.0-alpha.1

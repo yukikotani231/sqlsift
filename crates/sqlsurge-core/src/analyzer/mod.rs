@@ -2,9 +2,9 @@
 
 mod resolver;
 
-use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
+use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::Catalog;
 
@@ -14,6 +14,7 @@ pub use resolver::NameResolver;
 pub struct Analyzer<'a> {
     catalog: &'a Catalog,
     diagnostics: Vec<Diagnostic>,
+    dialect: SqlDialect,
 }
 
 impl<'a> Analyzer<'a> {
@@ -21,6 +22,15 @@ impl<'a> Analyzer<'a> {
         Self {
             catalog,
             diagnostics: Vec::new(),
+            dialect: SqlDialect::default(),
+        }
+    }
+
+    pub fn with_dialect(catalog: &'a Catalog, dialect: SqlDialect) -> Self {
+        Self {
+            catalog,
+            diagnostics: Vec::new(),
+            dialect,
         }
     }
 
@@ -29,8 +39,8 @@ impl<'a> Analyzer<'a> {
         self.diagnostics.clear();
 
         // Parse the SQL
-        let dialect = PostgreSqlDialect {};
-        let statements = match Parser::parse_sql(&dialect, sql) {
+        let dialect = self.dialect.parser_dialect();
+        let statements = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(stmts) => stmts,
             Err(e) => {
                 self.diagnostics.push(

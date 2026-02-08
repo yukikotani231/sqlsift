@@ -10,6 +10,7 @@ pub mod schema;
 pub mod types;
 
 pub use analyzer::Analyzer;
+pub use dialect::SqlDialect;
 pub use error::{Diagnostic, DiagnosticKind, Severity, Span};
 pub use schema::{Catalog, ColumnDef, QualifiedName, Schema, TableDef};
 pub use types::SqlType;

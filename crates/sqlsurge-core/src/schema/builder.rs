@@ -4,9 +4,9 @@ use sqlparser::ast::{
     AlterTableOperation, ColumnOption, ColumnOptionDef, ObjectName, Statement, TableConstraint,
     UserDefinedTypeRepresentation,
 };
-use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
+use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind};
 use crate::schema::{
     Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
@@ -18,6 +18,7 @@ use crate::types::SqlType;
 pub struct SchemaBuilder {
     catalog: Catalog,
     diagnostics: Vec<Diagnostic>,
+    dialect: SqlDialect,
 }
 
 impl SchemaBuilder {
@@ -25,15 +26,24 @@ impl SchemaBuilder {
         Self {
             catalog: Catalog::new(),
             diagnostics: Vec::new(),
+            dialect: SqlDialect::default(),
+        }
+    }
+
+    pub fn with_dialect(dialect: SqlDialect) -> Self {
+        Self {
+            catalog: Catalog::new(),
+            diagnostics: Vec::new(),
+            dialect,
         }
     }
 
     /// Parse SQL schema definitions and build the catalog
     pub fn parse(&mut self, sql: &str) -> Result<(), Vec<Diagnostic>> {
-        let dialect = PostgreSqlDialect {};
+        let dialect = self.dialect.parser_dialect();
 
         // Try parsing the entire SQL first (fast path)
-        match Parser::parse_sql(&dialect, sql) {
+        match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
                 for stmt in statements {
                     self.process_statement(&stmt);
@@ -61,7 +71,7 @@ impl SchemaBuilder {
     /// (e.g., CREATE FUNCTION, CREATE TRIGGER, CREATE DOMAIN) by gracefully
     /// skipping unparseable statements while still processing the rest.
     fn parse_statements_individually(&mut self, sql: &str) {
-        let dialect = PostgreSqlDialect {};
+        let dialect = self.dialect.parser_dialect();
 
         for raw_stmt in split_sql_statements(sql) {
             let trimmed = raw_stmt.trim();
@@ -69,7 +79,7 @@ impl SchemaBuilder {
                 continue;
             }
 
-            match Parser::parse_sql(&dialect, trimmed) {
+            match Parser::parse_sql(dialect.as_ref(), trimmed) {
                 Ok(stmts) => {
                     for stmt in stmts {
                         self.process_statement(&stmt);
@@ -234,6 +244,24 @@ impl SchemaBuilder {
 
     /// Process ALTER TABLE statement
     fn process_alter_table(&mut self, name: &ObjectName, operations: &[AlterTableOperation]) {
+        // Skip ALTER TABLE if it contains no schema-affecting operations.
+        // Operations like OWNER TO, ENABLE/DISABLE TRIGGER, etc. don't affect
+        // the schema catalog and should not produce warnings.
+        let has_schema_operations = operations.iter().any(|op| {
+            matches!(
+                op,
+                AlterTableOperation::AddColumn { .. }
+                    | AlterTableOperation::DropColumn { .. }
+                    | AlterTableOperation::RenameColumn { .. }
+                    | AlterTableOperation::RenameTable { .. }
+                    | AlterTableOperation::AddConstraint(_)
+            )
+        });
+
+        if !has_schema_operations {
+            return;
+        }
+
         let table_name = object_name_to_qualified(name);
 
         // Check if table exists
