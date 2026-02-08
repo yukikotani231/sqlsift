@@ -47,7 +47,9 @@ impl Catalog {
                 },
             );
         }
-        self.schemas.get_mut(name).unwrap()
+        self.schemas
+            .get_mut(name)
+            .expect("schema was just inserted")
     }
 
     /// Add a table to the catalog

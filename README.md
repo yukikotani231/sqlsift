@@ -118,15 +118,32 @@ sqlsurge check --schema schema/*.sql queries/**/*.sql
 
 ## Diagnostic Rules
 
-| Code | Name | Description |
-|------|------|-------------|
-| E0001 | table-not-found | Referenced table does not exist in schema |
-| E0002 | column-not-found | Referenced column does not exist in table |
-| E0003 | type-mismatch | Type incompatibility in expressions |
-| E0004 | potential-null-violation | Possible NOT NULL constraint violation |
-| E0005 | column-count-mismatch | INSERT column count doesn't match values |
-| E0006 | ambiguous-column | Column reference is ambiguous across tables |
-| E0007 | join-type-mismatch | JOIN condition compares incompatible types |
+| Code | Name | Description | Status |
+|------|------|-------------|--------|
+| E0001 | table-not-found | Referenced table does not exist in schema | ✅ Implemented |
+| E0002 | column-not-found | Referenced column does not exist in table | ✅ Implemented |
+| E0003 | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic) | ✅ Implemented |
+| E0004 | potential-null-violation | Possible NOT NULL constraint violation | 🚧 Reserved |
+| E0005 | column-count-mismatch | INSERT column count doesn't match values | ✅ Implemented |
+| E0006 | ambiguous-column | Column reference is ambiguous across tables | ✅ Implemented |
+| E0007 | join-type-mismatch | JOIN condition compares incompatible types | ✅ Implemented |
+
+### Type Inference Coverage (E0003, E0007)
+
+**Currently Detected:**
+- ✅ WHERE clause comparisons (`WHERE id = 'text'`)
+- ✅ Arithmetic operations (`SELECT name + 10`)
+- ✅ JOIN conditions (`ON users.id = orders.user_name`)
+- ✅ Nested expressions (`WHERE (a + b) * 2 = 'text'`)
+- ✅ All comparison operators (=, !=, <, >, <=, >=)
+- ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
+
+**Not Yet Detected:**
+- ⏳ INSERT/UPDATE value type mismatches
+- ⏳ CAST expression type inference
+- ⏳ Function return types (COUNT, SUM, AVG, etc.)
+- ⏳ CASE expression type consistency
+- ⏳ Subquery/CTE column type inference
 
 ## CLI Reference
 
@@ -209,12 +226,19 @@ Use the `--dialect` flag to specify the dialect.
 
 ## Roadmap
 
+### Completed
 - [x] Configuration file (`sqlsurge.toml`)
 - [x] MySQL dialect support
+- [x] Type inference for expressions (WHERE, JOIN, arithmetic)
+
+### In Progress
+- [ ] Complete type inference coverage (INSERT/UPDATE values, CAST, functions)
+
+### Planned
 - [ ] LSP server for editor integration
 - [ ] SQLite dialect support
-- [ ] Type inference for expressions
 - [ ] Custom rule plugins
+- [ ] Type inference for subqueries and CTEs
 
 ## Contributing
 

@@ -135,10 +135,35 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Current Limitations
 
-- SQLite dialect is not yet supported
-- Type checking is basic (existence only, not full type inference)
-- Functions and stored procedures are skipped (not analyzed)
+### SQL Dialect Support
+- SQLite dialect is not yet supported (PostgreSQL and MySQL are supported)
 - Schema-qualified names (e.g., `public.users`) are not fully resolved
+
+### Type Inference (Partial Implementation)
+**Implemented (E0003, E0007):**
+- WHERE clause type checking (comparisons, arithmetic)
+- JOIN condition type checking
+- Binary operator type validation (=, <, >, <=, >=, !=, +, -, *, /, %)
+- Nested expression type inference
+- Numeric type compatibility (TINYINT → BIGINT implicit casts)
+
+**Not Yet Implemented (TODO):**
+- INSERT VALUES type checking (`INSERT INTO users (id) VALUES ('text')`)
+- UPDATE SET type checking (`UPDATE users SET id = 'text'`)
+- CAST expression type inference (`CAST(x AS INTEGER)`)
+- Function return type inference (COUNT → INTEGER, SUM → NUMERIC, etc.)
+- CASE expression type consistency (THEN/ELSE must have compatible types)
+- Subquery/CTE column type inference
+- VIEW column type inference from SELECT projection
+
+**Implementation Notes:**
+- Current type inference covers ~70-80% of real-world type errors
+- Missing features have lower ROI (INSERT/UPDATE would add ~15%, rest combined ~5%)
+- See `crates/sqlsurge-core/src/analyzer/type_resolver.rs` for implementation
+
+### Other Limitations
+- Functions and stored procedures are skipped (not analyzed)
+- UNION/INTERSECT/EXCEPT column count validation not implemented
 
 ## Supported Features
 
@@ -165,15 +190,21 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ Configuration file (sqlsurge.toml)
 - ✅ Rule disabling (--disable flag)
 - ✅ Multiple output formats (human, JSON, SARIF)
+- ✅ Type inference for expressions (WHERE, JOIN, binary operators, nested expressions)
+  - Detects type mismatches in comparisons (E0003)
+  - Detects JOIN condition type incompatibilities (E0007)
+  - Supports numeric type compatibility (implicit casts)
+  - See "Current Limitations" for partial implementation scope
 
 ## Error Codes
 
 - **E0001**: Table not found
 - **E0002**: Column not found
-- **E0003**: Parse error
-- **E0004**: Ambiguous table reference
+- **E0003**: Type mismatch (comparisons, arithmetic operations)
+- **E0004**: Potential NULL violation (reserved, not yet implemented)
 - **E0005**: Column count mismatch in INSERT
 - **E0006**: Ambiguous column reference
+- **E0007**: JOIN type mismatch (JOIN condition type incompatibility)
 - **E1000**: Generic parse error
 
 ## Release Process
