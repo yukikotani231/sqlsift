@@ -40,6 +40,8 @@ pub struct NameResolver<'a> {
     tables: HashMap<String, TableRef>,
     /// CTEs available in current scope (name -> CteDefinition)
     ctes: HashMap<String, CteDefinition>,
+    /// SELECT aliases visible in ORDER BY (set before resolving ORDER BY)
+    select_aliases: Vec<String>,
     /// Collected diagnostics
     diagnostics: Vec<Diagnostic>,
 }
@@ -49,6 +51,7 @@ impl<'a> NameResolver<'a> {
         Self {
             catalog,
             tables: HashMap::new(),
+            select_aliases: Vec::new(),
             ctes: HashMap::new(),
             diagnostics: Vec::new(),
         }
@@ -310,6 +313,37 @@ impl<'a> NameResolver<'a> {
 
         // Resolve the main query body
         self.resolve_set_expr(&query.body);
+
+        // Resolve ORDER BY clause (with SELECT aliases in scope)
+        if let Some(order_by) = &query.order_by {
+            // Collect SELECT aliases so ORDER BY can reference them
+            let saved_aliases = std::mem::take(&mut self.select_aliases);
+            self.select_aliases = self.collect_select_aliases(&query.body);
+            for ob in &order_by.exprs {
+                self.resolve_expr(&ob.expr);
+            }
+            self.select_aliases = saved_aliases;
+        }
+    }
+
+    /// Collect aliases from SELECT projection for use in ORDER BY resolution
+    fn collect_select_aliases(&self, set_expr: &SetExpr) -> Vec<String> {
+        let mut aliases = Vec::new();
+        if let SetExpr::Select(select) = set_expr {
+            for item in &select.projection {
+                match item {
+                    SelectItem::ExprWithAlias { alias, .. } => {
+                        aliases.push(alias.value.clone());
+                    }
+                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                        // Column name also acts as implicit alias
+                        aliases.push(ident.value.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        aliases
     }
 
     /// Infer column names from a SELECT body
@@ -991,6 +1025,15 @@ impl<'a> NameResolver<'a> {
 
             match found_in.len() {
                 0 => {
+                    // Check if it's a SELECT alias (valid in ORDER BY)
+                    if self
+                        .select_aliases
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(column_name))
+                    {
+                        return;
+                    }
+
                     // Column not found in any table
                     let mut suggestions = Vec::new();
                     for table_ref in self.tables.values() {
