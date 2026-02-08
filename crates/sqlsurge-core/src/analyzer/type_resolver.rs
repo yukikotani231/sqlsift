@@ -388,6 +388,59 @@ impl<'a> TypeResolver<'a> {
                     ExpressionType::Unknown
                 }
             }
+            Expr::Nested(inner) => {
+                // Recursively infer type of nested expression
+                self.infer_expr_type(inner)
+            }
+            Expr::BinaryOp { left, op, right } => {
+                // Infer result type of binary operation
+                self.infer_binary_op_result_type(left, op, right)
+            }
+            _ => ExpressionType::Unknown,
+        }
+    }
+
+    /// Infer the result type of a binary operation
+    fn infer_binary_op_result_type(
+        &mut self,
+        left: &Expr,
+        op: &BinaryOperator,
+        right: &Expr,
+    ) -> ExpressionType {
+        let left_type = self.infer_expr_type(left);
+        let right_type = self.infer_expr_type(right);
+
+        match (left_type, right_type) {
+            (ExpressionType::Known(lt), ExpressionType::Known(rt)) => {
+                match op {
+                    // Arithmetic operators return numeric type
+                    BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo => {
+                        if self.is_numeric_type(&lt) && self.is_numeric_type(&rt) {
+                            // Return the "larger" type (simplified)
+                            // In reality, type promotion rules are more complex
+                            ExpressionType::Known(lt)
+                        } else {
+                            ExpressionType::Unknown
+                        }
+                    }
+                    // Comparison operators return boolean
+                    BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq => ExpressionType::Known(SqlType::Boolean),
+                    // Logical operators return boolean
+                    BinaryOperator::And | BinaryOperator::Or => {
+                        ExpressionType::Known(SqlType::Boolean)
+                    }
+                    _ => ExpressionType::Unknown,
+                }
+            }
             _ => ExpressionType::Unknown,
         }
     }
@@ -594,5 +647,417 @@ mod tests {
         assert_eq!(diagnostics[0].kind, DiagnosticKind::JoinTypeMismatch);
         assert!(diagnostics[0].message.contains("integer"));
         assert!(diagnostics[0].message.contains("text"));
+    }
+
+    // ========== Positive Tests (No Errors Expected) ==========
+
+    #[test]
+    fn test_valid_type_comparison() {
+        let schema_sql = "CREATE TABLE users (id INTEGER, age INTEGER);";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE id = age",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Same type comparison should not produce errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_numeric_type_compatibility() {
+        let schema_sql = r#"
+            CREATE TABLE data (
+                tiny SMALLINT,
+                small SMALLINT,
+                medium INTEGER,
+                big BIGINT
+            );
+        "#;
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // SMALLINT = INTEGER (implicit cast allowed)
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM data WHERE small = medium",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Numeric type implicit cast should be allowed: {:?}",
+            diagnostics
+        );
+
+        // INTEGER = BIGINT (implicit cast allowed)
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM data WHERE medium = big",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Integer to BigInt implicit cast should be allowed: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_all_comparison_operators() {
+        let schema_sql = "CREATE TABLE users (id INTEGER, name TEXT);";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        let operators = vec![
+            ("=", "Eq"),
+            ("!=", "NotEq"),
+            ("<", "Lt"),
+            (">", "Gt"),
+            ("<=", "LtEq"),
+            (">=", "GtEq"),
+        ];
+
+        for (op, _name) in operators {
+            let query = format!("SELECT * FROM users WHERE id {} 'text'", op);
+            let statements =
+                sqlparser::parser::Parser::parse_sql(dialect.as_ref(), &query).unwrap();
+
+            let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+            name_resolver.resolve_statement(&statements[0]);
+
+            let mut type_resolver = TypeResolver::new(&catalog);
+            type_resolver.inherit_scope(&name_resolver);
+            type_resolver.check_statement(&statements[0]);
+
+            let diagnostics = type_resolver.into_diagnostics();
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "Operator {} should detect type mismatch",
+                op
+            );
+            assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+        }
+    }
+
+    #[test]
+    fn test_null_is_always_compatible() {
+        let schema_sql = "CREATE TABLE users (id INTEGER, name TEXT);";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // NULL with INTEGER
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE id = NULL",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "NULL comparison should not produce type errors: {:?}",
+            diagnostics
+        );
+
+        // NULL with TEXT
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE name = NULL",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "NULL with TEXT should not produce type errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_multiple_type_errors() {
+        let schema_sql = "CREATE TABLE users (id INTEGER, age INTEGER, name TEXT);";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE id = 'text' AND age = 'another'",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "Should detect multiple type errors: {:?}",
+            diagnostics
+        );
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.kind == DiagnosticKind::TypeMismatch));
+    }
+
+    #[test]
+    fn test_decimal_integer_compatibility() {
+        let schema_sql = "CREATE TABLE products (id INTEGER, price DECIMAL(10, 2));";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM products WHERE id = price",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "INTEGER to DECIMAL implicit cast should be allowed: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_text_types_compatibility() {
+        let schema_sql =
+            "CREATE TABLE users (username VARCHAR(50), bio TEXT, code CHAR(10));";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // VARCHAR = TEXT (implicit cast allowed)
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE username = bio",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "VARCHAR to TEXT implicit cast should be allowed: {:?}",
+            diagnostics
+        );
+
+        // CHAR = VARCHAR (implicit cast allowed)
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users WHERE code = username",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "CHAR to VARCHAR implicit cast should be allowed: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_nested_expressions() {
+        let schema_sql = "CREATE TABLE data (a INTEGER, b INTEGER, c TEXT);";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // (a + b) should be numeric, comparing with c (TEXT) should error
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM data WHERE (a + b) = c",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+    }
+
+    #[test]
+    fn test_complex_join_conditions() {
+        let schema_sql = r#"
+            CREATE TABLE users (id INTEGER, name TEXT);
+            CREATE TABLE orders (user_id INTEGER, product TEXT);
+        "#;
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // Valid: id = user_id (both INTEGER)
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT * FROM users JOIN orders ON users.id = orders.user_id",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Valid JOIN condition should not produce errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_valid_arithmetic_operations() {
+        let schema_sql = "CREATE TABLE data (a INTEGER, b INTEGER, price DECIMAL(10, 2));";
+        let mut builder = SchemaBuilder::new();
+        builder.parse(schema_sql).unwrap();
+        let (catalog, _) = builder.build();
+
+        let dialect = crate::dialect::SqlDialect::PostgreSQL.parser_dialect();
+
+        // INTEGER + INTEGER
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT a + b FROM data",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Arithmetic on numeric types should not produce errors: {:?}",
+            diagnostics
+        );
+
+        // INTEGER + DECIMAL
+        let statements = sqlparser::parser::Parser::parse_sql(
+            dialect.as_ref(),
+            "SELECT a + price FROM data",
+        )
+        .unwrap();
+
+        let mut name_resolver = super::super::resolver::NameResolver::new(&catalog);
+        name_resolver.resolve_statement(&statements[0]);
+
+        let mut type_resolver = TypeResolver::new(&catalog);
+        type_resolver.inherit_scope(&name_resolver);
+        type_resolver.check_statement(&statements[0]);
+
+        let diagnostics = type_resolver.into_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "Mixed numeric arithmetic should not produce errors: {:?}",
+            diagnostics
+        );
     }
 }
