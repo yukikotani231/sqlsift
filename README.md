@@ -6,7 +6,7 @@
 
 **SQL static analyzer that validates queries against schema definitions — no database connection required.**
 
-sqlsurge parses your schema DDL files and validates SQL queries at build time, catching errors like missing tables, unknown columns, and typos before they reach production.
+sqlsurge parses your DDL files (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE, etc.) and validates SQL queries at build time, catching errors like missing tables, unknown columns, and typos before they reach production.
 
 > **Note:** sqlsurge is in early development (alpha). APIs and diagnostics may change between versions. Feedback and contributions are welcome!
 
@@ -175,11 +175,23 @@ sqlsurge check -s schema.sql -f json queries/*.sql
 sqlsurge check -s schema.sql -f sarif queries/*.sql > results.sarif
 ```
 
+## Supported DDL
+
+- `CREATE TABLE` (columns, constraints, primary keys, foreign keys, UNIQUE)
+- `CREATE VIEW` (column inference from SELECT projection)
+- `CREATE TYPE AS ENUM`
+- `ALTER TABLE` (ADD/DROP/RENAME COLUMN, ADD CONSTRAINT, RENAME TABLE)
+- `CHECK` constraints (column-level and table-level)
+- `GENERATED AS IDENTITY` columns (ALWAYS / BY DEFAULT)
+- Resilient parsing — unsupported DDL (functions, triggers, domains, etc.) is gracefully skipped
+
 ## Supported SQL Dialects
 
-- **PostgreSQL** (default)
-- MySQL (planned)
-- SQLite (planned)
+- **PostgreSQL** (default) — fully supported
+- MySQL — planned
+- SQLite — planned
+
+Use the `--dialect` flag to specify the dialect (currently only `postgresql` is supported).
 
 ## Roadmap
 

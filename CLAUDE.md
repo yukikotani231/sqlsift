@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/claude-code) when working 
 
 ## Project Overview
 
-sqlsurge is a SQL static analyzer that validates queries against schema definitions without requiring a database connection. It parses CREATE TABLE statements to build an in-memory schema catalog, then validates SQL queries (SELECT, INSERT, UPDATE, DELETE) against that catalog.
+sqlsurge is a SQL static analyzer that validates queries against schema definitions without requiring a database connection. It parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) to build an in-memory schema catalog, then validates SQL queries (SELECT, INSERT, UPDATE, DELETE) against that catalog.
 
 ## Architecture
 
@@ -25,6 +25,9 @@ sqlsurge/
 │       └── main.rs        # Entry point
 │
 ├── tests/fixtures/        # Test SQL files
+│   └── real-world/        # Real-world schema test fixtures (Chinook, Pagila, Northwind)
+├── scripts/
+│   └── release.sh         # Release automation script
 ├── dist-workspace.toml    # cargo-dist configuration for releases
 ├── sqlsurge.toml          # Sample configuration file
 ├── CHANGELOG.md           # Version history
@@ -117,6 +120,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 - Unit tests are colocated with modules (`#[cfg(test)] mod tests`)
 - Integration tests use SQL fixtures in `tests/fixtures/`
+- Real-world schema tests in `tests/fixtures/real-world/` (Chinook, Pagila, Northwind) with valid and invalid query files
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
 - Comprehensive test coverage: 57 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE
 - Test-driven development (TDD) approach: write failing tests first, then implement features
@@ -164,10 +168,17 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0006**: Ambiguous column reference
 - **E1000**: Generic parse error
 
-## Distribution
+## Release Process
 
-The project uses **cargo-dist** for automated releases:
+```bash
+# 1. Run the release script (bumps version, updates CHANGELOG, creates PR)
+./scripts/release.sh <version>
+
+# 2. Merge the PR on GitHub
+#    -> auto-tag.yml creates git tag automatically
+#    -> release.yml (cargo-dist) builds and publishes
+```
+
 - npm package: `sqlsurge-cli` (provides `sqlsurge` command)
 - Supported platforms: macOS (x64/ARM64), Linux (x64/ARM64), Windows (x64)
-- GitHub Actions workflow auto-publishes on version tag push
-- See `PUBLISHING.md` for release guide
+- See `PUBLISHING.md` for details
