@@ -1,9 +1,8 @@
 //! Name resolver - resolves table and column references
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Delete, Expr, FunctionArguments, GroupByExpr, Ident, Insert,
-    ObjectName, Query, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
-    TableWithJoins, Values,
+    Assignment, AssignmentTarget, Delete, Expr, GroupByExpr, Ident, Insert, ObjectName, Query,
+    Select, SelectItem, SetExpr, Statement, Subscript, TableFactor, TableWithJoins, Values,
 };
 use std::collections::HashMap;
 
@@ -645,20 +644,22 @@ impl<'a> NameResolver<'a> {
             Expr::Nested(inner) => {
                 self.resolve_expr(inner);
             }
-            Expr::Function(func) => match &func.args {
-                FunctionArguments::None => {}
-                FunctionArguments::Subquery(_) => {}
-                FunctionArguments::List(args) => {
-                    for arg in &args.args {
-                        if let sqlparser::ast::FunctionArg::Unnamed(
-                            sqlparser::ast::FunctionArgExpr::Expr(e),
-                        ) = arg
-                        {
-                            self.resolve_expr(e);
-                        }
+            Expr::Function(func) => {
+                self.resolve_function_args_list(&func.args);
+                // Resolve FILTER (WHERE ...) clause
+                if let Some(filter) = &func.filter {
+                    self.resolve_expr(filter);
+                }
+                // Resolve OVER (PARTITION BY ... ORDER BY ...) clause
+                if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &func.over {
+                    for e in &spec.partition_by {
+                        self.resolve_expr(e);
+                    }
+                    for ob in &spec.order_by {
+                        self.resolve_expr(&ob.expr);
                     }
                 }
-            },
+            }
             Expr::InList { expr, list, .. } => {
                 self.resolve_expr(expr);
                 for e in list {
@@ -829,16 +830,7 @@ impl<'a> NameResolver<'a> {
             Expr::Method(method) => {
                 self.resolve_expr(&method.expr);
                 for func in &method.method_chain {
-                    if let FunctionArguments::List(args) = &func.args {
-                        for arg in &args.args {
-                            if let sqlparser::ast::FunctionArg::Unnamed(
-                                sqlparser::ast::FunctionArgExpr::Expr(e),
-                            ) = arg
-                            {
-                                self.resolve_expr(e);
-                            }
-                        }
-                    }
+                    self.resolve_function_args_list(&func.args);
                 }
             }
             Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
@@ -850,6 +842,28 @@ impl<'a> NameResolver<'a> {
             }
             // Literals, intervals, and other expressions don't need column resolution
             _ => {}
+        }
+    }
+
+    /// Resolve function arguments (handles Named, ExprNamed, and Unnamed variants)
+    fn resolve_function_args_list(&mut self, args: &sqlparser::ast::FunctionArguments) {
+        if let sqlparser::ast::FunctionArguments::List(arg_list) = args {
+            for arg in &arg_list.args {
+                match arg {
+                    sqlparser::ast::FunctionArg::Unnamed(
+                        sqlparser::ast::FunctionArgExpr::Expr(e),
+                    ) => {
+                        self.resolve_expr(e);
+                    }
+                    sqlparser::ast::FunctionArg::Named { arg, .. }
+                    | sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => {
+                        if let sqlparser::ast::FunctionArgExpr::Expr(e) = arg {
+                            self.resolve_expr(e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
