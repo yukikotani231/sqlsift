@@ -19,6 +19,8 @@ struct TableRef {
     alias: Option<String>,
     /// If this is a VIEW reference, the column names from the VIEW definition
     view_columns: Option<Vec<String>>,
+    /// If this is a derived table (subquery in FROM), the inferred column names
+    derived_columns: Option<Vec<String>>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -451,19 +453,45 @@ impl<'a> NameResolver<'a> {
                         table: table_name,
                         alias: alias_name,
                         view_columns,
+                        derived_columns: None,
                     },
                 );
             }
             TableFactor::Derived {
-                subquery, alias, ..
+                lateral,
+                subquery,
+                alias,
             } => {
-                // Subquery - resolve it but don't add to scope (for now)
+                // Save current table scope so subquery resolution doesn't leak
+                let saved_tables = self.tables.clone();
+
+                // Non-LATERAL subqueries cannot reference outer FROM tables,
+                // so clear the table scope. LATERAL subqueries can see outer tables.
+                if !lateral {
+                    self.tables.clear();
+                }
+
+                // Resolve subquery
                 self.resolve_query(subquery);
-                // TODO: Handle subquery columns in scope
+
+                // Infer column names from the subquery projection
+                let derived_columns = self.infer_cte_columns(&subquery.body);
+
+                // Restore table scope
+                self.tables = saved_tables;
+
+                // Register derived table alias in outer scope
                 if let Some(a) = alias {
-                    // Register derived table with alias
-                    // For now, we skip column resolution for derived tables
-                    let _ = a.name.value.clone();
+                    let alias_name = a.name.value.clone();
+                    self.tables.insert(
+                        alias_name.clone(),
+                        TableRef {
+                            table: QualifiedName::new(&alias_name),
+                            alias: Some(alias_name),
+                            view_columns: None,
+                            derived_columns: Some(derived_columns),
+                        },
+                    );
                 }
             }
             _ => {}
@@ -602,8 +630,25 @@ impl<'a> NameResolver<'a> {
             let table_alias = &table_id.value;
             // Qualified column reference (table.column)
             if let Some(table_ref) = self.tables.get(table_alias) {
-                // Check if it's a CTE first
-                if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+                // Check derived table first
+                if let Some(derived_cols) = &table_ref.derived_columns {
+                    if !derived_cols
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                        && !derived_cols.iter().any(|c| c.starts_with("?column?"))
+                    {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::ColumnNotFound,
+                                format!(
+                                    "Column '{}' not found in subquery '{}'",
+                                    column_name, table_alias
+                                ),
+                            )
+                            .with_span(column_span),
+                        );
+                    }
+                } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
                     // Validate against CTE columns
                     if !cte.columns.contains(column_name) {
                         self.diagnostics.push(
@@ -666,8 +711,16 @@ impl<'a> NameResolver<'a> {
             let mut found_in: Vec<&str> = Vec::new();
 
             for (name, table_ref) in &self.tables {
-                // Check CTE first
-                if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+                // Check derived table first
+                if let Some(derived_cols) = &table_ref.derived_columns {
+                    if derived_cols
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                    {
+                        found_in.push(name);
+                    }
+                } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+                    // Check CTE
                     if cte.columns.contains(column_name) {
                         found_in.push(name);
                     }

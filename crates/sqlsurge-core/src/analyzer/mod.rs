@@ -982,4 +982,61 @@ mod tests {
         assert!(!diagnostics.is_empty());
         assert_eq!(diagnostics[0].kind, DiagnosticKind::TableNotFound);
     }
+
+    // ========== Derived Table (Subquery in FROM) Tests ==========
+
+    #[test]
+    fn test_derived_table_valid() {
+        let catalog = setup_catalog();
+        let mut analyzer = Analyzer::new(&catalog);
+
+        let diagnostics =
+            analyzer.analyze("SELECT sub.id, sub.name FROM (SELECT id, name FROM users) AS sub");
+        assert!(
+            diagnostics.is_empty(),
+            "Derived table query should have no errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_derived_table_column_not_found() {
+        let catalog = setup_catalog();
+        let mut analyzer = Analyzer::new(&catalog);
+
+        let diagnostics =
+            analyzer.analyze("SELECT sub.nonexistent FROM (SELECT id, name FROM users) AS sub");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+    }
+
+    #[test]
+    fn test_derived_table_join() {
+        let catalog = setup_catalog();
+        let mut analyzer = Analyzer::new(&catalog);
+
+        let diagnostics = analyzer.analyze(
+            "SELECT u.name, sub.order_id FROM users u JOIN (SELECT id AS order_id FROM orders) AS sub ON u.id = sub.order_id",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Derived table in JOIN should work: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_derived_table_with_alias_expression() {
+        let catalog = setup_catalog();
+        let mut analyzer = Analyzer::new(&catalog);
+
+        let diagnostics = analyzer.analyze(
+            "SELECT sub.user_count FROM (SELECT COUNT(*) AS user_count FROM users) AS sub",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Derived table with aliased expression should work: {:?}",
+            diagnostics
+        );
+    }
 }
