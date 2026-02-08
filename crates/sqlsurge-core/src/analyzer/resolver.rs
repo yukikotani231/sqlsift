@@ -2,7 +2,8 @@
 
 use sqlparser::ast::{
     Assignment, AssignmentTarget, Delete, Expr, FunctionArguments, GroupByExpr, Ident, Insert,
-    ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Values,
+    ObjectName, Query, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
+    TableWithJoins, Values,
 };
 use std::collections::HashMap;
 
@@ -755,7 +756,99 @@ impl<'a> NameResolver<'a> {
                 self.resolve_query(subquery);
                 self.tables = saved_tables;
             }
-            // Literals and other expressions don't need resolution
+            Expr::AtTimeZone {
+                timestamp,
+                time_zone,
+            } => {
+                self.resolve_expr(timestamp);
+                self.resolve_expr(time_zone);
+            }
+            Expr::Collate { expr, .. } => {
+                self.resolve_expr(expr);
+            }
+            Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => {
+                self.resolve_expr(expr);
+            }
+            Expr::Overlay {
+                expr,
+                overlay_what,
+                overlay_from,
+                overlay_for,
+            } => {
+                self.resolve_expr(expr);
+                self.resolve_expr(overlay_what);
+                self.resolve_expr(overlay_from);
+                if let Some(for_expr) = overlay_for {
+                    self.resolve_expr(for_expr);
+                }
+            }
+            Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
+                self.resolve_expr(a);
+                self.resolve_expr(b);
+            }
+            Expr::IsUnknown(e) | Expr::IsNotUnknown(e) => {
+                self.resolve_expr(e);
+            }
+            Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => {
+                self.resolve_expr(expr);
+                self.resolve_expr(pattern);
+            }
+            Expr::Tuple(exprs) => {
+                for e in exprs {
+                    self.resolve_expr(e);
+                }
+            }
+            Expr::Array(arr) => {
+                for e in &arr.elem {
+                    self.resolve_expr(e);
+                }
+            }
+            Expr::Subscript { expr, subscript } => {
+                self.resolve_expr(expr);
+                match subscript.as_ref() {
+                    Subscript::Index { index } => {
+                        self.resolve_expr(index);
+                    }
+                    Subscript::Slice {
+                        lower_bound,
+                        upper_bound,
+                        stride,
+                    } => {
+                        if let Some(lb) = lower_bound {
+                            self.resolve_expr(lb);
+                        }
+                        if let Some(ub) = upper_bound {
+                            self.resolve_expr(ub);
+                        }
+                        if let Some(s) = stride {
+                            self.resolve_expr(s);
+                        }
+                    }
+                }
+            }
+            Expr::Method(method) => {
+                self.resolve_expr(&method.expr);
+                for func in &method.method_chain {
+                    if let FunctionArguments::List(args) = &func.args {
+                        for arg in &args.args {
+                            if let sqlparser::ast::FunctionArg::Unnamed(
+                                sqlparser::ast::FunctionArgExpr::Expr(e),
+                            ) = arg
+                            {
+                                self.resolve_expr(e);
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
+                for set in sets {
+                    for e in set {
+                        self.resolve_expr(e);
+                    }
+                }
+            }
+            // Literals, intervals, and other expressions don't need column resolution
             _ => {}
         }
     }
