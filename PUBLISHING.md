@@ -1,83 +1,51 @@
 # Publishing Guide
 
-This document describes how to publish sqlsurge to crates.io and npm.
+This document describes how to publish sqlsurge releases.
+
+## Quick Release (Recommended)
+
+Use the release script for a streamlined process:
+
+```bash
+# 1. Prepare the release (updates version, CHANGELOG, creates PR)
+./scripts/release.sh 0.2.0
+
+# 2. Edit CHANGELOG.md when prompted, then press Enter
+
+# 3. Review and merge the PR on GitHub
+#    -> Tag is created automatically
+#    -> Release workflow builds and publishes automatically
+```
+
+The script handles:
+- Version bump in `Cargo.toml`
+- `Cargo.lock` update
+- `CHANGELOG.md` scaffolding
+- Running tests, clippy, and fmt checks
+- Creating a release branch, commit, and PR
+
+After the PR is merged:
+1. `auto-tag.yml` workflow detects the merged `release/v*` branch and creates the git tag
+2. The tag triggers `release.yml` (cargo-dist) which automatically:
+   - Builds platform-specific binaries (macOS, Linux, Windows)
+   - Creates a GitHub Release with artifacts
+   - Publishes the npm package (`sqlsurge-cli`)
 
 ## Prerequisites
 
-### For crates.io
+### For npm
+- Set `NPM_TOKEN` in GitHub repository secrets
+- npm publishing is handled automatically by cargo-dist
+
+### For crates.io (manual, if needed)
 1. Create an account on [crates.io](https://crates.io/)
 2. Get an API token: `cargo login`
-3. Ensure you're a member/owner of the crates
-
-### For npm
-1. Create an account on [npmjs.com](https://www.npmjs.com/)
-2. Login: `npm login`
-3. (Optional) Create an organization for scoped packages
-
-## Publishing to crates.io
-
-### Pre-publish Checklist
-- [ ] All tests pass: `cargo test --workspace`
-- [ ] Clippy is clean: `cargo clippy --all-targets -- -D warnings`
-- [ ] Format is correct: `cargo fmt --check`
-- [ ] Documentation builds: `cargo doc --no-deps`
-- [ ] Version updated in `Cargo.toml` (workspace.package.version)
-- [ ] CHANGELOG.md updated with new version
-- [ ] README.md is up to date
-- [ ] All changes committed to git
-- [ ] Git tag created: `git tag v0.1.0`
-
-### Publishing Steps
-
-1. **Dry run (verify package contents)**
+3. Publish core first, then CLI:
    ```bash
-   cargo package --list
+   cd crates/sqlsurge-core && cargo publish && cd ../..
+   # Wait a few minutes for index update
+   cd crates/sqlsurge-cli && cargo publish && cd ../..
    ```
-
-2. **Test the package builds**
-   ```bash
-   cargo package
-   ```
-
-3. **Publish sqlsurge-core first** (dependency must be published first)
-   ```bash
-   cd crates/sqlsurge-core
-   cargo publish
-   cd ../..
-   ```
-
-4. **Wait for core to be available** (usually takes a few minutes)
-   ```bash
-   # Check if it's available
-   cargo search sqlsurge-core
-   ```
-
-5. **Publish sqlsurge-cli**
-   ```bash
-   cd crates/sqlsurge-cli
-   cargo publish
-   cd ../..
-   ```
-
-6. **Push tags to GitHub**
-   ```bash
-   git push origin main
-   git push origin v0.1.0
-   ```
-
-7. **Create GitHub Release**
-   - Go to https://github.com/yukikotani231/sqlsurge/releases/new
-   - Select the tag you just pushed
-   - Copy the CHANGELOG entry for this version
-   - Publish release
-
-## Publishing to npm
-
-npm publishing is handled automatically by cargo-dist.
-When a version tag (e.g., `v0.1.0`) is pushed, the GitHub Actions release workflow
-builds platform-specific binaries and publishes the npm package (`sqlsurge-cli`).
-
-**Prerequisite:** Set `NPM_TOKEN` in GitHub repository secrets.
 
 ## Post-publish
 
@@ -92,15 +60,8 @@ builds platform-specific binaries and publishes the npm package (`sqlsurge-cli`)
    mkdir test-sqlsurge && cd test-sqlsurge
    cargo init
    cargo add sqlsurge-core
-   # Write a simple test
    cargo test
    ```
-
-3. **Announce**
-   - Twitter/X
-   - Reddit (r/rust)
-   - This Week in Rust
-   - Rust Users Forum
 
 ## Version Strategy
 
