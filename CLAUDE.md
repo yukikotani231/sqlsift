@@ -38,7 +38,7 @@ sqlsurge/
 
 1. **SchemaBuilder** (`schema/builder.rs`): Parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) using sqlparser-rs and builds a `Catalog`. Supports resilient parsing to skip unsupported syntax.
 2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints, views, enums)
-3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (57 comprehensive tests)
+3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (61 comprehensive tests)
 4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
@@ -57,7 +57,7 @@ Query SQL  → sqlparser → AST → Analyzer → NameResolver → Diagnostics
 # Build
 cargo build
 
-# Run tests (57 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs)
+# Run tests (61 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs)
 cargo test
 
 # Run with example
@@ -122,7 +122,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Real-world schema tests in `tests/fixtures/real-world/` (Chinook, Pagila, Northwind) with valid and invalid query files
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage: 57 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE
+- Comprehensive test coverage: 61 unit tests + 72 PostgreSQL pattern tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, and advanced expressions
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines
@@ -135,19 +135,27 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Current Limitations
 
-- Only PostgreSQL dialect is fully supported
-- Subquery column resolution is incomplete (basic support exists)
+- Only PostgreSQL dialect is fully supported (MySQL/SQLite planned)
 - Type checking is basic (existence only, not full type inference)
-- No support for window functions, GROUPING SETS, or advanced SQL features
 - Functions and stored procedures are skipped (not analyzed)
+- Schema-qualified names (e.g., `public.users`) are not fully resolved
 
 ## Supported Features
 
 - ✅ SELECT, INSERT, UPDATE, DELETE statements
-- ✅ CTEs (WITH clause) with proper scope isolation
-- ✅ JOINs (INNER, LEFT, RIGHT, FULL, CROSS)
-- ✅ Subqueries (WHERE, FROM)
-- ✅ Column and table name resolution
+- ✅ CTEs (WITH clause) with proper scope isolation, including recursive CTEs
+- ✅ JOINs (INNER, LEFT, RIGHT, FULL, CROSS, NATURAL)
+- ✅ Subqueries (WHERE IN/EXISTS, FROM derived tables, scalar subqueries)
+- ✅ LATERAL vs non-LATERAL scope isolation
+- ✅ Column and table name resolution with ORDER BY alias support
+- ✅ UPDATE ... FROM / DELETE ... USING (PostgreSQL extensions)
+- ✅ Window functions (OVER, PARTITION BY, ORDER BY, ROWS/RANGE frames)
+- ✅ Aggregate FILTER clause
+- ✅ GROUPING SETS, CUBE, ROLLUP
+- ✅ DISTINCT ON (PostgreSQL-specific)
+- ✅ UNION / INTERSECT / EXCEPT with column inference
+- ✅ Table-valued functions in FROM (generate_series, etc.)
+- ✅ Comprehensive expression resolution (CASE, CAST, EXTRACT, JSON operators, AT TIME ZONE, ARRAY, etc.)
 - ✅ CREATE VIEW with column inference and wildcard expansion
 - ✅ ALTER TABLE (ADD/DROP/RENAME COLUMN, ADD CONSTRAINT, RENAME TABLE)
 - ✅ CREATE TYPE AS ENUM

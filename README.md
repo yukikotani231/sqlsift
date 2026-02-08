@@ -175,6 +175,20 @@ sqlsurge check -s schema.sql -f json queries/*.sql
 sqlsurge check -s schema.sql -f sarif queries/*.sql > results.sarif
 ```
 
+## Supported SQL Queries
+
+- SELECT, INSERT, UPDATE, DELETE with full column/table validation
+- JOINs (INNER, LEFT, RIGHT, FULL, CROSS, NATURAL) with ON/USING clause validation
+- CTEs (WITH clause) including recursive CTEs
+- Subqueries (WHERE IN/EXISTS, FROM derived tables, scalar subqueries)
+- LATERAL vs non-LATERAL scope isolation
+- UPDATE ... FROM / DELETE ... USING (PostgreSQL extensions)
+- Window functions (OVER, PARTITION BY, FILTER)
+- GROUPING SETS, CUBE, ROLLUP
+- DISTINCT ON, UNION / INTERSECT / EXCEPT
+- ORDER BY with SELECT alias support
+- Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+
 ## Supported DDL
 
 - `CREATE TABLE` (columns, constraints, primary keys, foreign keys, UNIQUE)
