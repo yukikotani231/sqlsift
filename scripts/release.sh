@@ -12,10 +12,12 @@ set -euo pipefail
 # 5. Creates a release branch, commits, and pushes
 # 6. Creates a PR via gh CLI
 #
-# After the PR is merged, the auto-tag workflow (.github/workflows/auto-tag.yml)
-# automatically creates and pushes the git tag, which triggers the release workflow.
+# After the PR is merged, everything is fully automated:
+#   auto-tag.yml: creates git tag + triggers release workflow via workflow_dispatch
+#   release.yml: builds binaries + creates GitHub Release + publishes npm package
 #
-# Manual tagging (if needed): ./scripts/release.sh --tag <version>
+# Manual tagging should not be needed. If the automation fails,
+# you can use: ./scripts/release.sh --tag <version>
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
