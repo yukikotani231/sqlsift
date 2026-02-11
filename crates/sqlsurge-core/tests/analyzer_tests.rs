@@ -1385,3 +1385,159 @@ fn test_natural_join() {
         diagnostics
     );
 }
+
+// ==================== Issue #14: UNNEST WITH ORDINALITY ====================
+
+#[test]
+fn test_unnest_with_ordinality_column_alias() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // unnest() WITH ORDINALITY AS t(id, row_number) should resolve alias columns
+    let diagnostics = analyzer.analyze(
+        "SELECT id, row_number FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t(id, row_number)",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "unnest WITH ORDINALITY columns should be resolvable: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_unnest_with_ordinality_qualified_columns() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // Qualified references: t.id, t.row_number
+    let diagnostics = analyzer.analyze(
+        "SELECT t.id, t.row_number FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t(id, row_number)",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "Qualified unnest columns should be resolvable: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_unnest_with_ordinality_in_cte() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // Issue #14 exact reproduction case (simplified without $2::uuid[])
+    let diagnostics = analyzer.analyze(
+        "WITH all_ids AS (
+            SELECT id, row_number FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t(id, row_number)
+        )
+        SELECT * FROM all_ids",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "unnest WITH ORDINALITY in CTE should work: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_unnest_with_ordinality_join() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // Join unnest result with a real table
+    let diagnostics = analyzer.analyze(
+        "SELECT u.name, t.id
+         FROM users u
+         JOIN unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t(id, row_number)
+           ON u.id = t.id",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "unnest WITH ORDINALITY in JOIN should work: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_unnest_without_alias_columns() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // unnest without explicit column aliases - should not crash
+    let diagnostics = analyzer.analyze("SELECT * FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t");
+    // No column names defined, so * won't have specific columns to validate
+    // Just verify it doesn't crash or produce parse errors
+    for d in &diagnostics {
+        assert_ne!(
+            d.kind,
+            DiagnosticKind::ParseError,
+            "Should not produce parse errors: {:?}",
+            d
+        );
+    }
+}
+
+// ==================== Issue #15: UUID string literal compatibility ====================
+
+fn setup_uuid_catalog() -> Catalog {
+    let schema_sql = r#"
+        CREATE TABLE users (
+            id UUID PRIMARY KEY,
+            name VARCHAR(256)
+        );
+    "#;
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+    catalog
+}
+
+#[test]
+fn test_uuid_string_literal_comparison() {
+    let catalog = setup_uuid_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // UUID column compared with UUID-formatted string literal should NOT error
+    let diagnostics =
+        analyzer.analyze("SELECT * FROM users WHERE id = '123e4567-e89b-12d3-a456-426614174000'");
+    assert!(
+        diagnostics.is_empty(),
+        "UUID column compared with string literal should not error: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_uuid_string_literal_in_join() {
+    let schema_sql = r#"
+        CREATE TABLE users (id UUID PRIMARY KEY, name VARCHAR(256));
+        CREATE TABLE sessions (id SERIAL, user_id UUID);
+    "#;
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // JOIN on UUID columns should work
+    let diagnostics =
+        analyzer.analyze("SELECT u.name FROM users u JOIN sessions s ON u.id = s.user_id");
+    assert!(
+        diagnostics.is_empty(),
+        "JOIN on UUID columns should work: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_uuid_integer_mismatch() {
+    let catalog = setup_uuid_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // UUID compared with integer should still error
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = 42");
+    assert!(
+        !diagnostics.is_empty(),
+        "UUID compared with integer should produce type mismatch"
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+}

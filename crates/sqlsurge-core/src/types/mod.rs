@@ -201,6 +201,9 @@ impl SqlType {
             // JSON coercion
             (Json, Jsonb) => TypeCompatibility::ImplicitCast,
 
+            // String to UUID coercion (PostgreSQL implicit cast)
+            (Char { .. } | Varchar { .. } | Text, Uuid) => TypeCompatibility::ImplicitCast,
+
             // Any type can be explicitly cast
             _ => TypeCompatibility::ExplicitCast,
         }
@@ -286,6 +289,28 @@ mod tests {
         assert_eq!(
             SqlType::Integer.is_compatible_with(&SqlType::Integer),
             TypeCompatibility::Exact
+        );
+    }
+
+    #[test]
+    fn test_string_to_uuid_implicit_cast() {
+        // PostgreSQL allows implicit cast from string literals to UUID
+        assert_eq!(
+            SqlType::Text.is_compatible_with(&SqlType::Uuid),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Varchar { length: Some(36) }.is_compatible_with(&SqlType::Uuid),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Char { length: Some(36) }.is_compatible_with(&SqlType::Uuid),
+            TypeCompatibility::ImplicitCast
+        );
+        // UUID to string requires explicit cast
+        assert_eq!(
+            SqlType::Uuid.is_compatible_with(&SqlType::Text),
+            TypeCompatibility::ExplicitCast
         );
     }
 }
