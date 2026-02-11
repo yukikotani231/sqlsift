@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **LSP server** (`sqlsurge-lsp`): Language Server Protocol support for real-time SQL diagnostics in editors
+  - textDocument/didOpen, didChange, didSave, didClose
+  - Automatic schema loading from `sqlsurge.toml`
+  - Schema file change detection with catalog rebuild
+  - Diagnostic severity, error codes, and help messages
+  - 12 unit tests (diagnostic conversion, state management)
+- **VS Code extension** (`editors/vscode/`): Thin LSP client for VS Code
+  - Configurable server path via `sqlsurge.serverPath` setting
+  - SQL language configuration (comments, brackets)
+- **Neovim support**: Works out of the box with built-in LSP client
+
+### Fixed
+- `SELECT *` diagnostic now points to the `SELECT` keyword instead of file start
+
 ## [0.1.0-alpha.6] - 2026-02-08
 
 ### Added

@@ -18,11 +18,23 @@ sqlsurge/
 │   │   ├── dialect/       # SQL dialect abstraction
 │   │   └── error.rs       # Diagnostic types
 │   │
-│   └── sqlsurge-cli/      # CLI binary
-│       ├── args.rs        # CLI argument definitions (clap)
-│       ├── config.rs      # Configuration file (sqlsurge.toml) support
-│       ├── output/        # Output formatters (human, JSON, SARIF)
-│       └── main.rs        # Entry point
+│   ├── sqlsurge-cli/      # CLI binary
+│   │   ├── args.rs        # CLI argument definitions (clap)
+│   │   ├── config.rs      # Configuration file (sqlsurge.toml) support
+│   │   ├── output/        # Output formatters (human, JSON, SARIF)
+│   │   └── main.rs        # Entry point
+│   │
+│   └── sqlsurge-lsp/      # LSP server binary
+│       ├── server.rs      # LanguageServer trait implementation (tower-lsp)
+│       ├── state.rs       # Server state (catalog, config, open documents)
+│       ├── config.rs      # sqlsurge.toml loader
+│       ├── diagnostics.rs # sqlsurge Diagnostic → LSP Diagnostic conversion
+│       └── main.rs        # Entry point (stdin/stdout transport)
+│
+├── editors/
+│   └── vscode/            # VS Code extension (LSP client)
+│       ├── src/extension.ts
+│       └── package.json
 │
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Real-world schema test fixtures (Chinook, Pagila, Northwind)
@@ -42,6 +54,8 @@ sqlsurge/
 4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
+7. **LSP Backend** (`sqlsurge-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
+8. **ServerState** (`sqlsurge-lsp/state.rs`): LSP server state management (catalog, config, open documents)
 
 ### Data Flow
 

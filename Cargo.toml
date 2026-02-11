@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sqlsurge-core", "crates/sqlsurge-cli"]
+members = ["crates/sqlsurge-core", "crates/sqlsurge-cli", "crates/sqlsurge-lsp"]
 
 [workspace.package]
 version = "0.1.0-alpha.6"
@@ -30,6 +30,10 @@ indexmap = { version = "2.7", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 glob = "0.3"
+
+# Async / LSP
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
 
 # Internal crates
 sqlsurge-core = { path = "crates/sqlsurge-core", version = "0.1.0-alpha.6" }
