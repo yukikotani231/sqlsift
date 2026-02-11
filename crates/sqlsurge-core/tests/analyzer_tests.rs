@@ -1464,8 +1464,7 @@ fn test_unnest_without_alias_columns() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // unnest without explicit column aliases - should not crash
-    let diagnostics =
-        analyzer.analyze("SELECT * FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t");
+    let diagnostics = analyzer.analyze("SELECT * FROM unnest(ARRAY[1,2,3]) WITH ORDINALITY AS t");
     // No column names defined, so * won't have specific columns to validate
     // Just verify it doesn't crash or produce parse errors
     for d in &diagnostics {
@@ -1499,9 +1498,8 @@ fn test_uuid_string_literal_comparison() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // UUID column compared with UUID-formatted string literal should NOT error
-    let diagnostics = analyzer.analyze(
-        "SELECT * FROM users WHERE id = '123e4567-e89b-12d3-a456-426614174000'",
-    );
+    let diagnostics =
+        analyzer.analyze("SELECT * FROM users WHERE id = '123e4567-e89b-12d3-a456-426614174000'");
     assert!(
         diagnostics.is_empty(),
         "UUID column compared with string literal should not error: {:?}",
@@ -1521,9 +1519,8 @@ fn test_uuid_string_literal_in_join() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // JOIN on UUID columns should work
-    let diagnostics = analyzer.analyze(
-        "SELECT u.name FROM users u JOIN sessions s ON u.id = s.user_id",
-    );
+    let diagnostics =
+        analyzer.analyze("SELECT u.name FROM users u JOIN sessions s ON u.id = s.user_id");
     assert!(
         diagnostics.is_empty(),
         "JOIN on UUID columns should work: {:?}",
