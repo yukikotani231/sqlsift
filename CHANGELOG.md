@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-02-11
+
 ### Added
 - **LSP server** (`sqlsurge-lsp`): Language Server Protocol support for real-time SQL diagnostics in editors
   - textDocument/didOpen, didChange, didSave, didClose
@@ -132,7 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No support for VIEWs, functions, or stored procedures
 - Derived table (subquery in FROM) column resolution is incomplete
 
-[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.6...HEAD
+[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.7...HEAD
+[0.1.0-alpha.7]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
