@@ -421,8 +421,9 @@ impl<'a> NameResolver<'a> {
         }
 
         // Then resolve SELECT items
+        let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
-            self.resolve_select_item(item);
+            self.resolve_select_item(item, &select_span);
         }
 
         // Resolve WHERE clause
@@ -631,7 +632,7 @@ impl<'a> NameResolver<'a> {
     }
 
     /// Resolve a SELECT item
-    fn resolve_select_item(&mut self, item: &SelectItem) {
+    fn resolve_select_item(&mut self, item: &SelectItem, select_span: &Span) {
         match item {
             SelectItem::UnnamedExpr(expr) => self.resolve_expr(expr),
             SelectItem::ExprWithAlias { expr, .. } => self.resolve_expr(expr),
@@ -654,10 +655,13 @@ impl<'a> NameResolver<'a> {
             SelectItem::Wildcard(_) => {
                 // * - valid if we have at least one table
                 if self.tables.is_empty() {
-                    self.diagnostics.push(Diagnostic::error(
-                        DiagnosticKind::TableNotFound,
-                        "SELECT * requires at least one table in FROM clause",
-                    ));
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            DiagnosticKind::TableNotFound,
+                            "SELECT * requires at least one table in FROM clause",
+                        )
+                        .with_span(*select_span),
+                    );
                 }
             }
         }
