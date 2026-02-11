@@ -603,9 +603,11 @@ impl<'a> NameResolver<'a> {
                     );
                 }
             }
-            TableFactor::TableFunction { alias, .. } | TableFactor::Function { alias, .. } => {
+            TableFactor::TableFunction { alias, .. }
+            | TableFactor::Function { alias, .. }
+            | TableFactor::UNNEST { alias, .. } => {
                 // Table-valued functions (e.g., generate_series, unnest)
-                // Register alias if present, with empty column list (skip column validation)
+                // Register alias if present, with column list from alias definition
                 if let Some(a) = alias {
                     let alias_name = a.name.value.clone();
                     let columns = if !a.columns.is_empty() {
