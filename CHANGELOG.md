@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-02-13
+
+### Fixed
+- Fix `auto-tag.yml` release automation: add `actions: write` permission to enable `gh workflow run` for triggering release workflow
+
 ## [0.1.0-alpha.7] - 2026-02-11
 
 ### Added
@@ -134,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No support for VIEWs, functions, or stored procedures
 - Derived table (subquery in FROM) column resolution is incomplete
 
-[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.7...HEAD
+[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.8...HEAD
+[0.1.0-alpha.8]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.7...v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
