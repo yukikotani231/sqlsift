@@ -25,8 +25,8 @@ impl<'a> Analyzer<'a> {
     /// # Example
     ///
     /// ```
-    /// use sqlsurge_core::analyzer::Analyzer;
-    /// use sqlsurge_core::schema::Catalog;
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::Catalog;
     ///
     /// let catalog = Catalog::default();
     /// let mut analyzer = Analyzer::new(&catalog);
@@ -44,9 +44,9 @@ impl<'a> Analyzer<'a> {
     /// # Example
     ///
     /// ```
-    /// use sqlsurge_core::analyzer::Analyzer;
-    /// use sqlsurge_core::dialect::SqlDialect;
-    /// use sqlsurge_core::schema::Catalog;
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::dialect::SqlDialect;
+    /// use sqlsift_core::schema::Catalog;
     ///
     /// let catalog = Catalog::default();
     /// let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::MySQL);
@@ -67,8 +67,8 @@ impl<'a> Analyzer<'a> {
     /// # Example
     ///
     /// ```
-    /// use sqlsurge_core::analyzer::Analyzer;
-    /// use sqlsurge_core::schema::{Catalog, SchemaBuilder};
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::{Catalog, SchemaBuilder};
     ///
     /// let mut builder = SchemaBuilder::new();
     /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();

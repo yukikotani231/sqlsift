@@ -1,6 +1,6 @@
 //! Output formatting
 
-use sqlsurge_core::{Diagnostic, Severity};
+use sqlsift_core::{Diagnostic, Severity};
 
 use crate::args::OutputFormat;
 
@@ -122,7 +122,7 @@ impl OutputFormatter {
             "runs": [{
                 "tool": {
                     "driver": {
-                        "name": "sqlsurge",
+                        "name": "sqlsift",
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 },

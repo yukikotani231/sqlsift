@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use tower_lsp::lsp_types::{self, NumberOrString, Position, Range};
 
-use sqlsurge_core::{Diagnostic, Severity, Span};
+use sqlsift_core::{Diagnostic, Severity, Span};
 
-/// Convert sqlsurge diagnostics to LSP diagnostics, filtering disabled rules
+/// Convert sqlsift diagnostics to LSP diagnostics, filtering disabled rules
 pub fn to_lsp_diagnostics(
     diagnostics: &[Diagnostic],
     disabled_rules: &HashSet<String>,
@@ -21,7 +21,7 @@ fn to_lsp_diagnostic(diag: &Diagnostic) -> lsp_types::Diagnostic {
         range: span_to_range(diag.span.as_ref()),
         severity: Some(to_lsp_severity(diag.severity)),
         code: Some(NumberOrString::String(diag.code().to_string())),
-        source: Some("sqlsurge".to_string()),
+        source: Some("sqlsift".to_string()),
         message: format_message(diag),
         ..Default::default()
     }
@@ -60,7 +60,7 @@ fn format_message(diag: &Diagnostic) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlsurge_core::DiagnosticKind;
+    use sqlsift_core::DiagnosticKind;
 
     #[test]
     fn test_span_to_range_1indexed_to_0indexed() {

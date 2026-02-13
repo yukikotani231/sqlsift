@@ -1,4 +1,4 @@
--- Invalid queries that should be caught by sqlsurge
+-- Invalid queries that should be caught by sqlsift
 
 -- Typo in column name
 SELECT _id, nme FROM webknossos.annotations;

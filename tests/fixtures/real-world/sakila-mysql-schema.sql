@@ -5,7 +5,7 @@
 
 -- Note: Tables are ordered to satisfy foreign key dependencies.
 -- Some MySQL-specific features (SET type, FULLTEXT, BINARY) may be
--- skipped by sqlsurge's resilient parser.
+-- skipped by sqlsift's resilient parser.
 
 CREATE TABLE actor (
   actor_id INT UNSIGNED NOT NULL AUTO_INCREMENT,

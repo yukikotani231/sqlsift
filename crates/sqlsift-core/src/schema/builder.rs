@@ -68,7 +68,7 @@ impl SchemaBuilder {
     }
 
     /// Parse SQL statements individually, skipping those that fail to parse.
-    /// This allows sqlsurge to handle schema files containing unsupported syntax
+    /// This allows sqlsift to handle schema files containing unsupported syntax
     /// (e.g., CREATE FUNCTION, CREATE TRIGGER, CREATE DOMAIN) by gracefully
     /// skipping unparseable statements while still processing the rest.
     fn parse_statements_individually(&mut self, sql: &str) {

@@ -1,4 +1,4 @@
--- Test schema for sqlsurge
+-- Test schema for sqlsift
 
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,

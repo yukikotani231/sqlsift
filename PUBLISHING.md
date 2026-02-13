@@ -1,6 +1,6 @@
 # Publishing Guide
 
-This document describes how to publish sqlsurge releases.
+This document describes how to publish sqlsift releases.
 
 ## Quick Release (Recommended)
 
@@ -29,7 +29,7 @@ After the PR is merged:
 2. The tag triggers `release.yml` (cargo-dist) which automatically:
    - Builds platform-specific binaries (macOS, Linux, Windows)
    - Creates a GitHub Release with artifacts
-   - Publishes the npm package (`sqlsurge-cli`)
+   - Publishes the npm package (`sqlsift-cli`)
 
 ## Prerequisites
 
@@ -42,24 +42,24 @@ After the PR is merged:
 2. Get an API token: `cargo login`
 3. Publish core first, then CLI:
    ```bash
-   cd crates/sqlsurge-core && cargo publish && cd ../..
+   cd crates/sqlsift-core && cargo publish && cd ../..
    # Wait a few minutes for index update
-   cd crates/sqlsurge-cli && cargo publish && cd ../..
+   cd crates/sqlsift-cli && cargo publish && cd ../..
    ```
 
 ## Post-publish
 
 1. **Verify installation works**
    ```bash
-   cargo install sqlsurge-cli
-   sqlsurge --version
+   cargo install sqlsift-cli
+   sqlsift --version
    ```
 
 2. **Test in a fresh project**
    ```bash
-   mkdir test-sqlsurge && cd test-sqlsurge
+   mkdir test-sqlsift && cd test-sqlsift
    cargo init
-   cargo add sqlsurge-core
+   cargo add sqlsift-core
    cargo test
    ```
 

@@ -8,8 +8,8 @@ import {
 let client: LanguageClient | undefined;
 
 export function activate(context: ExtensionContext) {
-  const config = workspace.getConfiguration("sqlsurge");
-  const serverPath = config.get<string>("serverPath", "sqlsurge-lsp");
+  const config = workspace.getConfiguration("sqlsift");
+  const serverPath = config.get<string>("serverPath", "sqlsift-lsp");
 
   const serverOptions: ServerOptions = {
     command: serverPath,
@@ -20,8 +20,8 @@ export function activate(context: ExtensionContext) {
   };
 
   client = new LanguageClient(
-    "sqlsurge",
-    "sqlsurge",
+    "sqlsift",
+    "sqlsift",
     serverOptions,
     clientOptions
   );

@@ -1,4 +1,4 @@
-//! sqlsurge-core: SQL static analysis library
+//! sqlsift-core: SQL static analysis library
 //!
 //! This library provides the core functionality for analyzing SQL queries
 //! against schema definitions without requiring a database connection.

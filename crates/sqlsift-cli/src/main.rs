@@ -1,4 +1,4 @@
-//! sqlsurge CLI - SQL static analysis tool
+//! sqlsift CLI - SQL static analysis tool
 
 mod args;
 mod config;
@@ -9,8 +9,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
-use sqlsurge_core::schema::SchemaBuilder;
-use sqlsurge_core::{Analyzer, SqlDialect};
+use sqlsift_core::schema::SchemaBuilder;
+use sqlsift_core::{Analyzer, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
 use crate::config::Config;
@@ -61,7 +61,7 @@ fn run(args: Args) -> Result<bool> {
                 // Load from specified path
                 Config::from_file(&path)?
             } else {
-                // Try to find sqlsurge.toml
+                // Try to find sqlsift.toml
                 Config::find_and_load()?.unwrap_or_default()
             };
 
@@ -80,7 +80,7 @@ fn run(args: Args) -> Result<bool> {
             }
 
             if schema_files.is_empty() {
-                miette::bail!("No schema files specified. Use --schema, --schema-dir, or configure in sqlsurge.toml");
+                miette::bail!("No schema files specified. Use --schema, --schema-dir, or configure in sqlsift.toml");
             }
 
             // Determine output format
@@ -134,7 +134,7 @@ fn run(args: Args) -> Result<bool> {
             }
 
             if query_files.is_empty() {
-                miette::bail!("No query files specified. Use positional arguments or configure in sqlsurge.toml");
+                miette::bail!("No query files specified. Use positional arguments or configure in sqlsift.toml");
             }
 
             // Analyze each query file
@@ -163,8 +163,8 @@ fn run(args: Args) -> Result<bool> {
 
                     for diag in &filtered_diagnostics {
                         match diag.severity {
-                            sqlsurge_core::Severity::Error => total_errors += 1,
-                            sqlsurge_core::Severity::Warning => total_warnings += 1,
+                            sqlsift_core::Severity::Error => total_errors += 1,
+                            sqlsift_core::Severity::Warning => total_warnings += 1,
                             _ => {}
                         }
                     }
