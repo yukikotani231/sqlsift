@@ -4,7 +4,7 @@ use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Configuration for sqlsurge
+/// Configuration for sqlsift
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Schema file paths or patterns
@@ -39,12 +39,12 @@ impl Config {
         Ok(config)
     }
 
-    /// Try to find and load sqlsurge.toml in current directory or parent directories
+    /// Try to find and load sqlsift.toml in current directory or parent directories
     pub fn find_and_load() -> Result<Option<Self>> {
         let mut current_dir = std::env::current_dir().into_diagnostic()?;
 
         loop {
-            let config_path = current_dir.join("sqlsurge.toml");
+            let config_path = current_dir.join("sqlsift.toml");
             if config_path.exists() {
                 return Ok(Some(Self::from_file(&config_path)?));
             }

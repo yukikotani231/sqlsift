@@ -4,31 +4,31 @@ This file provides guidance to Claude Code (claude.ai/claude-code) when working 
 
 ## Project Overview
 
-sqlsurge is a SQL static analyzer that validates queries against schema definitions without requiring a database connection. It parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) to build an in-memory schema catalog, then validates SQL queries (SELECT, INSERT, UPDATE, DELETE) against that catalog.
+sqlsift is a SQL static analyzer that validates queries against schema definitions without requiring a database connection. It parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) to build an in-memory schema catalog, then validates SQL queries (SELECT, INSERT, UPDATE, DELETE) against that catalog.
 
 ## Architecture
 
 ```
-sqlsurge/
+sqlsift/
 ├── crates/
-│   ├── sqlsurge-core/     # Core library (schema parsing, analysis engine)
+│   ├── sqlsift-core/     # Core library (schema parsing, analysis engine)
 │   │   ├── schema/        # Schema catalog and DDL parsing
 │   │   ├── analyzer/      # Query validation and name resolution
 │   │   ├── types/         # SQL type system
 │   │   ├── dialect/       # SQL dialect abstraction
 │   │   └── error.rs       # Diagnostic types
 │   │
-│   ├── sqlsurge-cli/      # CLI binary
+│   ├── sqlsift-cli/      # CLI binary
 │   │   ├── args.rs        # CLI argument definitions (clap)
-│   │   ├── config.rs      # Configuration file (sqlsurge.toml) support
+│   │   ├── config.rs      # Configuration file (sqlsift.toml) support
 │   │   ├── output/        # Output formatters (human, JSON, SARIF)
 │   │   └── main.rs        # Entry point
 │   │
-│   └── sqlsurge-lsp/      # LSP server binary
+│   └── sqlsift-lsp/      # LSP server binary
 │       ├── server.rs      # LanguageServer trait implementation (tower-lsp)
 │       ├── state.rs       # Server state (catalog, config, open documents)
-│       ├── config.rs      # sqlsurge.toml loader
-│       ├── diagnostics.rs # sqlsurge Diagnostic → LSP Diagnostic conversion
+│       ├── config.rs      # sqlsift.toml loader
+│       ├── diagnostics.rs # sqlsift Diagnostic → LSP Diagnostic conversion
 │       └── main.rs        # Entry point (stdin/stdout transport)
 │
 ├── editors/
@@ -41,7 +41,7 @@ sqlsurge/
 ├── scripts/
 │   └── release.sh         # Release automation script
 ├── dist-workspace.toml    # cargo-dist configuration for releases
-├── sqlsurge.toml          # Sample configuration file
+├── sqlsift.toml          # Sample configuration file
 ├── CHANGELOG.md           # Version history
 └── PUBLISHING.md          # Release guide
 ```
@@ -54,8 +54,8 @@ sqlsurge/
 4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
-7. **LSP Backend** (`sqlsurge-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
-8. **ServerState** (`sqlsurge-lsp/state.rs`): LSP server state management (catalog, config, open documents)
+7. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
+8. **ServerState** (`sqlsift-lsp/state.rs`): LSP server state management (catalog, config, open documents)
 
 ### Data Flow
 
@@ -81,7 +81,7 @@ cargo run -- check --schema tests/fixtures/schema.sql tests/fixtures/valid_query
 cargo run -- check --schema tests/fixtures/schema.sql tests/fixtures/invalid_query.sql
 
 # Use configuration file
-cargo run -- check queries/*.sql  # Auto-discovers sqlsurge.toml
+cargo run -- check queries/*.sql  # Auto-discovers sqlsift.toml
 
 # Disable specific error codes
 cargo run -- check --disable E0002 --schema schema.sql query.sql
@@ -117,7 +117,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 1. Add field to `Config` struct in `config.rs` with `#[serde(default)]`
 2. Update `Config::merge_with_args()` to merge with CLI arguments
-3. Document in `sqlsurge.toml` sample file
+3. Document in `sqlsift.toml` sample file
 
 ## Dependencies
 
@@ -173,7 +173,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 **Implementation Notes:**
 - Current type inference covers ~70-80% of real-world type errors
 - Missing features have lower ROI (INSERT/UPDATE would add ~15%, rest combined ~5%)
-- See `crates/sqlsurge-core/src/analyzer/type_resolver.rs` for implementation
+- See `crates/sqlsift-core/src/analyzer/type_resolver.rs` for implementation
 
 ### Other Limitations
 - Functions and stored procedures are skipped (not analyzed)
@@ -201,7 +201,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ CHECK constraints (column-level and table-level)
 - ✅ GENERATED AS IDENTITY columns
 - ✅ Resilient parsing (gracefully skips unsupported DDL)
-- ✅ Configuration file (sqlsurge.toml)
+- ✅ Configuration file (sqlsift.toml)
 - ✅ Rule disabling (--disable flag)
 - ✅ Multiple output formats (human, JSON, SARIF)
 - ✅ Type inference for expressions (WHERE, JOIN, binary operators, nested expressions)
@@ -232,6 +232,6 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 #    -> release.yml (cargo-dist) builds and publishes
 ```
 
-- npm package: `sqlsurge-cli` (provides `sqlsurge` command)
+- npm package: `sqlsift-cli` (provides `sqlsift` command)
 - Supported platforms: macOS (x64/ARM64), Linux (x64/ARM64), Windows (x64)
 - See `PUBLISHING.md` for details

@@ -1,9 +1,9 @@
 // Integration tests for SQL analyzer
-use sqlsurge_core::analyzer::Analyzer;
-use sqlsurge_core::dialect::SqlDialect;
-use sqlsurge_core::error::DiagnosticKind;
-use sqlsurge_core::schema::{Catalog, IdentityKind, QualifiedName, SchemaBuilder};
-use sqlsurge_core::types::SqlType;
+use sqlsift_core::analyzer::Analyzer;
+use sqlsift_core::dialect::SqlDialect;
+use sqlsift_core::error::DiagnosticKind;
+use sqlsift_core::schema::{Catalog, IdentityKind, QualifiedName, SchemaBuilder};
+use sqlsift_core::types::SqlType;
 
 fn setup_catalog() -> Catalog {
     let schema_sql = r#"

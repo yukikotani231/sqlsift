@@ -89,7 +89,7 @@ impl LanguageServer for Backend {
             .log_message(
                 MessageType::INFO,
                 format!(
-                    "sqlsurge LSP initialized ({} schema file(s) loaded)",
+                    "sqlsift LSP initialized ({} schema file(s) loaded)",
                     schema_count
                 ),
             )

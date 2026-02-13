@@ -1,13 +1,13 @@
 {
-  "name": "sqlsurge",
-  "displayName": "sqlsurge",
+  "name": "sqlsift",
+  "displayName": "sqlsift",
   "description": "SQL static analysis against schema definitions",
   "version": "0.1.0",
-  "publisher": "sqlsurge",
+  "publisher": "sqlsift",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yukikotani231/sqlsurge"
+    "url": "https://github.com/yukikotani231/sqlsift"
   },
   "engines": {
     "vscode": "^1.75.0"
@@ -22,12 +22,12 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "sqlsurge",
+      "title": "sqlsift",
       "properties": {
-        "sqlsurge.serverPath": {
+        "sqlsift.serverPath": {
           "type": "string",
-          "default": "sqlsurge-lsp",
-          "description": "Path to the sqlsurge-lsp binary"
+          "default": "sqlsift-lsp",
+          "description": "Path to the sqlsift-lsp binary"
         }
       }
     },

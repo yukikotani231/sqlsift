@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "sqlsurge")]
+#[command(name = "sqlsift")]
 #[command(author, version, about = "SQL static analysis tool")]
 #[command(propagate_version = true)]
 pub struct Args {
@@ -36,7 +36,7 @@ pub enum Command {
         #[arg(long = "schema-dir", value_name = "DIR")]
         schema_dir: Option<PathBuf>,
 
-        /// Path to configuration file (default: sqlsurge.toml in current or parent directory)
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
         #[arg(short, long = "config", value_name = "FILE")]
         config: Option<PathBuf>,
 

@@ -1,5 +1,5 @@
 [package]
-name = "sqlsurge-cli"
+name = "sqlsift-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,11 +11,11 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "../../README.md"
 
 [[bin]]
-name = "sqlsurge"
+name = "sqlsift"
 path = "src/main.rs"
 
 [dependencies]
-sqlsurge-core.workspace = true
+sqlsift-core.workspace = true
 sqlparser.workspace = true
 clap.workspace = true
 miette.workspace = true

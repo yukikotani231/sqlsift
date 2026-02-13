@@ -1,14 +1,14 @@
-# sqlsurge
+# sqlsift
 
-[![CI](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsurge/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/sqlsurge-cli.svg)](https://crates.io/crates/sqlsurge-cli)
+[![CI](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/sqlsift-cli.svg)](https://crates.io/crates/sqlsift-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **SQL static analyzer that validates queries against schema definitions — no database connection required.**
 
-sqlsurge parses your DDL files (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE, etc.) and validates SQL queries at build time, catching errors like missing tables, unknown columns, and typos before they reach production.
+sqlsift parses your DDL files (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE, etc.) and validates SQL queries at build time, catching errors like missing tables, unknown columns, and typos before they reach production.
 
-> **Note:** sqlsurge is in early development (alpha). APIs and diagnostics may change between versions. Feedback and contributions are welcome!
+> **Note:** sqlsift is in early development (alpha). APIs and diagnostics may change between versions. Feedback and contributions are welcome!
 
 ## Features
 
@@ -23,36 +23,36 @@ sqlsurge parses your DDL files (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TA
 ### via npm (Recommended)
 
 ```bash
-npm install -g sqlsurge-cli
+npm install -g sqlsift-cli
 ```
 
 Or use directly with `npx`:
 
 ```bash
-npx sqlsurge-cli check --schema schema.sql query.sql
+npx sqlsift-cli check --schema schema.sql query.sql
 ```
 
 ### via Cargo
 
 ```bash
-cargo install sqlsurge-cli
+cargo install sqlsift-cli
 ```
 
 ### From GitHub Releases
 
-Download the latest binary from [Releases](https://github.com/yukikotani231/sqlsurge/releases).
+Download the latest binary from [Releases](https://github.com/yukikotani231/sqlsift/releases).
 
 ## Quick Start
 
 ```bash
 # Validate queries against a schema file
-sqlsurge check --schema schema.sql queries/*.sql
+sqlsift check --schema schema.sql queries/*.sql
 
 # Use multiple schema files
-sqlsurge check -s users.sql -s orders.sql queries/*.sql
+sqlsift check -s users.sql -s orders.sql queries/*.sql
 
 # Use a migrations directory
-sqlsurge check --schema-dir ./migrations queries/*.sql
+sqlsift check --schema-dir ./migrations queries/*.sql
 ```
 
 ## Example
@@ -75,7 +75,7 @@ And a query with errors:
 SELECT naem, user_id FROM users;
 ```
 
-sqlsurge will report:
+sqlsift will report:
 
 ```
 error[E0002]: Column 'naem' not found
@@ -91,7 +91,7 @@ error[E0002]: Column 'user_id' not found
 Prisma generates SQL migration files automatically:
 
 ```bash
-sqlsurge check --schema-dir prisma/migrations queries/*.sql
+sqlsift check --schema-dir prisma/migrations queries/*.sql
 ```
 
 ### Rails
@@ -99,13 +99,13 @@ sqlsurge check --schema-dir prisma/migrations queries/*.sql
 With `config.active_record.schema_format = :sql`:
 
 ```bash
-sqlsurge check --schema db/structure.sql queries/*.sql
+sqlsift check --schema db/structure.sql queries/*.sql
 ```
 
 Or with SQL migrations:
 
 ```bash
-sqlsurge check --schema-dir db/migrate queries/*.sql
+sqlsift check --schema-dir db/migrate queries/*.sql
 ```
 
 ### Raw SQL
@@ -113,7 +113,7 @@ sqlsurge check --schema-dir db/migrate queries/*.sql
 Just point to your schema files:
 
 ```bash
-sqlsurge check --schema schema/*.sql queries/**/*.sql
+sqlsift check --schema schema/*.sql queries/**/*.sql
 ```
 
 ## Diagnostic Rules
@@ -148,7 +148,7 @@ sqlsurge check --schema schema/*.sql queries/**/*.sql
 ## CLI Reference
 
 ```
-sqlsurge check [OPTIONS] <FILES>...
+sqlsift check [OPTIONS] <FILES>...
 
 Arguments:
   <FILES>...                SQL files to validate (supports glob patterns)
@@ -156,7 +156,7 @@ Arguments:
 Options:
   -s, --schema <FILE>       Schema definition file (can be specified multiple times)
       --schema-dir <DIR>    Directory containing schema files
-  -c, --config <FILE>       Path to configuration file [default: sqlsurge.toml]
+  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
       --disable <RULE>      Disable specific rules (e.g., E0001, E0002)
   -d, --dialect <NAME>      SQL dialect [default: postgresql]
   -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
@@ -183,13 +183,13 @@ error[E0002]: Column 'user_id' not found in table 'users'
 ### JSON
 
 ```bash
-sqlsurge check -s schema.sql -f json queries/*.sql
+sqlsift check -s schema.sql -f json queries/*.sql
 ```
 
 ### SARIF (for GitHub Code Scanning)
 
 ```bash
-sqlsurge check -s schema.sql -f sarif queries/*.sql > results.sarif
+sqlsift check -s schema.sql -f sarif queries/*.sql > results.sarif
 ```
 
 ## Supported SQL Queries
@@ -227,7 +227,7 @@ Use the `--dialect` flag to specify the dialect.
 ## Roadmap
 
 ### Completed
-- [x] Configuration file (`sqlsurge.toml`)
+- [x] Configuration file (`sqlsift.toml`)
 - [x] MySQL dialect support
 - [x] Type inference for expressions (WHERE, JOIN, arithmetic)
 

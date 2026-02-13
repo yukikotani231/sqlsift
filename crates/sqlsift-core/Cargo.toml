@@ -1,5 +1,5 @@
 [package]
-name = "sqlsurge-core"
+name = "sqlsift-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

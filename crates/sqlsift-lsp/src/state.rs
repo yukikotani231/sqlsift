@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::Url;
 
-use sqlsurge_core::schema::{Catalog, SchemaBuilder};
-use sqlsurge_core::{Analyzer, Diagnostic, SqlDialect};
+use sqlsift_core::schema::{Catalog, SchemaBuilder};
+use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
 
 use crate::config::Config;
 
@@ -29,7 +29,7 @@ impl ServerState {
         }
     }
 
-    /// Load configuration from sqlsurge.toml and set up state
+    /// Load configuration from sqlsift.toml and set up state
     pub fn load_config(&mut self, workspace_root: &Path) {
         self.workspace_root = Some(workspace_root.to_path_buf());
 

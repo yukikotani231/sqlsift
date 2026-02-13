@@ -7,17 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-02-13
+
+### Changed
+- **Project renamed from sqlsurge to sqlsift** to avoid name conflict with existing [senkenn/sqlsurge](https://github.com/senkenn/sqlsurge) VS Code extension
+  - crate names: `sqlsift-core`, `sqlsift-cli`, `sqlsift-lsp`
+  - npm package: `sqlsift-cli`
+  - binary: `sqlsift`
+  - config file: `sqlsift.toml`
+
+### Fixed
+- Fix `auto-tag.yml` release automation: add `actions: write` permission to enable `gh workflow run`
+
 ## [0.1.0-alpha.7] - 2026-02-11
 
 ### Added
-- **LSP server** (`sqlsurge-lsp`): Language Server Protocol support for real-time SQL diagnostics in editors
+- **LSP server** (`sqlsift-lsp`): Language Server Protocol support for real-time SQL diagnostics in editors
   - textDocument/didOpen, didChange, didSave, didClose
-  - Automatic schema loading from `sqlsurge.toml`
+  - Automatic schema loading from `sqlsift.toml`
   - Schema file change detection with catalog rebuild
   - Diagnostic severity, error codes, and help messages
   - 12 unit tests (diagnostic conversion, state management)
 - **VS Code extension** (`editors/vscode/`): Thin LSP client for VS Code
-  - Configurable server path via `sqlsurge.serverPath` setting
+  - Configurable server path via `sqlsift.serverPath` setting
   - SQL language configuration (comments, brackets)
 - **Neovim support**: Works out of the box with built-in LSP client
 
@@ -102,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0-alpha.1] - 2026-02-07
 
 ### Added
-- Initial release of sqlsurge
+- Initial release of sqlsift
 - SQL static analysis against schema definitions
 - Support for PostgreSQL dialect
 - Schema parsing from CREATE TABLE statements
@@ -121,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CTE (Common Table Expressions) support
 - Error position reporting (line and column numbers)
 - Multiple output formats: human-readable, JSON, SARIF
-- Configuration file support (sqlsurge.toml)
+- Configuration file support (sqlsift.toml)
 - Rule disabling via CLI (--disable) or config file
 - CLI with check, schema, and parse commands
 - Typo suggestions using Levenshtein distance
@@ -134,11 +146,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No support for VIEWs, functions, or stored procedures
 - Derived table (subquery in FROM) column resolution is incomplete
 
-[Unreleased]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.7...HEAD
-[0.1.0-alpha.7]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
-[0.1.0-alpha.6]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
-[0.1.0-alpha.5]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
-[0.1.0-alpha.4]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
-[0.1.0-alpha.3]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
-[0.1.0-alpha.2]: https://github.com/yukikotani231/sqlsurge/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
-[0.1.0-alpha.1]: https://github.com/yukikotani231/sqlsurge/releases/tag/v0.1.0-alpha.1
+[Unreleased]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.8...HEAD
+[0.1.0-alpha.8]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.7...v0.1.0-alpha.8
+[0.1.0-alpha.7]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.6...v0.1.0-alpha.7
+[0.1.0-alpha.6]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.5...v0.1.0-alpha.6
+[0.1.0-alpha.5]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.4...v0.1.0-alpha.5
+[0.1.0-alpha.4]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.3...v0.1.0-alpha.4
+[0.1.0-alpha.3]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
+[0.1.0-alpha.2]: https://github.com/yukikotani231/sqlsift/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/yukikotani231/sqlsift/releases/tag/v0.1.0-alpha.1

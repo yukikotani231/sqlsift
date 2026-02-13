@@ -1,5 +1,5 @@
 [package]
-name = "sqlsurge-lsp"
+name = "sqlsift-lsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,11 +11,11 @@ categories = ["development-tools", "database"]
 readme = "../../README.md"
 
 [[bin]]
-name = "sqlsurge-lsp"
+name = "sqlsift-lsp"
 path = "src/main.rs"
 
 [dependencies]
-sqlsurge-core.workspace = true
+sqlsift-core.workspace = true
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 serde.workspace = true
