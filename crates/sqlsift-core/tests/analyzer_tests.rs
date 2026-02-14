@@ -1661,7 +1661,12 @@ fn test_cast_type_inference_detects_mismatch() {
 
     // CAST(id AS TEXT) produces TEXT, compared with INTEGER column => type mismatch
     let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(id AS TEXT)");
-    assert_eq!(diagnostics.len(), 1, "Should detect type mismatch: {:?}", diagnostics);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "Should detect type mismatch: {:?}",
+        diagnostics
+    );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
 }
 
