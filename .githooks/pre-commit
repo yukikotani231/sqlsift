@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo ""
+    echo "ERROR: Formatting check failed."
+    echo "Run 'cargo fmt' to fix, then re-commit."
+    exit 1
+fi
+
+# Run clippy
+if ! cargo clippy --all-targets -- -D warnings 2>/dev/null; then
+    echo ""
+    echo "ERROR: Clippy check failed. Fix warnings above, then re-commit."
+    exit 1
+fi
+
+echo "Pre-commit checks passed."

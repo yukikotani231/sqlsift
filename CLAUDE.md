@@ -65,13 +65,20 @@ Schema SQL → sqlparser → AST → SchemaBuilder → Catalog
 Query SQL  → sqlparser → AST → Analyzer → NameResolver → TypeResolver → Diagnostics
 ```
 
+## Setup
+
+```bash
+# Enable pre-commit hooks (fmt + clippy checks)
+git config core.hooksPath .githooks
+```
+
 ## Build & Test Commands
 
 ```bash
 # Build
 cargo build
 
-# Run tests (137 tests: 28 unit + 94 integration + 3 doc + 12 LSP)
+# Run tests (141 tests: 28 unit + 98 integration + 3 doc + 12 LSP)
 cargo test
 
 # Run with example
