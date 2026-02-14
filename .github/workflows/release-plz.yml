@@ -30,7 +30,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for tag in $(echo '${{ steps.release-plz.outputs.releases }}' | jq -r '.[].tag'); do
+          for tag in $(echo '${{ steps.release-plz.outputs.releases }}' | jq -r '.[] | select(.tag | test("^v")) | .tag'); do
             gh workflow run release.yml --ref "$tag"
           done
 
