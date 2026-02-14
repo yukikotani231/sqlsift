@@ -1638,6 +1638,62 @@ fn test_update_multiple_type_errors() {
         .all(|d| d.kind == DiagnosticKind::TypeMismatch));
 }
 
+// ========== CAST Type Inference Tests ==========
+
+#[test]
+fn test_cast_type_inference_no_false_positive() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // CAST(name AS INTEGER) should be inferred as INTEGER, compatible with INTEGER column
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER)");
+    assert!(
+        diagnostics.is_empty(),
+        "CAST to INTEGER should be compatible with INTEGER column: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_cast_type_inference_detects_mismatch() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // CAST(id AS TEXT) produces TEXT, compared with INTEGER column => type mismatch
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(id AS TEXT)");
+    assert_eq!(diagnostics.len(), 1, "Should detect type mismatch: {:?}", diagnostics);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn test_cast_in_insert_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // CAST('123' AS INTEGER) should be compatible with INTEGER column
+    let diagnostics = analyzer.analyze("INSERT INTO orders (user_id) VALUES (CAST('123' AS INTEGER))");
+    assert!(
+        diagnostics.is_empty(),
+        "CAST to INTEGER should be compatible with INTEGER column in INSERT: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_cast_in_arithmetic() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // CAST(name AS INTEGER) + 1 should be numeric, compatible with INTEGER column
+    let diagnostics =
+        analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER) + 1");
+    assert!(
+        diagnostics.is_empty(),
+        "CAST to INTEGER in arithmetic should be compatible: {:?}",
+        diagnostics
+    );
+}
+
 // ========== SQLite Dialect Tests ==========
 
 fn setup_sqlite_catalog() -> Catalog {
