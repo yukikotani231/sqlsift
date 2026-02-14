@@ -223,10 +223,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Release Process
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please):
+Releases are automated via [release-plz](https://release-plz.dev/):
 
 1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) format (`feat:`, `fix:`, `docs:`, etc.)
-2. release-please automatically creates/updates a Release PR with version bump and CHANGELOG
+2. release-plz automatically creates/updates a Release PR with version bump and CHANGELOG
 3. Merge the Release PR → tag is created → `release.yml` (cargo-dist) builds and publishes
 
 ```bash
@@ -234,10 +234,9 @@ Releases are automated via [release-please](https://github.com/googleapis/releas
 ./scripts/release.sh --tag <version>
 ```
 
-### Configuration files
-- `release-please-config.json` — release-please settings (release-type, versioning strategy)
-- `.release-please-manifest.json` — current version tracking
-- `Cargo.toml` — uses `# x-release-please-version` marker for dependency version sync
+### Configuration
+- `release-plz.toml` — release-plz settings (publish, tag, semver-check)
+- Only `sqlsift-cli` creates a git tag (`v{version}`) to trigger cargo-dist
 
 - npm package: `sqlsift-cli` (provides `sqlsift` command)
 - Supported platforms: macOS (x64/ARM64), Linux (x64/ARM64), Windows (x64)

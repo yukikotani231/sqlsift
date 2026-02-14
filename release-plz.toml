@@ -1,0 +1,15 @@
+[workspace]
+# Don't publish to crates.io (cargo-dist handles distribution via npm)
+publish = false
+# Don't create GitHub releases (cargo-dist handles this via release.yml)
+git_release_enable = false
+# Don't create git tags by default
+git_tag_enable = false
+# Skip semver checks during alpha development
+semver_check = false
+
+# Only create a tag for sqlsift-cli (triggers cargo-dist release.yml)
+[[package]]
+name = "sqlsift-cli"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"

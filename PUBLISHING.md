@@ -4,26 +4,21 @@ This document describes how to publish sqlsift releases.
 
 ## Automated Release (Recommended)
 
-Releases are fully automated using [release-please](https://github.com/googleapis/release-please):
+Releases are fully automated using [release-plz](https://release-plz.dev/):
 
 1. **Write Conventional Commits** on the `main` branch:
-   - `feat: add new feature` → bumps minor (or prerelease increment)
-   - `fix: fix a bug` → bumps patch (or prerelease increment)
+   - `feat: add new feature` → bumps minor
+   - `fix: fix a bug` → bumps patch
    - `feat!: breaking change` → bumps major
 
-2. **release-please creates a Release PR** automatically:
-   - Updates version in `Cargo.toml`
+2. **release-plz creates a Release PR** automatically:
+   - Updates version in `Cargo.toml` (workspace version)
    - Updates `CHANGELOG.md` with commit messages
-   - Updates `.release-please-manifest.json`
 
 3. **Merge the Release PR** to trigger the release:
-   - release-please creates a git tag and GitHub Release
+   - release-plz creates a git tag (`v{version}`)
    - `release.yml` (cargo-dist) builds platform-specific binaries
    - npm package (`sqlsift-cli`) is published automatically
-
-### Graduating from Prerelease
-
-To move from alpha to stable (e.g., `0.1.0-alpha.9` → `0.1.0`), add `release-as: 0.1.0` to the Release PR title or use the release-please config override.
 
 ## Manual Fallback
 
