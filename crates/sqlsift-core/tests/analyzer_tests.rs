@@ -1671,7 +1671,8 @@ fn test_cast_in_insert_compatible() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // CAST('123' AS INTEGER) should be compatible with INTEGER column
-    let diagnostics = analyzer.analyze("INSERT INTO orders (user_id) VALUES (CAST('123' AS INTEGER))");
+    let diagnostics =
+        analyzer.analyze("INSERT INTO orders (user_id) VALUES (CAST('123' AS INTEGER))");
     assert!(
         diagnostics.is_empty(),
         "CAST to INTEGER should be compatible with INTEGER column in INSERT: {:?}",
@@ -1685,8 +1686,7 @@ fn test_cast_in_arithmetic() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // CAST(name AS INTEGER) + 1 should be numeric, compatible with INTEGER column
-    let diagnostics =
-        analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER) + 1");
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER) + 1");
     assert!(
         diagnostics.is_empty(),
         "CAST to INTEGER in arithmetic should be compatible: {:?}",
