@@ -2,34 +2,38 @@
 
 This document describes how to publish sqlsift releases.
 
-## Quick Release (Recommended)
+## Automated Release (Recommended)
 
-Use the release script for a streamlined process:
+Releases are fully automated using [release-please](https://github.com/googleapis/release-please):
+
+1. **Write Conventional Commits** on the `main` branch:
+   - `feat: add new feature` → bumps minor (or prerelease increment)
+   - `fix: fix a bug` → bumps patch (or prerelease increment)
+   - `feat!: breaking change` → bumps major
+
+2. **release-please creates a Release PR** automatically:
+   - Updates version in `Cargo.toml`
+   - Updates `CHANGELOG.md` with commit messages
+   - Updates `.release-please-manifest.json`
+
+3. **Merge the Release PR** to trigger the release:
+   - release-please creates a git tag and GitHub Release
+   - `release.yml` (cargo-dist) builds platform-specific binaries
+   - npm package (`sqlsift-cli`) is published automatically
+
+### Graduating from Prerelease
+
+To move from alpha to stable (e.g., `0.1.0-alpha.9` → `0.1.0`), add `release-as: 0.1.0` to the Release PR title or use the release-please config override.
+
+## Manual Fallback
+
+If the automation fails, use the manual tag script:
 
 ```bash
-# 1. Prepare the release (updates version, CHANGELOG, creates PR)
-./scripts/release.sh 0.2.0
-
-# 2. Edit CHANGELOG.md when prompted, then press Enter
-
-# 3. Review and merge the PR on GitHub
-#    -> Tag is created automatically
-#    -> Release workflow builds and publishes automatically
+./scripts/release.sh --tag 0.1.0-alpha.9
 ```
 
-The script handles:
-- Version bump in `Cargo.toml`
-- `Cargo.lock` update
-- `CHANGELOG.md` scaffolding
-- Running tests, clippy, and fmt checks
-- Creating a release branch, commit, and PR
-
-After the PR is merged:
-1. `auto-tag.yml` workflow detects the merged `release/v*` branch and creates the git tag
-2. The tag triggers `release.yml` (cargo-dist) which automatically:
-   - Builds platform-specific binaries (macOS, Linux, Windows)
-   - Creates a GitHub Release with artifacts
-   - Publishes the npm package (`sqlsift-cli`)
+This creates a git tag and pushes it, triggering the cargo-dist release workflow.
 
 ## Prerequisites
 
