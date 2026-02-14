@@ -1541,3 +1541,99 @@ fn test_uuid_integer_mismatch() {
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
 }
+
+// ========== INSERT/UPDATE Type Checking Tests ==========
+
+#[test]
+fn test_insert_type_mismatch() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // id is INTEGER (SERIAL), inserting a string should be a type mismatch
+    let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES ('text')");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "Should detect type mismatch in INSERT VALUES: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+    assert!(diagnostics[0].message.contains("id"));
+}
+
+#[test]
+fn test_insert_type_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // id is INTEGER, inserting a number should be fine
+    let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES (42)");
+    assert!(
+        diagnostics.is_empty(),
+        "Compatible INSERT should have no errors: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_insert_null_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // NULL should be compatible with any column type
+    let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES (NULL)");
+    assert!(
+        diagnostics.is_empty(),
+        "NULL INSERT should have no errors: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_update_type_mismatch() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // id is INTEGER, setting to a string should be a type mismatch
+    let diagnostics = analyzer.analyze("UPDATE users SET id = 'text'");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "Should detect type mismatch in UPDATE SET: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+    assert!(diagnostics[0].message.contains("id"));
+}
+
+#[test]
+fn test_update_type_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // name is VARCHAR, setting to a string should be fine
+    let diagnostics = analyzer.analyze("UPDATE users SET name = 'new_name'");
+    assert!(
+        diagnostics.is_empty(),
+        "Compatible UPDATE should have no errors: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_update_multiple_type_errors() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // id is INTEGER, name is VARCHAR - both set to wrong types
+    let diagnostics = analyzer.analyze("UPDATE orders SET user_id = 'text', total = true");
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "Should detect multiple type mismatches in UPDATE: {:?}",
+        diagnostics
+    );
+    assert!(diagnostics
+        .iter()
+        .all(|d| d.kind == DiagnosticKind::TypeMismatch));
+}
