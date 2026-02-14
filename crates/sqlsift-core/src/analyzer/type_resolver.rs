@@ -547,8 +547,15 @@ impl<'a> TypeResolver<'a> {
                 // Infer result type of binary operation
                 self.infer_binary_op_result_type(left, op, right)
             }
+            Expr::Cast { data_type, .. } => {
+                let sql_type = SqlType::from_ast(data_type);
+                if sql_type == SqlType::Unknown {
+                    ExpressionType::Unknown
+                } else {
+                    ExpressionType::Known(sql_type)
+                }
+            }
             // TODO: Add support for more expression types:
-            // - Expr::Cast => Return the target type directly (easy, 30 min, ROI 60%)
             // - Expr::Function => Lookup function signature table (complex, 2-3 hours, ROI 40%)
             // - Expr::Case => Infer from THEN/ELSE branches (medium, 1-1.5 hours, ROI 20%)
             // - Expr::Subquery => Infer from SELECT projection (complex, 4-6 hours, ROI 15%)
