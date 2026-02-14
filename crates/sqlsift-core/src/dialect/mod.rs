@@ -1,6 +1,6 @@
 //! SQL dialect support
 
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use std::str::FromStr;
 
 /// Supported SQL dialects
@@ -9,6 +9,7 @@ pub enum SqlDialect {
     #[default]
     PostgreSQL,
     MySQL,
+    SQLite,
 }
 
 impl SqlDialect {
@@ -17,6 +18,7 @@ impl SqlDialect {
         match self {
             SqlDialect::PostgreSQL => Box::new(PostgreSqlDialect {}),
             SqlDialect::MySQL => Box::new(MySqlDialect {}),
+            SqlDialect::SQLite => Box::new(SQLiteDialect {}),
         }
     }
 
@@ -24,7 +26,7 @@ impl SqlDialect {
     pub fn default_schema(&self) -> &'static str {
         match self {
             SqlDialect::PostgreSQL => "public",
-            SqlDialect::MySQL => "",
+            SqlDialect::MySQL | SqlDialect::SQLite => "",
         }
     }
 }
@@ -36,12 +38,9 @@ impl FromStr for SqlDialect {
         match s.to_lowercase().as_str() {
             "postgresql" | "postgres" | "pg" => Ok(SqlDialect::PostgreSQL),
             "mysql" | "mysql8" => Ok(SqlDialect::MySQL),
-            "sqlite" => Err(
-                "SQLite dialect is not yet supported. Supported dialects: postgresql, mysql."
-                    .to_string(),
-            ),
+            "sqlite" | "sqlite3" => Ok(SqlDialect::SQLite),
             _ => Err(format!(
-                "Unknown dialect: '{}'. Supported dialects: postgresql, mysql.",
+                "Unknown dialect: '{}'. Supported dialects: postgresql, mysql, sqlite.",
                 s
             )),
         }
@@ -53,6 +52,7 @@ impl std::fmt::Display for SqlDialect {
         match self {
             SqlDialect::PostgreSQL => write!(f, "postgresql"),
             SqlDialect::MySQL => write!(f, "mysql"),
+            SqlDialect::SQLite => write!(f, "sqlite"),
         }
     }
 }

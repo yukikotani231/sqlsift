@@ -150,7 +150,6 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 ## Current Limitations
 
 ### SQL Dialect Support
-- SQLite dialect is not yet supported (PostgreSQL and MySQL are supported)
 - Schema-qualified names (e.g., `public.users`) are not fully resolved
 
 ### Type Inference (Partial Implementation)

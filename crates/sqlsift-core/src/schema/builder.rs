@@ -498,12 +498,12 @@ impl SchemaBuilder {
                 }
             }
             ColumnOption::DialectSpecific(tokens) => {
-                // MySQL AUTO_INCREMENT
+                // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
                 if tokens
                     .iter()
-                    .any(|t| matches!(t, Token::Word(w) if w.value == "AUTO_INCREMENT"))
+                    .any(|t| matches!(t, Token::Word(w) if w.value == "AUTO_INCREMENT" || w.value == "AUTOINCREMENT"))
                 {
-                    col.nullable = false; // AUTO_INCREMENT implies NOT NULL
+                    col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
                 }
             }
             _ => {}
