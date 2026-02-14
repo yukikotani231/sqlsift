@@ -160,10 +160,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Binary operator type validation (=, <, >, <=, >=, !=, +, -, *, /, %)
 - Nested expression type inference
 - Numeric type compatibility (TINYINT → BIGINT implicit casts)
+- INSERT VALUES type checking (`INSERT INTO users (id) VALUES ('text')` → E0003)
+- UPDATE SET type checking (`UPDATE users SET id = 'text'` → E0003)
 
 **Not Yet Implemented (TODO):**
-- INSERT VALUES type checking (`INSERT INTO users (id) VALUES ('text')`)
-- UPDATE SET type checking (`UPDATE users SET id = 'text'`)
 - CAST expression type inference (`CAST(x AS INTEGER)`)
 - Function return type inference (COUNT → INTEGER, SUM → NUMERIC, etc.)
 - CASE expression type consistency (THEN/ELSE must have compatible types)
@@ -171,8 +171,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - VIEW column type inference from SELECT projection
 
 **Implementation Notes:**
-- Current type inference covers ~70-80% of real-world type errors
-- Missing features have lower ROI (INSERT/UPDATE would add ~15%, rest combined ~5%)
+- Current type inference covers ~85% of real-world type errors
 - See `crates/sqlsift-core/src/analyzer/type_resolver.rs` for implementation
 
 ### Other Limitations

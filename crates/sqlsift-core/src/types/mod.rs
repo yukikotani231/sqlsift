@@ -204,6 +204,11 @@ impl SqlType {
             // String to UUID coercion (PostgreSQL implicit cast)
             (Char { .. } | Varchar { .. } | Text, Uuid) => TypeCompatibility::ImplicitCast,
 
+            // String to ENUM coercion (ENUM values are string literals)
+            (Char { .. } | Varchar { .. } | Text, Custom(name)) if name == "ENUM" => {
+                TypeCompatibility::ImplicitCast
+            }
+
             // Any type can be explicitly cast
             _ => TypeCompatibility::ExplicitCast,
         }

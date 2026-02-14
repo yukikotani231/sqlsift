@@ -1,6 +1,6 @@
 //! Type resolver - infers and validates types in SQL expressions
 //!
-//! ## Current Implementation (v0.1.0-alpha.6)
+//! ## Current Implementation
 //!
 //! **Supported:**
 //! - WHERE clause type checking (E0003)
@@ -8,10 +8,10 @@
 //! - Binary operators: comparisons (=, !=, <, >, <=, >=), arithmetic (+, -, *, /, %)
 //! - Nested expressions: `(a + b) * 2 = c`
 //! - Numeric type compatibility (INTEGER → BIGINT implicit casts)
-//!
-//! **TODO (Not Yet Implemented):**
 //! - INSERT VALUES type checking: `INSERT INTO users (id) VALUES ('text')` → E0003
 //! - UPDATE SET type checking: `UPDATE users SET id = 'text'` → E0003
+//!
+//! **TODO (Not Yet Implemented):**
 //! - CAST expression inference: `CAST(x AS INTEGER)` should infer as INTEGER
 //! - Function return types: COUNT() → INTEGER, SUM() → NUMERIC, etc.
 //! - CASE expression type consistency: THEN/ELSE branches must have compatible types
@@ -20,11 +20,13 @@
 //!
 //! ## Implementation Notes
 //!
-//! - Current coverage: ~70-80% of real-world type errors
-//! - ROI for remaining features: INSERT/UPDATE (~15%), CAST (~5%), others (~5%)
+//! - Current coverage: ~85% of real-world type errors
 //! - Type inference is performed in a separate pass after name resolution
 
-use sqlparser::ast::{BinaryOperator, Expr, Query, Select, Spanned, Statement, Value};
+use sqlparser::ast::{
+    AssignmentTarget, BinaryOperator, Expr, Insert, Query, Select, SetExpr, Spanned, Statement,
+    TableFactor, Value, Values,
+};
 use std::collections::HashMap;
 
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -92,28 +94,19 @@ impl<'a> TypeResolver<'a> {
             Statement::Query(query) => {
                 self.check_query(query);
             }
-            Statement::Insert { .. } => {
-                // TODO: Check INSERT value types against column types
-                // Example: INSERT INTO users (id, name) VALUES ('text', 123)
-                //          should error because id expects INTEGER, not TEXT
-                // Implementation: Extract columns and values, infer value types, compare with column types
-                // Estimated effort: 1-1.5 hours
-                // ROI: High (85%) - common error type
+            Statement::Insert(insert) => {
+                self.check_insert(insert);
             }
             Statement::Update {
-                selection: Some(expr),
+                table,
+                assignments,
+                selection,
                 ..
             } => {
-                // TODO: Check SET assignment types
-                // Example: UPDATE users SET id = 'text' WHERE ...
-                //          should error because id is INTEGER
-                // Implementation: Extract assignments, infer right-hand side types, compare with column types
-                // Estimated effort: 1 hour
-                // ROI: High (85%) - common error type
-                self.check_expr_recursive(expr);
-            }
-            Statement::Update { .. } => {
-                // No WHERE clause, nothing to check yet
+                self.check_update(table, assignments);
+                if let Some(expr) = selection {
+                    self.check_expr_recursive(expr);
+                }
             }
             Statement::Delete(delete) => {
                 // WHERE condition type checking is already implemented
@@ -122,6 +115,123 @@ impl<'a> TypeResolver<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Check types in an INSERT statement
+    fn check_insert(&mut self, insert: &Insert) {
+        let table_name = object_name_to_qualified(&insert.table_name);
+        let table_def = match self.catalog.get_table(&table_name) {
+            Some(def) => def,
+            None => return, // Table not found - already reported by NameResolver
+        };
+
+        // Determine target columns
+        let target_columns: Vec<String> = if insert.columns.is_empty() {
+            // No explicit columns - use all table columns in order
+            table_def.columns.keys().cloned().collect()
+        } else {
+            insert.columns.iter().map(|c| c.value.clone()).collect()
+        };
+
+        // Check VALUES rows
+        if let Some(source) = &insert.source {
+            if let SetExpr::Values(Values { rows, .. }) = source.body.as_ref() {
+                for row in rows {
+                    for (i, value_expr) in row.iter().enumerate() {
+                        if i >= target_columns.len() {
+                            break;
+                        }
+                        let col_name = &target_columns[i];
+                        let col_def = match table_def.get_column(col_name) {
+                            Some(def) => def,
+                            None => continue, // Column not found - already reported
+                        };
+                        let value_type = self.infer_expr_type(value_expr);
+                        if let ExpressionType::Known(vt) = value_type {
+                            let compat = vt.is_compatible_with(&col_def.data_type);
+                            let compat_rev = col_def.data_type.is_compatible_with(&vt);
+                            if compat == TypeCompatibility::ExplicitCast
+                                && compat_rev == TypeCompatibility::ExplicitCast
+                            {
+                                let span = Span::from_sqlparser(&value_expr.span());
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        DiagnosticKind::TypeMismatch,
+                                        format!(
+                                            "Type mismatch: column '{}' expects {}, but got {}",
+                                            col_name,
+                                            col_def.data_type.display_name(),
+                                            vt.display_name()
+                                        ),
+                                    )
+                                    .with_span(span)
+                                    .with_help(
+                                        "Value type is not compatible with the column type. Consider using explicit CAST.",
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check types in an UPDATE statement
+    fn check_update(
+        &mut self,
+        table: &sqlparser::ast::TableWithJoins,
+        assignments: &[sqlparser::ast::Assignment],
+    ) {
+        let table_name = match &table.relation {
+            TableFactor::Table { name, .. } => object_name_to_qualified(name),
+            _ => return,
+        };
+        let table_def = match self.catalog.get_table(&table_name) {
+            Some(def) => def,
+            None => return, // Table not found - already reported by NameResolver
+        };
+
+        for assignment in assignments {
+            let col_name = match &assignment.target {
+                AssignmentTarget::ColumnName(name) => match name.0.last() {
+                    Some(ident) => ident.value.clone(),
+                    None => continue,
+                },
+                AssignmentTarget::Tuple(_) => continue, // Skip tuple assignments
+            };
+
+            let col_def = match table_def.get_column(&col_name) {
+                Some(def) => def,
+                None => continue, // Column not found - already reported
+            };
+
+            let value_type = self.infer_expr_type(&assignment.value);
+            if let ExpressionType::Known(vt) = value_type {
+                let compat = vt.is_compatible_with(&col_def.data_type);
+                let compat_rev = col_def.data_type.is_compatible_with(&vt);
+                if compat == TypeCompatibility::ExplicitCast
+                    && compat_rev == TypeCompatibility::ExplicitCast
+                {
+                    let span = Span::from_sqlparser(&assignment.value.span());
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            DiagnosticKind::TypeMismatch,
+                            format!(
+                                "Type mismatch: column '{}' expects {}, but got {}",
+                                col_name,
+                                col_def.data_type.display_name(),
+                                vt.display_name()
+                            ),
+                        )
+                        .with_span(span)
+                        .with_help(
+                            "Value type is not compatible with the column type. Consider using explicit CAST.",
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -564,6 +674,16 @@ impl<'a> TypeResolver<'a> {
         }
 
         ExpressionType::Unknown
+    }
+}
+
+/// Convert sqlparser ObjectName to our QualifiedName
+fn object_name_to_qualified(name: &sqlparser::ast::ObjectName) -> QualifiedName {
+    match name.0.as_slice() {
+        [table] => QualifiedName::new(&table.value),
+        [schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
+        [_catalog, schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
+        _ => QualifiedName::new(name.to_string()),
     }
 }
 
