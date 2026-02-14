@@ -1637,3 +1637,150 @@ fn test_update_multiple_type_errors() {
         .iter()
         .all(|d| d.kind == DiagnosticKind::TypeMismatch));
 }
+
+// ========== SQLite Dialect Tests ==========
+
+fn setup_sqlite_catalog() -> Catalog {
+    let schema_sql = r#"
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT,
+            age INTEGER
+        );
+
+        CREATE TABLE posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+    "#;
+
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::SQLite);
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+    catalog
+}
+
+#[test]
+fn test_sqlite_schema_parsing() {
+    let catalog = setup_sqlite_catalog();
+
+    assert!(
+        catalog.table_exists(&QualifiedName::new("users")),
+        "users table should exist"
+    );
+    assert!(
+        catalog.table_exists(&QualifiedName::new("posts")),
+        "posts table should exist"
+    );
+
+    let users = catalog.get_table(&QualifiedName::new("users")).unwrap();
+    assert_eq!(users.columns.len(), 4);
+
+    let id_col = users.get_column("id").unwrap();
+    assert!(id_col.is_primary_key);
+    assert!(!id_col.nullable);
+}
+
+#[test]
+fn test_sqlite_valid_select() {
+    let catalog = setup_sqlite_catalog();
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::SQLite);
+
+    let diagnostics = analyzer.analyze("SELECT id, name, email FROM users");
+    assert!(
+        diagnostics.is_empty(),
+        "Valid SQLite SELECT should have no errors: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_sqlite_autoincrement() {
+    let schema_sql = r#"
+        CREATE TABLE counters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            value INTEGER NOT NULL
+        );
+    "#;
+
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::SQLite);
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+
+    let table = catalog.get_table(&QualifiedName::new("counters")).unwrap();
+    let id_col = table.get_column("id").unwrap();
+    assert!(id_col.is_primary_key, "AUTOINCREMENT column should be PK");
+    assert!(!id_col.nullable, "AUTOINCREMENT column should be NOT NULL");
+}
+
+#[test]
+fn test_sqlite_insert() {
+    let catalog = setup_sqlite_catalog();
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::SQLite);
+
+    // Valid INSERT
+    let diagnostics =
+        analyzer.analyze("INSERT INTO users (name, email, age) VALUES ('Alice', 'a@b.com', 30)");
+    assert!(
+        diagnostics.is_empty(),
+        "Valid SQLite INSERT should have no errors: {:?}",
+        diagnostics
+    );
+
+    // Type mismatch: age is INTEGER, inserting TEXT
+    let diagnostics =
+        analyzer.analyze("INSERT INTO users (name, age) VALUES ('Alice', 'not_a_number')");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "SQLite INSERT type mismatch should be detected: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn test_sqlite_update() {
+    let catalog = setup_sqlite_catalog();
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::SQLite);
+
+    // Valid UPDATE
+    let diagnostics = analyzer.analyze("UPDATE users SET name = 'Bob' WHERE id = 1");
+    assert!(
+        diagnostics.is_empty(),
+        "Valid SQLite UPDATE should have no errors: {:?}",
+        diagnostics
+    );
+
+    // Type mismatch: age is INTEGER, setting to TEXT
+    let diagnostics = analyzer.analyze("UPDATE users SET age = 'old'");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "SQLite UPDATE type mismatch should be detected: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn test_sqlite_delete() {
+    let catalog = setup_sqlite_catalog();
+    let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::SQLite);
+
+    let diagnostics = analyzer.analyze("DELETE FROM users WHERE id = 1");
+    assert!(
+        diagnostics.is_empty(),
+        "Valid SQLite DELETE should have no errors: {:?}",
+        diagnostics
+    );
+
+    // Column not found
+    let diagnostics = analyzer.analyze("DELETE FROM users WHERE nonexistent = 1");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+}
