@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sqlsift-core", "crates/sqlsift-cli", "crates/sqlsift-lsp"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/yukikotani231/sqlsift"
@@ -36,7 +36,7 @@ tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
 # Internal crates
-sqlsift-core = { path = "crates/sqlsift-core", version = "0.1.0" }
+sqlsift-core = { path = "crates/sqlsift-core", version = "0.1.1" }
 
 # The profile that 'dist' will build with
 [profile.dist]
