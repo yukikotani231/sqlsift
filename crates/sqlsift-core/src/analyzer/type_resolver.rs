@@ -12,8 +12,6 @@
 //! - UPDATE SET type checking: `UPDATE users SET id = 'text'` → E0003
 //!
 //! **TODO (Not Yet Implemented):**
-//! - CAST expression inference: `CAST(x AS INTEGER)` should infer as INTEGER
-//! - Function return types: COUNT() → INTEGER, SUM() → NUMERIC, etc.
 //! - CASE expression type consistency: THEN/ELSE branches must have compatible types
 //! - Subquery column type inference: Infer types from SELECT projections
 //! - VIEW/CTE column type inference: Requires full SELECT type analysis
@@ -555,11 +553,109 @@ impl<'a> TypeResolver<'a> {
                     ExpressionType::Known(sql_type)
                 }
             }
+            Expr::Function(func) => self.infer_function_return_type(func),
             // TODO: Add support for more expression types:
-            // - Expr::Function => Lookup function signature table (complex, 2-3 hours, ROI 40%)
             // - Expr::Case => Infer from THEN/ELSE branches (medium, 1-1.5 hours, ROI 20%)
             // - Expr::Subquery => Infer from SELECT projection (complex, 4-6 hours, ROI 15%)
             _ => ExpressionType::Unknown,
+        }
+    }
+
+    /// Infer the return type of a SQL function
+    fn infer_function_return_type(&mut self, func: &sqlparser::ast::Function) -> ExpressionType {
+        let func_name = func.name.to_string().to_uppercase();
+        // Strip schema prefix (e.g., "PG_CATALOG.COUNT" → "COUNT")
+        let name = func_name.rsplit('.').next().unwrap_or(&func_name);
+
+        match name {
+            // Aggregate functions returning INTEGER/BIGINT
+            "COUNT" => ExpressionType::Known(SqlType::BigInt),
+
+            // Aggregate functions returning same as input or NUMERIC
+            "SUM" => self.infer_aggregate_numeric_type(func),
+            "AVG" => ExpressionType::Known(SqlType::Decimal {
+                precision: None,
+                scale: None,
+            }),
+
+            // MIN/MAX return the same type as their argument
+            "MIN" | "MAX" => self.infer_first_arg_type(func),
+
+            // Boolean-returning functions
+            "EXISTS" | "BOOL_AND" | "BOOL_OR" | "EVERY" => ExpressionType::Known(SqlType::Boolean),
+
+            // String functions
+            "CONCAT" | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE" | "SUBSTRING"
+            | "SUBSTR" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REPEAT" | "REVERSE" | "INITCAP"
+            | "MD5" => ExpressionType::Known(SqlType::Text),
+
+            // String → Integer functions
+            "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "BIT_LENGTH" | "OCTET_LENGTH"
+            | "POSITION" | "STRPOS" => ExpressionType::Known(SqlType::Integer),
+
+            // Numeric functions
+            "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "TRUNC" | "TRUNCATE" | "SIGN"
+            | "MOD" => self.infer_first_arg_type_or_numeric(func),
+            "RANDOM" | "SQRT" | "POWER" | "LOG" | "LN" | "EXP" | "PI" | "DEGREES" | "RADIANS"
+            | "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" => {
+                ExpressionType::Known(SqlType::DoublePrecision)
+            }
+
+            // Date/Time functions
+            "NOW" | "CURRENT_TIMESTAMP" => ExpressionType::Known(SqlType::Timestamp {
+                precision: None,
+                with_timezone: true,
+            }),
+            "CURRENT_DATE" => ExpressionType::Known(SqlType::Date),
+            "CURRENT_TIME" => ExpressionType::Known(SqlType::Time {
+                precision: None,
+                with_timezone: true,
+            }),
+
+            // Type casting functions
+            "COALESCE" | "NULLIF" | "IFNULL" => self.infer_first_arg_type(func),
+            "GREATEST" | "LEAST" => self.infer_first_arg_type(func),
+
+            _ => ExpressionType::Unknown,
+        }
+    }
+
+    /// Infer the type of the first argument to a function
+    fn infer_first_arg_type(&mut self, func: &sqlparser::ast::Function) -> ExpressionType {
+        if let sqlparser::ast::FunctionArguments::List(arg_list) = &func.args {
+            if let Some(sqlparser::ast::FunctionArg::Unnamed(
+                sqlparser::ast::FunctionArgExpr::Expr(expr),
+            )) = arg_list.args.first()
+            {
+                return self.infer_expr_type(expr);
+            }
+        }
+        ExpressionType::Unknown
+    }
+
+    /// Infer the return type of SUM (integer args → BIGINT, decimal args → DECIMAL)
+    fn infer_aggregate_numeric_type(&mut self, func: &sqlparser::ast::Function) -> ExpressionType {
+        match self.infer_first_arg_type(func) {
+            ExpressionType::Known(t) if self.is_numeric_type(&t) => {
+                match t {
+                    SqlType::Decimal { .. } => ExpressionType::Known(t),
+                    SqlType::Real | SqlType::DoublePrecision => ExpressionType::Known(t),
+                    // Integer types → BIGINT for SUM to avoid overflow
+                    _ => ExpressionType::Known(SqlType::BigInt),
+                }
+            }
+            _ => ExpressionType::Unknown,
+        }
+    }
+
+    /// Infer first arg type, falling back to numeric
+    fn infer_first_arg_type_or_numeric(
+        &mut self,
+        func: &sqlparser::ast::Function,
+    ) -> ExpressionType {
+        match self.infer_first_arg_type(func) {
+            ExpressionType::Known(t) => ExpressionType::Known(t),
+            ExpressionType::Unknown => ExpressionType::Unknown,
         }
     }
 

@@ -1725,6 +1725,135 @@ fn setup_sqlite_catalog() -> Catalog {
     catalog
 }
 
+// ========== Function Return Type Inference ==========
+
+#[test]
+fn test_function_count_returns_bigint() {
+    // COUNT() returns BIGINT, comparing with TEXT should error
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE name = COUNT(*)");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch),
+        "COUNT() (bigint) compared with TEXT column should produce type mismatch: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_function_count_compatible_with_integer() {
+    // COUNT() returns BIGINT, comparing with INTEGER should be fine (numeric compatibility)
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = COUNT(*)");
+    let type_errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TypeMismatch)
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "COUNT() (bigint) compared with INTEGER should be compatible: {:?}",
+        type_errors
+    );
+}
+
+#[test]
+fn test_function_sum_returns_numeric() {
+    // SUM(integer_col) returns BIGINT, should not match TEXT
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM orders WHERE SUM(user_id) = 'text'");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch),
+        "SUM() compared with TEXT should produce type mismatch: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_function_upper_returns_text() {
+    // UPPER() returns TEXT, comparing with INTEGER should error
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = UPPER(name)");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch),
+        "UPPER() (text) compared with INTEGER should produce type mismatch: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_function_upper_compatible_with_text() {
+    // UPPER() returns TEXT, comparing with TEXT should be fine
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE name = UPPER(email)");
+    let type_errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TypeMismatch)
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "UPPER() (text) compared with TEXT should be compatible: {:?}",
+        type_errors
+    );
+}
+
+#[test]
+fn test_function_length_returns_integer() {
+    // LENGTH() returns INTEGER, comparing with TEXT should error
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE name = LENGTH(email)");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch),
+        "LENGTH() (integer) compared with TEXT should produce type mismatch: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_function_coalesce_inherits_arg_type() {
+    // COALESCE(integer_col, 0) should return INTEGER
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics = analyzer.analyze("SELECT * FROM users WHERE name = COALESCE(id, 0)");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch),
+        "COALESCE(integer) compared with TEXT should produce type mismatch: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_function_in_insert_type_check() {
+    // INSERT with function result type mismatch
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let diagnostics =
+        analyzer.analyze("INSERT INTO users (id, name) VALUES (LENGTH('test'), 'alice')");
+    let type_errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TypeMismatch)
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "LENGTH() returns INTEGER, compatible with INTEGER column: {:?}",
+        type_errors
+    );
+}
+
 #[test]
 fn test_sqlite_schema_parsing() {
     let catalog = setup_sqlite_catalog();
