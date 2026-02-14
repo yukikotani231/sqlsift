@@ -134,12 +134,13 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ✅ WHERE clause comparisons (`WHERE id = 'text'`)
 - ✅ Arithmetic operations (`SELECT name + 10`)
 - ✅ JOIN conditions (`ON users.id = orders.user_name`)
+- ✅ INSERT value type mismatches (`INSERT INTO users (id) VALUES ('text')`)
+- ✅ UPDATE assignment type mismatches (`UPDATE users SET id = 'text'`)
 - ✅ Nested expressions (`WHERE (a + b) * 2 = 'text'`)
 - ✅ All comparison operators (=, !=, <, >, <=, >=)
 - ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
 
 **Not Yet Detected:**
-- ⏳ INSERT/UPDATE value type mismatches
 - ⏳ CAST expression type inference
 - ⏳ Function return types (COUNT, SUM, AVG, etc.)
 - ⏳ CASE expression type consistency
@@ -220,7 +221,7 @@ sqlsift check -s schema.sql -f sarif queries/*.sql > results.sarif
 
 - **PostgreSQL** (default) — fully supported
 - **MySQL** — supported (`--dialect mysql`)
-- SQLite — planned
+- **SQLite** — supported (`--dialect sqlite`)
 
 Use the `--dialect` flag to specify the dialect.
 
@@ -229,16 +230,16 @@ Use the `--dialect` flag to specify the dialect.
 ### Completed
 - [x] Configuration file (`sqlsift.toml`)
 - [x] MySQL dialect support
-- [x] Type inference for expressions (WHERE, JOIN, arithmetic)
-
-### In Progress
-- [ ] Complete type inference coverage (INSERT/UPDATE values, CAST, functions)
+- [x] SQLite dialect support
+- [x] Type inference for expressions (WHERE, JOIN, arithmetic, INSERT/UPDATE)
+- [x] LSP server for editor integration (VS Code extension)
 
 ### Planned
-- [ ] LSP server for editor integration
-- [ ] SQLite dialect support
+- [ ] CAST expression type inference
+- [ ] Function return type inference (COUNT, SUM, AVG, etc.)
+- [ ] CASE expression type consistency checking
+- [ ] Subquery/CTE column type inference
 - [ ] Custom rule plugins
-- [ ] Type inference for subqueries and CTEs
 
 ## Contributing
 
