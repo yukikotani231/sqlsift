@@ -50,7 +50,7 @@ sqlsift/
 
 1. **SchemaBuilder** (`schema/builder.rs`): Parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) using sqlparser-rs and builds a `Catalog`. Supports resilient parsing to skip unsupported syntax.
 2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints, views, enums)
-3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation (61 comprehensive tests)
+3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation
 4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
 5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
@@ -62,7 +62,7 @@ sqlsift/
 ```
 Schema SQL → sqlparser → AST → SchemaBuilder → Catalog
                                                   ↓
-Query SQL  → sqlparser → AST → Analyzer → NameResolver → Diagnostics
+Query SQL  → sqlparser → AST → Analyzer → NameResolver → TypeResolver → Diagnostics
 ```
 
 ## Build & Test Commands
@@ -71,7 +71,7 @@ Query SQL  → sqlparser → AST → Analyzer → NameResolver → Diagnostics
 # Build
 cargo build
 
-# Run tests (61 tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs)
+# Run tests (137 tests: 28 unit + 94 integration + 3 doc + 12 LSP)
 cargo test
 
 # Run with example
@@ -121,7 +121,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Dependencies
 
-- **sqlparser** (0.53): SQL parsing (PostgreSQL dialect)
+- **sqlparser** (0.53): SQL parsing (PostgreSQL, MySQL, SQLite dialects)
 - **clap** (4.5): CLI argument parsing with derive macros
 - **miette** (7.4): Diagnostic rendering with fancy formatting
 - **thiserror** (2.0): Error type derivation
@@ -136,7 +136,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Real-world schema tests in `tests/fixtures/real-world/` (Chinook, Pagila, Northwind) with valid and invalid query files
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage: 71 unit tests + 72 PostgreSQL pattern tests + 80 MySQL real-world queries covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, and advanced expressions
+- Comprehensive test coverage: 28 unit tests + 94 integration tests + 3 doc tests + 12 LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and all three dialects (PostgreSQL, MySQL, SQLite)
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines
@@ -202,17 +202,19 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ Configuration file (sqlsift.toml)
 - ✅ Rule disabling (--disable flag)
 - ✅ Multiple output formats (human, JSON, SARIF)
-- ✅ Type inference for expressions (WHERE, JOIN, binary operators, nested expressions)
+- ✅ Type inference for expressions (WHERE, JOIN, INSERT VALUES, UPDATE SET, binary operators, nested expressions)
   - Detects type mismatches in comparisons (E0003)
+  - Detects INSERT/UPDATE value type mismatches (E0003)
   - Detects JOIN condition type incompatibilities (E0007)
   - Supports numeric type compatibility (implicit casts)
+  - Supports string-to-ENUM implicit cast
   - See "Current Limitations" for partial implementation scope
 
 ## Error Codes
 
 - **E0001**: Table not found
 - **E0002**: Column not found
-- **E0003**: Type mismatch (comparisons, arithmetic operations)
+- **E0003**: Type mismatch (comparisons, arithmetic, INSERT VALUES, UPDATE SET)
 - **E0004**: Potential NULL violation (reserved, not yet implemented)
 - **E0005**: Column count mismatch in INSERT
 - **E0006**: Ambiguous column reference
