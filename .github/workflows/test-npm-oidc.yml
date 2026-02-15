@@ -1,0 +1,30 @@
+name: Test npm OIDC publish
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test-npm-oidc:
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      - name: Upgrade npm for OIDC support
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
+      - name: Download v0.1.1 npm package from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L -o sqlsift-cli-npm-package.tar.gz \
+            "https://github.com/yukikotani231/sqlsift/releases/download/v0.1.1/sqlsift-cli-npm-package.tar.gz"
+          ls -la sqlsift-cli-npm-package.tar.gz
+      - name: Publish with OIDC
+        run: npm publish --access public --provenance sqlsift-cli-npm-package.tar.gz
