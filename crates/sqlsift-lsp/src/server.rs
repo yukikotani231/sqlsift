@@ -71,6 +71,7 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     },
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -174,5 +175,106 @@ impl LanguageServer for Backend {
 
         // Clear diagnostics for closed document
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let state = self.state.read().await;
+        let text = match state.open_documents.get(uri) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let word = match word_at_position(text, position.line as usize, position.character as usize)
+        {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+
+        match state.hover_info(&word) {
+            Some(markdown) => Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: None,
+            })),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Extract the SQL identifier at the given line/character position
+fn word_at_position(text: &str, line: usize, character: usize) -> Option<String> {
+    let target_line = text.lines().nth(line)?;
+    let bytes = target_line.as_bytes();
+
+    if character >= bytes.len() || !is_ident_char(bytes[character]) {
+        return None;
+    }
+
+    let mut start = character;
+    while start > 0 && is_ident_char(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = character;
+    while end < bytes.len() && is_ident_char(bytes[end]) {
+        end += 1;
+    }
+
+    Some(target_line[start..end].to_string())
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_word_at_position_middle() {
+        let text = "SELECT name FROM users";
+        assert_eq!(word_at_position(text, 0, 8), Some("name".to_string()));
+    }
+
+    #[test]
+    fn test_word_at_position_start() {
+        let text = "SELECT name FROM users";
+        assert_eq!(word_at_position(text, 0, 0), Some("SELECT".to_string()));
+    }
+
+    #[test]
+    fn test_word_at_position_end() {
+        let text = "SELECT name FROM users";
+        assert_eq!(word_at_position(text, 0, 18), Some("users".to_string()));
+    }
+
+    #[test]
+    fn test_word_at_position_multiline() {
+        let text = "SELECT id\nFROM users";
+        assert_eq!(word_at_position(text, 1, 5), Some("users".to_string()));
+    }
+
+    #[test]
+    fn test_word_at_position_on_space() {
+        let text = "SELECT name FROM users";
+        assert_eq!(word_at_position(text, 0, 6), None);
+    }
+
+    #[test]
+    fn test_word_at_position_past_line_end() {
+        let text = "SELECT";
+        assert_eq!(word_at_position(text, 0, 10), None);
+    }
+
+    #[test]
+    fn test_word_at_position_underscore() {
+        let text = "SELECT user_name FROM users";
+        assert_eq!(word_at_position(text, 0, 10), Some("user_name".to_string()));
     }
 }

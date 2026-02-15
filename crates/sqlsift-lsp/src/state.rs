@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::Url;
 
-use sqlsift_core::schema::{Catalog, SchemaBuilder};
+use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
 
 use crate::config::Config;
@@ -88,6 +88,65 @@ impl ServerState {
     /// Check if a file path is one of the schema files
     pub fn is_schema_file(&self, path: &Path) -> bool {
         self.schema_files.iter().any(|p| p == path)
+    }
+
+    /// Get hover information for a word (table, view, or column name)
+    pub fn hover_info(&self, word: &str) -> Option<String> {
+        let name = QualifiedName::new(word);
+
+        // Check tables
+        if let Some(table) = self.catalog.get_table(&name) {
+            let mut md = format!("**{}** (table)\n\n", table.name.name);
+            md.push_str("| Column | Type | Nullable |\n");
+            md.push_str("|--------|------|----------|\n");
+            for col in table.columns.values() {
+                let nullable = if col.nullable { "NULL" } else { "NOT NULL" };
+                md.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    col.name,
+                    col.data_type.display_name(),
+                    nullable
+                ));
+            }
+            return Some(md);
+        }
+
+        // Check views
+        if let Some(view) = self.catalog.get_view(&name) {
+            let kind = if view.materialized {
+                "materialized view"
+            } else {
+                "view"
+            };
+            let cols = view.columns.join(", ");
+            return Some(format!(
+                "**{}** ({})\n\nColumns: {}",
+                view.name.name, kind, cols
+            ));
+        }
+
+        // Check columns across all tables
+        let mut matches = Vec::new();
+        for schema in self.catalog.schemas.values() {
+            for table in schema.tables.values() {
+                if let Some(col) = table.get_column(word) {
+                    let nullable = if col.nullable { "nullable" } else { "not null" };
+                    matches.push(format!(
+                        "**{}** — {} ({})\n\nTable: {}",
+                        col.name,
+                        col.data_type.display_name(),
+                        nullable,
+                        table.name.name
+                    ));
+                }
+            }
+        }
+
+        if matches.is_empty() {
+            None
+        } else {
+            Some(matches.join("\n\n---\n\n"))
+        }
     }
 }
 
@@ -186,5 +245,53 @@ mod tests {
         assert!(state.schema_files.is_empty());
         assert!(state.disabled_rules.is_empty());
         assert!(state.workspace_root.is_none());
+    }
+
+    #[test]
+    fn test_hover_info_table() {
+        let state =
+            state_with_schema("CREATE TABLE users (id INTEGER NOT NULL, name TEXT, age INTEGER);");
+        let hover = state.hover_info("users").unwrap();
+        assert!(hover.contains("**users** (table)"));
+        assert!(hover.contains("| id | integer | NOT NULL |"));
+        assert!(hover.contains("| name | text | NULL |"));
+        assert!(hover.contains("| age | integer | NULL |"));
+    }
+
+    #[test]
+    fn test_hover_info_view() {
+        let state = state_with_schema(
+            "CREATE TABLE users (id INTEGER, name TEXT);\n\
+             CREATE VIEW active_users AS SELECT id, name FROM users;",
+        );
+        let hover = state.hover_info("active_users").unwrap();
+        assert!(hover.contains("**active_users** (view)"));
+        assert!(hover.contains("Columns: id, name"));
+    }
+
+    #[test]
+    fn test_hover_info_column() {
+        let state = state_with_schema("CREATE TABLE users (id INTEGER NOT NULL, name TEXT);");
+        let hover = state.hover_info("name").unwrap();
+        assert!(hover.contains("**name** — text (nullable)"));
+        assert!(hover.contains("Table: users"));
+    }
+
+    #[test]
+    fn test_hover_info_column_multiple_tables() {
+        let state = state_with_schema(
+            "CREATE TABLE users (id INTEGER NOT NULL, name TEXT);\n\
+             CREATE TABLE orders (id INTEGER NOT NULL, total NUMERIC);",
+        );
+        let hover = state.hover_info("id").unwrap();
+        assert!(hover.contains("Table: users"));
+        assert!(hover.contains("Table: orders"));
+        assert!(hover.contains("---"));
+    }
+
+    #[test]
+    fn test_hover_info_not_found() {
+        let state = state_with_schema("CREATE TABLE users (id INTEGER);");
+        assert!(state.hover_info("nonexistent").is_none());
     }
 }
