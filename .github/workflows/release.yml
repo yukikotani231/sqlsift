@@ -300,13 +300,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-          registry-url: 'https://registry.npmjs.org'
       - name: Upgrade npm for OIDC trusted publishing support
         run: npm install -g npm@latest
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
       - run: |
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
-            NODE_AUTH_TOKEN="" npm publish --access public --provenance "./npm/${pkg}"
+            npm publish --access public --provenance "./npm/${pkg}"
           done
 
   announce:

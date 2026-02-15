@@ -15,11 +15,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-          registry-url: 'https://registry.npmjs.org'
       - name: Upgrade npm for OIDC support
         run: |
           npm install -g npm@latest
           echo "npm version: $(npm --version)"
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
       - name: Download v0.1.1 npm package from GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -28,4 +29,4 @@ jobs:
             "https://github.com/yukikotani231/sqlsift/releases/download/v0.1.1/sqlsift-cli-npm-package.tar.gz"
           ls -la sqlsift-cli-npm-package.tar.gz
       - name: Publish with OIDC
-        run: NODE_AUTH_TOKEN="" npm publish --access public --provenance sqlsift-cli-npm-package.tar.gz
+        run: npm publish --access public --provenance sqlsift-cli-npm-package.tar.gz
