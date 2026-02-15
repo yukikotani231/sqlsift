@@ -33,8 +33,9 @@ This creates a git tag and pushes it, triggering the cargo-dist release workflow
 ## Prerequisites
 
 ### For npm
-- Set `NPM_TOKEN` in GitHub repository secrets
-- npm publishing is handled automatically by cargo-dist
+- Configure [OIDC trusted publishing](https://docs.npmjs.com/generating-provenance-statements#publishing-packages-with-provenance-via-github-actions) on npmjs.com for the `sqlsift-cli` package
+  - Repository owner: `yukikotani231`, Repository: `sqlsift`, Workflow: `release.yml`
+- No `NPM_TOKEN` secret needed — authentication is handled via GitHub Actions OIDC
 
 ### For crates.io (manual, if needed)
 1. Create an account on [crates.io](https://crates.io/)
