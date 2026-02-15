@@ -20,13 +20,6 @@ jobs:
         run: |
           npm install -g npm@latest
           echo "npm version: $(npm --version)"
-      - name: Remove empty auth token from .npmrc
-        run: |
-          echo "=== .npmrc before ==="
-          cat "$NPM_CONFIG_USERCONFIG" || cat ~/.npmrc || echo "no .npmrc found"
-          npm config delete //registry.npmjs.org/:_authToken 2>/dev/null || true
-          echo "=== .npmrc after ==="
-          cat "$NPM_CONFIG_USERCONFIG" || cat ~/.npmrc || echo "no .npmrc found"
       - name: Download v0.1.1 npm package from GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,4 +28,4 @@ jobs:
             "https://github.com/yukikotani231/sqlsift/releases/download/v0.1.1/sqlsift-cli-npm-package.tar.gz"
           ls -la sqlsift-cli-npm-package.tar.gz
       - name: Publish with OIDC
-        run: npm publish --access public --provenance sqlsift-cli-npm-package.tar.gz
+        run: NODE_AUTH_TOKEN="" npm publish --access public --provenance sqlsift-cli-npm-package.tar.gz
