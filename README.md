@@ -146,6 +146,26 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ⏳ CASE expression type consistency
 - ⏳ Subquery/CTE column type inference
 
+### Inline Suppression
+
+Suppress diagnostics on specific lines using SQL comments:
+
+```sql
+-- Suppress a specific rule on the next line
+-- sqlsift:disable E0002
+SELECT legacy_col FROM users;
+
+-- Suppress on the same line
+SELECT legacy_col FROM users; -- sqlsift:disable E0002
+
+-- Suppress multiple rules
+SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, E0002
+
+-- Suppress all rules on the next line
+-- sqlsift:disable
+SELECT bad_col FROM missing_table;
+```
+
 ## CLI Reference
 
 ```
