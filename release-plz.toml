@@ -9,9 +9,10 @@ git_release_enable = false
 git_tag_enable = false
 # Skip semver checks during alpha development
 semver_check = false
+# Use v{version} tag pattern for all packages (multi-package default is "{package}-v{version}")
+git_tag_name = "v{{ version }}"
 
 # Only create a tag for sqlsift-cli (triggers cargo-dist release.yml)
 [[package]]
 name = "sqlsift-cli"
 git_tag_enable = true
-git_tag_name = "v{{ version }}"
