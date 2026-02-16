@@ -1,0 +1,61 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the information below.
+  - type: input
+    id: version
+    attributes:
+      label: sqlsift version
+      description: "Output of `sqlsift --version`"
+      placeholder: "0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: SQL Dialect
+      options:
+        - PostgreSQL
+        - MySQL
+        - SQLite
+    validations:
+      required: true
+  - type: textarea
+    id: schema
+    attributes:
+      label: Schema SQL
+      description: The DDL used (CREATE TABLE, etc.)
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: query
+    attributes:
+      label: Query SQL
+      description: The query that triggers the bug
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened (include error output if applicable)
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: OS, editor, configuration, etc.

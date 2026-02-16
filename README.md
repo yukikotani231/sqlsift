@@ -213,6 +213,46 @@ sqlsift check -s schema.sql -f json queries/*.sql
 sqlsift check -s schema.sql -f sarif queries/*.sql > results.sarif
 ```
 
+## CI Integration
+
+### GitHub Actions
+
+Add sqlsift to your CI pipeline to catch SQL errors in pull requests:
+
+```yaml
+# .github/workflows/sqlsift.yml
+name: SQL Lint
+on: [push, pull_request]
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx sqlsift-cli check --schema schema.sql queries/*.sql
+```
+
+### GitHub Code Scanning (SARIF)
+
+Upload results to GitHub's Security tab:
+
+```yaml
+# .github/workflows/sqlsift.yml
+name: SQL Lint
+on: [push, pull_request]
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx sqlsift-cli check -s schema.sql -f sarif queries/*.sql > results.sarif
+        continue-on-error: true
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+```
+
 ## Supported SQL Queries
 
 - SELECT, INSERT, UPDATE, DELETE with full column/table validation
