@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{self, Url};
 
 use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
@@ -148,6 +148,71 @@ impl ServerState {
             Some(matches.join("\n\n---\n\n"))
         }
     }
+
+    /// Get completion items from the schema catalog
+    pub fn completion_items(&self) -> Vec<lsp_types::CompletionItem> {
+        let mut items = Vec::new();
+
+        for schema in self.catalog.schemas.values() {
+            // Tables
+            for table in schema.tables.values() {
+                let cols: Vec<String> = table
+                    .columns
+                    .values()
+                    .map(|c| format!("{} ({})", c.name, c.data_type.display_name()))
+                    .collect();
+                items.push(lsp_types::CompletionItem {
+                    label: table.name.name.clone(),
+                    kind: Some(lsp_types::CompletionItemKind::CLASS),
+                    detail: Some("table".to_string()),
+                    documentation: if cols.is_empty() {
+                        None
+                    } else {
+                        Some(lsp_types::Documentation::String(cols.join(", ")))
+                    },
+                    ..Default::default()
+                });
+
+                // Columns from this table
+                for col in table.columns.values() {
+                    let nullable = if col.nullable { "nullable" } else { "not null" };
+                    items.push(lsp_types::CompletionItem {
+                        label: col.name.clone(),
+                        kind: Some(lsp_types::CompletionItemKind::FIELD),
+                        detail: Some(format!(
+                            "{} ({}) — {}",
+                            col.data_type.display_name(),
+                            nullable,
+                            table.name.name
+                        )),
+                        ..Default::default()
+                    });
+                }
+            }
+
+            // Views
+            for view in schema.views.values() {
+                let kind = if view.materialized {
+                    "materialized view"
+                } else {
+                    "view"
+                };
+                items.push(lsp_types::CompletionItem {
+                    label: view.name.name.clone(),
+                    kind: Some(lsp_types::CompletionItemKind::INTERFACE),
+                    detail: Some(kind.to_string()),
+                    documentation: if view.columns.is_empty() {
+                        None
+                    } else {
+                        Some(lsp_types::Documentation::String(view.columns.join(", ")))
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+
+        items
+    }
 }
 
 /// Resolve schema file paths from config (handles glob patterns and schema_dir)
@@ -293,5 +358,46 @@ mod tests {
     fn test_hover_info_not_found() {
         let state = state_with_schema("CREATE TABLE users (id INTEGER);");
         assert!(state.hover_info("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_completion_items_tables_and_columns() {
+        let state = state_with_schema("CREATE TABLE users (id INTEGER NOT NULL, name TEXT);");
+        let items = state.completion_items();
+
+        // Should have: 1 table + 2 columns = 3 items
+        assert_eq!(items.len(), 3);
+
+        let table_item = items.iter().find(|i| i.label == "users").unwrap();
+        assert_eq!(table_item.kind, Some(lsp_types::CompletionItemKind::CLASS));
+        assert_eq!(table_item.detail.as_deref(), Some("table"));
+
+        let id_item = items.iter().find(|i| i.label == "id").unwrap();
+        assert_eq!(id_item.kind, Some(lsp_types::CompletionItemKind::FIELD));
+        assert!(id_item.detail.as_ref().unwrap().contains("integer"));
+        assert!(id_item.detail.as_ref().unwrap().contains("users"));
+    }
+
+    #[test]
+    fn test_completion_items_view() {
+        let state = state_with_schema(
+            "CREATE TABLE users (id INTEGER, name TEXT);\n\
+             CREATE VIEW active_users AS SELECT id, name FROM users;",
+        );
+        let items = state.completion_items();
+
+        let view_item = items.iter().find(|i| i.label == "active_users").unwrap();
+        assert_eq!(
+            view_item.kind,
+            Some(lsp_types::CompletionItemKind::INTERFACE)
+        );
+        assert_eq!(view_item.detail.as_deref(), Some("view"));
+    }
+
+    #[test]
+    fn test_completion_items_empty_catalog() {
+        let state = ServerState::new();
+        let items = state.completion_items();
+        assert!(items.is_empty());
     }
 }
