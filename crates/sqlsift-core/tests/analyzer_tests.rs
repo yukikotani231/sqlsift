@@ -1974,3 +1974,119 @@ fn test_sqlite_delete() {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
 }
+
+// ============================================================
+// Inline disable directive tests
+// ============================================================
+
+#[test]
+fn test_inline_disable_same_line() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // Without directive: should report error
+    let diagnostics = analyzer.analyze("SELECT bad_col FROM users");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+
+    // With directive: should suppress
+    let diagnostics = analyzer.analyze("SELECT bad_col FROM users -- sqlsift:disable E0002");
+    assert!(
+        diagnostics.is_empty(),
+        "Inline disable should suppress E0002: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_inline_disable_next_line() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "-- sqlsift:disable E0001\nSELECT * FROM nonexistent";
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Standalone disable should suppress next line: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_inline_disable_multiple_codes() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "-- sqlsift:disable E0001, E0002\nSELECT bad_col FROM nonexistent";
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Should suppress both E0001 and E0002: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_inline_disable_all() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "SELECT bad_col FROM nonexistent -- sqlsift:disable";
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Disable all should suppress everything: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_inline_disable_only_affects_specified_line() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "-- sqlsift:disable E0002\nSELECT bad_col FROM users;\nSELECT another_bad FROM users";
+    let diagnostics = analyzer.analyze(sql);
+    // Line 2 should be suppressed, line 3 should still report
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "Only line 2 should be suppressed: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+    assert!(diagnostics[0].message.contains("another_bad"));
+}
+
+#[test]
+fn test_inline_disable_wrong_code_not_suppressed() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // E0001 directive should not suppress E0002
+    let sql = "SELECT bad_col FROM users -- sqlsift:disable E0001";
+    let diagnostics = analyzer.analyze(sql);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "E0001 directive should not suppress E0002: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn test_inline_disable_in_string_not_treated_as_directive() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "SELECT '-- sqlsift:disable E0002', bad_col FROM users";
+    let diagnostics = analyzer.analyze(sql);
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "Directive inside string should be ignored: {:?}",
+        diagnostics
+    );
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+}

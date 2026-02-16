@@ -1,5 +1,6 @@
 //! SQL analyzer module
 
+mod comment_directives;
 mod resolver;
 mod type_resolver;
 
@@ -9,6 +10,7 @@ use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::Catalog;
 
+use comment_directives::InlineDirectives;
 pub use resolver::NameResolver;
 use type_resolver::TypeResolver;
 
@@ -81,6 +83,9 @@ impl<'a> Analyzer<'a> {
     pub fn analyze(&mut self, sql: &str) -> Vec<Diagnostic> {
         self.diagnostics.clear();
 
+        // Parse inline disable directives from comments
+        let directives = InlineDirectives::parse(sql);
+
         // Parse the SQL
         let dialect = self.dialect.parser_dialect();
         let statements = match Parser::parse_sql(dialect.as_ref(), sql) {
@@ -110,6 +115,16 @@ impl<'a> Analyzer<'a> {
             self.diagnostics.extend(type_resolver.into_diagnostics());
         }
 
+        // Filter out diagnostics suppressed by inline directives
         std::mem::take(&mut self.diagnostics)
+            .into_iter()
+            .filter(|d| {
+                if let Some(span) = &d.span {
+                    !directives.is_suppressed(d.code(), span.line)
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
 }
