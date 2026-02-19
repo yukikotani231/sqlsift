@@ -2138,3 +2138,77 @@ fn test_cte_insert_returning_used_in_join() {
         diagnostics
     );
 }
+
+// ============================================================
+// Issue #57: Subquery scope isolation
+// ============================================================
+
+#[test]
+fn test_subquery_in_update_no_false_ambiguity() {
+    let schema_sql = r#"
+        CREATE TABLE purchases (
+            id UUID PRIMARY KEY,
+            latest_purchase_ref_id UUID
+        );
+        CREATE TABLE latest_purchase_refs (
+            id UUID PRIMARY KEY,
+            latest_purchase_id UUID
+        );
+    "#;
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+    let mut analyzer = Analyzer::new(&catalog);
+    let sql = r#"
+        UPDATE purchases
+        SET latest_purchase_ref_id = NULL
+        WHERE latest_purchase_ref_id IN (
+            SELECT id FROM latest_purchase_refs
+            WHERE latest_purchase_id = '00000000-0000-0000-0000-000000000000'
+        )
+    "#;
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Subquery columns should not be ambiguous with outer table: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_subquery_in_delete_no_false_ambiguity() {
+    let schema_sql = r#"
+        CREATE TABLE orders (id SERIAL PRIMARY KEY, status TEXT);
+        CREATE TABLE archived_orders (id SERIAL PRIMARY KEY, reason TEXT);
+    "#;
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema_sql).unwrap();
+    let (catalog, _) = builder.build();
+    let mut analyzer = Analyzer::new(&catalog);
+    let sql = r#"
+        DELETE FROM orders
+        WHERE id IN (SELECT id FROM archived_orders)
+    "#;
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Subquery in DELETE should have isolated scope: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_exists_subquery_no_false_ambiguity() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let sql = r#"
+        SELECT u.id FROM users u
+        WHERE EXISTS (SELECT id FROM orders WHERE user_id = 1)
+    "#;
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "EXISTS subquery should have isolated scope: {:?}",
+        diagnostics
+    );
+}
