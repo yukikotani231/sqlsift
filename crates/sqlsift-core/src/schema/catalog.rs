@@ -101,11 +101,7 @@ impl Catalog {
 
     /// Drop a table from the catalog
     pub fn drop_table(&mut self, name: &QualifiedName) {
-        let schema_name = name
-            .schema
-            .as_ref()
-            .unwrap_or(&self.default_schema)
-            .clone();
+        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema).clone();
         if let Some(schema) = self.schemas.get_mut(&schema_name) {
             schema.tables.shift_remove(&name.name);
         }
