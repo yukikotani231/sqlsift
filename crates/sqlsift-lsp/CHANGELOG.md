@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/yukikotani231/sqlsift/compare/v0.1.1...v0.1.2) - 2026-02-19
+
+### Added
+
+- add LSP auto-completion for table/column/view names ([#53](https://github.com/yukikotani231/sqlsift/pull/53))
+- add inline comment directives for diagnostic suppression ([#52](https://github.com/yukikotani231/sqlsift/pull/52))
+- add textDocument/hover for table, view, and column info ([#49](https://github.com/yukikotani231/sqlsift/pull/49))
+
+### Other
+
+- add GitHub templates and CI integration examples ([#54](https://github.com/yukikotani231/sqlsift/pull/54))
+
 ## [0.1.1](https://github.com/yukikotani231/sqlsift/compare/sqlsift-lsp-v0.1.0...sqlsift-lsp-v0.1.1) - 2026-02-14
 
 ### Other
