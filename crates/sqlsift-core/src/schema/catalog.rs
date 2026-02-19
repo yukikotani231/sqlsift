@@ -99,6 +99,14 @@ impl Catalog {
         self.enums.contains_key(name)
     }
 
+    /// Drop a table from the catalog
+    pub fn drop_table(&mut self, name: &QualifiedName) {
+        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema).clone();
+        if let Some(schema) = self.schemas.get_mut(&schema_name) {
+            schema.tables.shift_remove(&name.name);
+        }
+    }
+
     /// Add a view to the catalog
     pub fn add_view(&mut self, view: ViewDef) {
         let schema_name = view
