@@ -365,10 +365,16 @@ impl<'a> NameResolver<'a> {
             return self.infer_cte_columns(left);
         }
 
-        let mut columns = Vec::new();
+        let select_items: Option<&[SelectItem]> = match set_expr {
+            SetExpr::Select(select) => Some(&select.projection),
+            SetExpr::Insert(Statement::Insert(Insert { returning, .. })) => returning.as_deref(),
+            SetExpr::Update(Statement::Update { returning, .. }) => returning.as_deref(),
+            _ => None,
+        };
 
-        if let SetExpr::Select(select) = set_expr {
-            for (idx, item) in select.projection.iter().enumerate() {
+        let mut columns = Vec::new();
+        if let Some(items) = select_items {
+            for (idx, item) in items.iter().enumerate() {
                 match item {
                     SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
                         columns.push(ident.value.clone());
@@ -409,6 +415,8 @@ impl<'a> NameResolver<'a> {
                 self.resolve_set_expr(left);
                 self.resolve_set_expr(right);
             }
+            SetExpr::Insert(stmt) => self.resolve_statement(stmt),
+            SetExpr::Update(stmt) => self.resolve_statement(stmt),
             _ => {}
         }
     }
