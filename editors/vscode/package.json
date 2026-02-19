@@ -16,6 +16,14 @@
     "Linters",
     "Programming Languages"
   ],
+  "keywords": [
+    "sql",
+    "linter",
+    "static-analysis",
+    "postgresql",
+    "mysql",
+    "sqlite"
+  ],
   "activationEvents": [
     "onLanguage:sql"
   ],
@@ -44,7 +52,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "esbuild": "node esbuild.mjs",
+    "package": "npm run esbuild && vsce package"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
@@ -52,6 +61,7 @@
   "devDependencies": {
     "@types/vscode": "^1.75.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.0.0"
   }
 }
