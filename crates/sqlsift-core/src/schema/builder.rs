@@ -1,8 +1,8 @@
 //! Schema builder - converts SQL AST to Catalog
 
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, ColumnOptionDef, ObjectName, Statement, TableConstraint,
-    UserDefinedTypeRepresentation,
+    AlterTableOperation, ColumnOption, ColumnOptionDef, ObjectName, ObjectType, Statement,
+    TableConstraint, UserDefinedTypeRepresentation,
 };
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -118,6 +118,15 @@ impl SchemaBuilder {
                 name, operations, ..
             } => {
                 self.process_alter_table(name, operations);
+            }
+            Statement::Drop {
+                object_type: ObjectType::Table,
+                names,
+                ..
+            } => {
+                for name in names {
+                    self.process_drop_table(name);
+                }
             }
             _ => {}
         }
@@ -427,6 +436,12 @@ impl SchemaBuilder {
                 }
             }
         }
+    }
+
+    /// Process DROP TABLE statement
+    fn process_drop_table(&mut self, name: &ObjectName) {
+        let table_name = object_name_to_qualified(name);
+        self.catalog.drop_table(&table_name);
     }
 
     /// Process CREATE TYPE statement
@@ -900,5 +915,95 @@ mod tests {
 
         assert!(catalog.table_exists(&QualifiedName::new("users")));
         assert!(catalog.table_exists(&QualifiedName::new("posts")));
+    }
+
+    #[test]
+    fn test_drop_table() {
+        let sql = r#"
+            CREATE TABLE users (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+
+            CREATE TABLE posts (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL
+            );
+
+            DROP TABLE users;
+        "#;
+
+        let mut builder = SchemaBuilder::new();
+        builder.parse(sql).unwrap();
+        let (catalog, warnings) = builder.build();
+
+        assert!(
+            !catalog.table_exists(&QualifiedName::new("users")),
+            "users table should be removed after DROP TABLE"
+        );
+        assert!(
+            catalog.table_exists(&QualifiedName::new("posts")),
+            "posts table should still exist"
+        );
+        assert!(warnings.is_empty(), "no warnings should be produced");
+    }
+
+    #[test]
+    fn test_drop_table_if_exists() {
+        let sql = r#"
+            CREATE TABLE users (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+
+            DROP TABLE IF EXISTS users;
+            DROP TABLE IF EXISTS nonexistent;
+        "#;
+
+        let mut builder = SchemaBuilder::new();
+        builder.parse(sql).unwrap();
+        let (catalog, warnings) = builder.build();
+
+        assert!(
+            !catalog.table_exists(&QualifiedName::new("users")),
+            "users table should be removed"
+        );
+        assert!(warnings.is_empty(), "no warnings should be produced");
+    }
+
+    #[test]
+    fn test_drop_table_then_alter_produces_no_warning() {
+        // Simulates the Prisma migration pattern: drop old tables, create new ones,
+        // then ALTER TABLE the new tables. Should produce no spurious warnings.
+        let sql = r#"
+            CREATE TABLE old_items (
+                id UUID PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+
+            CREATE TABLE new_items (
+                id UUID PRIMARY KEY,
+                label TEXT NOT NULL
+            );
+
+            ALTER TABLE old_items DROP CONSTRAINT "old_items_pkey";
+            DROP TABLE old_items;
+
+            ALTER TABLE new_items ADD COLUMN description TEXT;
+        "#;
+
+        let mut builder = SchemaBuilder::new();
+        builder.parse(sql).unwrap();
+        let (catalog, warnings) = builder.build();
+
+        assert!(
+            !catalog.table_exists(&QualifiedName::new("old_items")),
+            "old_items should be dropped"
+        );
+        assert!(
+            catalog.table_exists(&QualifiedName::new("new_items")),
+            "new_items should exist"
+        );
+        assert!(warnings.is_empty(), "no warnings should be produced");
     }
 }
