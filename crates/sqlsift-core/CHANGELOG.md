@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/yukikotani231/sqlsift/compare/v0.1.1...v0.1.2) - 2026-02-19
+
+### Added
+
+- support DROP TABLE to keep schema catalog in sync ([#55](https://github.com/yukikotani231/sqlsift/pull/55))
+- add inline comment directives for diagnostic suppression ([#52](https://github.com/yukikotani231/sqlsift/pull/52))
+
+### Fixed
+
+- isolate subquery scope to prevent false E0006 ambiguity ([#60](https://github.com/yukikotani231/sqlsift/pull/60))
+- support INSERT/UPDATE RETURNING columns in CTE inference ([#59](https://github.com/yukikotani231/sqlsift/pull/59))
+
+### Other
+
+- add GitHub templates and CI integration examples ([#54](https://github.com/yukikotani231/sqlsift/pull/54))
+
 ## [0.1.1](https://github.com/yukikotani231/sqlsift/compare/sqlsift-core-v0.1.0...sqlsift-core-v0.1.1) - 2026-02-14
 
 ### Added
