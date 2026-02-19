@@ -2090,3 +2090,51 @@ fn test_inline_disable_in_string_not_treated_as_directive() {
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
 }
+
+// ============================================================
+// Issue #56: INSERT ... RETURNING columns in CTEs
+// ============================================================
+
+#[test]
+fn test_cte_insert_returning_columns() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let sql = r#"
+        WITH new_user AS (
+            INSERT INTO users (name, email)
+            VALUES ('Alice', 'alice@example.com')
+            RETURNING id, name, email
+        )
+        SELECT new_user.id, new_user.name, new_user.email FROM new_user
+    "#;
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "INSERT RETURNING columns should be accessible in subsequent queries: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_cte_insert_returning_used_in_join() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+    let sql = r#"
+        WITH new_user AS (
+            INSERT INTO users (name, email)
+            VALUES ('Bob', 'bob@example.com')
+            RETURNING id, name
+        ),
+        user_posts AS (
+            SELECT nu.id, nu.name
+            FROM new_user nu
+        )
+        SELECT up.id, up.name FROM user_posts up
+    "#;
+    let diagnostics = analyzer.analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "INSERT RETURNING columns should be usable in subsequent CTEs: {:?}",
+        diagnostics
+    );
+}
