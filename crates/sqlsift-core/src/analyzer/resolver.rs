@@ -44,6 +44,8 @@ pub struct NameResolver<'a> {
     catalog: &'a Catalog,
     /// Current scope's table references (alias/name -> TableRef)
     pub(super) tables: HashMap<String, TableRef>,
+    /// Outer scope's table references (for correlated subqueries)
+    outer_tables: HashMap<String, TableRef>,
     /// CTEs available in current scope (name -> CteDefinition)
     pub(super) ctes: HashMap<String, CteDefinition>,
     /// SELECT aliases visible in ORDER BY (set before resolving ORDER BY)
@@ -60,6 +62,7 @@ impl<'a> NameResolver<'a> {
         Self {
             catalog,
             tables: HashMap::new(),
+            outer_tables: HashMap::new(),
             select_aliases: Vec::new(),
             ctes: HashMap::new(),
             diagnostics: Vec::new(),
@@ -729,8 +732,11 @@ impl<'a> NameResolver<'a> {
             Expr::InSubquery { expr, subquery, .. } => {
                 self.resolve_expr(expr);
                 let saved_tables = self.tables.clone();
+                let saved_outer = self.outer_tables.clone();
+                self.outer_tables.extend(self.tables.drain());
                 self.resolve_query(subquery);
                 self.tables = saved_tables;
+                self.outer_tables = saved_outer;
             }
             Expr::Between {
                 expr, low, high, ..
@@ -760,8 +766,11 @@ impl<'a> NameResolver<'a> {
             }
             Expr::Subquery(query) => {
                 let saved_tables = self.tables.clone();
+                let saved_outer = self.outer_tables.clone();
+                self.outer_tables.extend(self.tables.drain());
                 self.resolve_query(query);
                 self.tables = saved_tables;
+                self.outer_tables = saved_outer;
             }
             Expr::IsNull(e) | Expr::IsNotNull(e) => {
                 self.resolve_expr(e);
@@ -814,8 +823,11 @@ impl<'a> NameResolver<'a> {
             }
             Expr::Exists { subquery, .. } => {
                 let saved_tables = self.tables.clone();
+                let saved_outer = self.outer_tables.clone();
+                self.outer_tables.extend(self.tables.drain());
                 self.resolve_query(subquery);
                 self.tables = saved_tables;
+                self.outer_tables = saved_outer;
             }
             Expr::AtTimeZone {
                 timestamp,
@@ -927,6 +939,26 @@ impl<'a> NameResolver<'a> {
         }
     }
 
+    /// Check if a table reference contains the given column
+    fn table_ref_has_column(&self, table_ref: &TableRef, column_name: &str) -> bool {
+        if let Some(derived_cols) = &table_ref.derived_columns {
+            derived_cols.is_empty()
+                || derived_cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(column_name))
+        } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
+            cte.columns.iter().any(|c| c == column_name)
+        } else if let Some(view_cols) = &table_ref.view_columns {
+            view_cols
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(column_name))
+        } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
+            table_def.column_exists(column_name)
+        } else {
+            false
+        }
+    }
+
     /// Resolve a column reference
     fn resolve_column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
         let column_name = &column_ident.value;
@@ -935,7 +967,11 @@ impl<'a> NameResolver<'a> {
         if let Some(table_id) = table_ident {
             let table_alias = &table_id.value;
             // Qualified column reference (table.column)
-            if let Some(table_ref) = self.tables.get(table_alias) {
+            if let Some(table_ref) = self
+                .tables
+                .get(table_alias)
+                .or_else(|| self.outer_tables.get(table_alias))
+            {
                 // Check derived table first
                 if let Some(derived_cols) = &table_ref.derived_columns {
                     // Empty column list means we can't validate (e.g., table-valued functions)
@@ -1015,35 +1051,19 @@ impl<'a> NameResolver<'a> {
                 );
             }
         } else {
-            // Unqualified column reference - search all tables in scope
+            // Unqualified column reference - search inner scope first, then outer
             let mut found_in: Vec<&str> = Vec::new();
 
             for (name, table_ref) in &self.tables {
-                // Check derived table first
-                if let Some(derived_cols) = &table_ref.derived_columns {
-                    // Empty column list = can't validate, assume match
-                    if derived_cols.is_empty()
-                        || derived_cols
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(column_name))
-                    {
-                        found_in.push(name);
-                    }
-                } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
-                    // Check CTE
-                    if cte.columns.contains(column_name) {
-                        found_in.push(name);
-                    }
-                } else if let Some(view_cols) = &table_ref.view_columns {
-                    // Check VIEW columns
-                    if view_cols
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(column_name))
-                    {
-                        found_in.push(name);
-                    }
-                } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
-                    if table_def.column_exists(column_name) {
+                if self.table_ref_has_column(table_ref, column_name) {
+                    found_in.push(name);
+                }
+            }
+
+            // If not found in inner scope, check outer scope (correlated subqueries)
+            if found_in.is_empty() {
+                for (name, table_ref) in &self.outer_tables {
+                    if self.table_ref_has_column(table_ref, column_name) {
                         found_in.push(name);
                     }
                 }
