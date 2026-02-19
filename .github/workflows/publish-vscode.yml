@@ -1,0 +1,125 @@
+name: Publish VS Code Extension
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-vsix:
+    name: Build VSIX (${{ matrix.vscode_target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust_target: aarch64-apple-darwin
+            vscode_target: darwin-arm64
+            archive_ext: tar.xz
+            binary_name: sqlsift-lsp
+          - rust_target: x86_64-apple-darwin
+            vscode_target: darwin-x64
+            archive_ext: tar.xz
+            binary_name: sqlsift-lsp
+          - rust_target: x86_64-unknown-linux-gnu
+            vscode_target: linux-x64
+            archive_ext: tar.xz
+            binary_name: sqlsift-lsp
+          - rust_target: aarch64-unknown-linux-gnu
+            vscode_target: linux-arm64
+            archive_ext: tar.xz
+            binary_name: sqlsift-lsp
+          - rust_target: x86_64-pc-windows-msvc
+            vscode_target: win32-x64
+            archive_ext: zip
+            binary_name: sqlsift-lsp.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update extension version
+        working-directory: editors/vscode
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+
+      - name: Install dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Download sqlsift-lsp binary from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCHIVE="sqlsift-lsp-${{ matrix.rust_target }}.${{ matrix.archive_ext }}"
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern "$ARCHIVE" \
+            --dir /tmp/download
+
+          mkdir -p /tmp/extracted editors/vscode/bin
+
+          if [[ "${{ matrix.archive_ext }}" == "tar.xz" ]]; then
+            tar xf "/tmp/download/$ARCHIVE" -C /tmp/extracted
+          else
+            unzip "/tmp/download/$ARCHIVE" -d /tmp/extracted
+          fi
+
+          BINARY=$(find /tmp/extracted -name "${{ matrix.binary_name }}" -type f | head -1)
+          cp "$BINARY" editors/vscode/bin/
+          chmod +x "editors/vscode/bin/${{ matrix.binary_name }}"
+
+      - name: Copy LICENSE
+        run: cp LICENSE editors/vscode/LICENSE
+
+      - name: Bundle extension
+        working-directory: editors/vscode
+        run: npm run esbuild
+
+      - name: Build VSIX
+        working-directory: editors/vscode
+        run: npx @vscode/vsce package --target ${{ matrix.vscode_target }}
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.vscode_target }}
+          path: editors/vscode/*.vsix
+
+  publish:
+    name: Publish to Marketplace & GitHub Release
+    needs: build-vsix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          path: vsix/
+          merge-multiple: true
+
+      - name: List VSIX files
+        run: ls -la vsix/
+
+      - name: Upload VSIX files to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for vsix in vsix/*.vsix; do
+            gh release upload "${{ github.event.release.tag_name }}" "$vsix" \
+              --repo "${{ github.repository }}"
+          done
+
+      - name: Publish to VS Code Marketplace
+        if: vars.PUBLISH_VSCODE == 'true'
+        run: npx @vscode/vsce publish --packagePath vsix/*.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}

@@ -47,6 +47,19 @@ This creates a git tag and pushes it, triggering the cargo-dist release workflow
    cd crates/sqlsift-cli && cargo publish && cd ../..
    ```
 
+### For VS Code Marketplace
+
+The `publish-vscode.yml` workflow builds platform-specific VSIX files and uploads them to GitHub Releases automatically. To also publish to VS Code Marketplace:
+
+1. Create a publisher on [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage)
+   - Publisher ID: `sqlsift`
+2. Create a Personal Access Token (PAT) on [Azure DevOps](https://dev.azure.com/):
+   - User Settings > Personal Access Tokens > New Token
+   - Organization: "All accessible organizations"
+   - Scopes: "Marketplace" > "Manage"
+3. Add `VSCE_PAT` secret to GitHub repository Settings > Secrets and variables > Actions
+4. Add repository variable `PUBLISH_VSCODE` = `true` in Settings > Secrets and variables > Actions > Variables
+
 ## Post-publish
 
 1. **Verify installation works**
