@@ -248,3 +248,13 @@ Releases are automated via [release-plz](https://release-plz.dev/):
 - npm package: `sqlsift-cli` (provides `sqlsift` command)
 - Supported platforms: macOS (x64/ARM64), Linux (x64/ARM64), Windows (x64)
 - See `PUBLISHING.md` for details
+
+### GitHub Actions: GITHUB_TOKEN Limitation (CRITICAL)
+
+**Events created by `GITHUB_TOKEN` (releases, tag pushes, etc.) do NOT trigger other workflows.** This is GitHub's infinite loop prevention mechanism.
+
+- cargo-dist's `release.yml` creates GitHub Releases using `GITHUB_TOKEN`, so `on: release` triggers in other workflows will NOT fire
+- release-plz uses `RELEASE_PLZ_TOKEN` (a PAT) to push tags, so `on: push: tags` triggers for cargo-dist work correctly
+- **When chaining workflows**: use `on: workflow_run` instead of `on: release`
+  - Example: `publish-vscode.yml` uses `workflow_run: workflows: ["Release"]` to fire after cargo-dist completes
+- **Always add `workflow_dispatch` alongside for manual re-runs**

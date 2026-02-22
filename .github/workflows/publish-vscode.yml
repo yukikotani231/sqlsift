@@ -1,8 +1,14 @@
 name: Publish VS Code Extension
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.2)"
+        required: true
 
 permissions:
   contents: write
@@ -11,6 +17,11 @@ jobs:
   build-vsix:
     name: Build VSIX (${{ matrix.vscode_target }})
     runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch != null &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     strategy:
       fail-fast: false
       matrix:
@@ -42,15 +53,20 @@ jobs:
         with:
           node-version: "20.x"
 
-      - name: Get version from tag
-        id: version
+      - name: Determine release tag
+        id: tag
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_branch }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Update extension version
         working-directory: editors/vscode
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+        run: npm version "${{ steps.tag.outputs.version }}" --no-git-tag-version
 
       - name: Install dependencies
         working-directory: editors/vscode
@@ -61,7 +77,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="sqlsift-lsp-${{ matrix.rust_target }}.${{ matrix.archive_ext }}"
-          gh release download "${{ github.event.release.tag_name }}" \
+          gh release download "${{ steps.tag.outputs.tag }}" \
             --pattern "$ARCHIVE" \
             --dir /tmp/download
 
@@ -99,6 +115,16 @@ jobs:
     needs: build-vsix
     runs-on: ubuntu-latest
     steps:
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.workflow_run.head_branch }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Download all VSIX artifacts
         uses: actions/download-artifact@v4
         with:
@@ -114,7 +140,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for vsix in vsix/*.vsix; do
-            gh release upload "${{ github.event.release.tag_name }}" "$vsix" \
+            gh release upload "${{ steps.tag.outputs.tag }}" "$vsix" \
               --repo "${{ github.repository }}"
           done
 
