@@ -25,7 +25,7 @@ Releases are fully automated using [release-plz](https://release-plz.dev/):
 If the automation fails, use the manual tag script:
 
 ```bash
-./scripts/release.sh --tag 0.1.0-alpha.9
+./scripts/release.sh --tag 0.1.2
 ```
 
 This creates a git tag and pushes it, triggering the cargo-dist release workflow.

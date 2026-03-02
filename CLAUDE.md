@@ -78,7 +78,7 @@ git config core.hooksPath .githooks
 # Build
 cargo build
 
-# Run tests (141 tests: 28 unit + 98 integration + 3 doc + 12 LSP)
+# Run all workspace tests (unit + integration + LSP)
 cargo test
 
 # Run with example
@@ -143,7 +143,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Real-world schema tests in `tests/fixtures/real-world/` (Chinook, Pagila, Northwind) with valid and invalid query files
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage: 28 unit tests + 94 integration tests + 3 doc tests + 12 LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and all three dialects (PostgreSQL, MySQL, SQLite)
+- Comprehensive test coverage across unit, integration, doc, and LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and all three dialects (PostgreSQL, MySQL, SQLite)
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines
@@ -168,10 +168,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Numeric type compatibility (TINYINT → BIGINT implicit casts)
 - INSERT VALUES type checking (`INSERT INTO users (id) VALUES ('text')` → E0003)
 - UPDATE SET type checking (`UPDATE users SET id = 'text'` → E0003)
+- CAST expression type inference (`CAST(x AS INTEGER)`)
+- Function return type inference (e.g., COUNT, SUM, AVG, UPPER, LENGTH, COALESCE)
 
 **Not Yet Implemented (TODO):**
-- CAST expression type inference (`CAST(x AS INTEGER)`)
-- Function return type inference (COUNT → INTEGER, SUM → NUMERIC, etc.)
 - CASE expression type consistency (THEN/ELSE must have compatible types)
 - Subquery/CTE column type inference
 - VIEW column type inference from SELECT projection
