@@ -136,13 +136,13 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ✅ JOIN conditions (`ON users.id = orders.user_name`)
 - ✅ INSERT value type mismatches (`INSERT INTO users (id) VALUES ('text')`)
 - ✅ UPDATE assignment type mismatches (`UPDATE users SET id = 'text'`)
+- ✅ CAST expression type inference (`CAST(name AS INTEGER)`)
+- ✅ Function return type inference (e.g., `COUNT`, `SUM`, `UPPER`, `LENGTH`, `COALESCE`)
 - ✅ Nested expressions (`WHERE (a + b) * 2 = 'text'`)
 - ✅ All comparison operators (=, !=, <, >, <=, >=)
 - ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
 
 **Not Yet Detected:**
-- ⏳ CAST expression type inference
-- ⏳ Function return types (COUNT, SUM, AVG, etc.)
 - ⏳ CASE expression type consistency
 - ⏳ Subquery/CTE column type inference
 
@@ -295,8 +295,6 @@ Use the `--dialect` flag to specify the dialect.
 - [x] LSP server for editor integration (VS Code extension)
 
 ### Planned
-- [ ] CAST expression type inference
-- [ ] Function return type inference (COUNT, SUM, AVG, etc.)
 - [ ] CASE expression type consistency checking
 - [ ] Subquery/CTE column type inference
 - [ ] Custom rule plugins
