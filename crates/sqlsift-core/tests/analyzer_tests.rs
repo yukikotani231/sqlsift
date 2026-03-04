@@ -1672,15 +1672,31 @@ fn test_insert_type_compatible() {
 }
 
 #[test]
-fn test_insert_null_compatible() {
+fn test_insert_null_not_null_violation() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
 
-    // NULL should be compatible with any column type
+    // id is SERIAL PRIMARY KEY (NOT NULL), inserting NULL should produce E0004.
     let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES (NULL)");
     assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::PotentialNullViolation),
+        "Expected NOT NULL violation for INSERT NULL into NOT NULL column: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_insert_null_nullable_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // email is nullable in setup_catalog()
+    let diagnostics = analyzer.analyze("INSERT INTO users (email) VALUES (NULL)");
+    assert!(
         diagnostics.is_empty(),
-        "NULL INSERT should have no errors: {:?}",
+        "NULL INSERT into nullable column should have no errors: {:?}",
         diagnostics
     );
 }
@@ -1712,6 +1728,36 @@ fn test_update_type_compatible() {
     assert!(
         diagnostics.is_empty(),
         "Compatible UPDATE should have no errors: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_update_null_not_null_violation() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // name is NOT NULL in setup_catalog()
+    let diagnostics = analyzer.analyze("UPDATE users SET name = NULL");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::PotentialNullViolation),
+        "Expected NOT NULL violation for UPDATE NULL into NOT NULL column: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_update_null_nullable_compatible() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // email is nullable in setup_catalog()
+    let diagnostics = analyzer.analyze("UPDATE users SET email = NULL");
+    assert!(
+        diagnostics.is_empty(),
+        "NULL UPDATE into nullable column should have no errors: {:?}",
         diagnostics
     );
 }

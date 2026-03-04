@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Implement `E0004` potential null-violation diagnostics for explicit `NULL` assignment to `NOT NULL` columns in `INSERT` / `UPDATE`
+- Add analyzer tests for `E0004` positive/negative cases
+
 ## [0.1.3](https://github.com/yukikotani231/sqlsift/compare/v0.1.2...v0.1.3) - 2026-03-04
 
 ### Added
