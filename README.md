@@ -123,7 +123,7 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 | E0001 | table-not-found | Referenced table does not exist in schema | ✅ Implemented |
 | E0002 | column-not-found | Referenced column does not exist in table | ✅ Implemented |
 | E0003 | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic) | ✅ Implemented |
-| E0004 | potential-null-violation | Possible NOT NULL constraint violation | 🚧 Reserved |
+| E0004 | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) | ✅ Implemented |
 | E0005 | column-count-mismatch | INSERT column count doesn't match values | ✅ Implemented |
 | E0006 | ambiguous-column | Column reference is ambiguous across tables | ✅ Implemented |
 | E0007 | join-type-mismatch | JOIN condition compares incompatible types | ✅ Implemented |
@@ -135,6 +135,7 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ✅ Arithmetic operations (`SELECT name + 10`)
 - ✅ JOIN conditions (`ON users.id = orders.user_name`)
 - ✅ Set operations column validation (`UNION` / `INTERSECT` / `EXCEPT` column count and type compatibility)
+- ✅ Potential NOT NULL violation checks for explicit `NULL` assignment in `INSERT` / `UPDATE` (`E0004`)
 - ✅ INSERT value type mismatches (`INSERT INTO users (id) VALUES ('text')`)
 - ✅ UPDATE assignment type mismatches (`UPDATE users SET id = 'text'`)
 - ✅ CAST expression type inference (`CAST(name AS INTEGER)`)

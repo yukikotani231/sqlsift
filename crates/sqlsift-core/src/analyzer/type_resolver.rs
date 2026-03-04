@@ -145,6 +145,25 @@ impl<'a> TypeResolver<'a> {
                             Some(def) => def,
                             None => continue, // Column not found - already reported
                         };
+
+                        if !col_def.nullable && matches!(value_expr, Expr::Value(Value::Null)) {
+                            let span = Span::from_sqlparser(&value_expr.span());
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    DiagnosticKind::PotentialNullViolation,
+                                    format!(
+                                        "Potential NOT NULL violation: column '{}' cannot be assigned NULL",
+                                        col_name
+                                    ),
+                                )
+                                .with_span(span)
+                                .with_help(
+                                    "This column is defined as NOT NULL. Provide a non-NULL value or change the schema constraint.",
+                                ),
+                            );
+                            continue;
+                        }
+
                         let value_type = self.infer_expr_type(value_expr);
                         if let ExpressionType::Known(vt) = value_type {
                             let compat = vt.is_compatible_with(&col_def.data_type);
@@ -204,6 +223,24 @@ impl<'a> TypeResolver<'a> {
                 Some(def) => def,
                 None => continue, // Column not found - already reported
             };
+
+            if !col_def.nullable && matches!(&assignment.value, Expr::Value(Value::Null)) {
+                let span = Span::from_sqlparser(&assignment.value.span());
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::PotentialNullViolation,
+                        format!(
+                            "Potential NOT NULL violation: column '{}' cannot be assigned NULL",
+                            col_name
+                        ),
+                    )
+                    .with_span(span)
+                    .with_help(
+                        "This column is defined as NOT NULL. Provide a non-NULL value or change the schema constraint.",
+                    ),
+                );
+                continue;
+            }
 
             let value_type = self.infer_expr_type(&assignment.value);
             if let ExpressionType::Known(vt) = value_type {

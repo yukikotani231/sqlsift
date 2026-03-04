@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Validate set operation compatibility (`UNION` / `INTERSECT` / `EXCEPT`) for column count and type mismatches
 - Add integration tests for CLI behavior (`--max-errors`, `-q`, `-v`)
+- Implement `E0004` detection for explicit `NULL` assignment to `NOT NULL` columns in `INSERT` / `UPDATE`
 
 ### Changed
 - Wire up CLI runtime behavior for `--max-errors` early stop
