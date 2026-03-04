@@ -235,11 +235,111 @@ impl<'a> TypeResolver<'a> {
 
     /// Check types in a query
     fn check_query(&mut self, query: &Query) {
-        // Check the main body
-        if let sqlparser::ast::SetExpr::Select(select) = &*query.body {
-            self.check_select(select);
+        self.check_set_expr(&query.body);
+    }
+
+    /// Check types in a set expression (SELECT, UNION, INTERSECT, EXCEPT, ...)
+    fn check_set_expr(&mut self, set_expr: &SetExpr) {
+        match set_expr {
+            SetExpr::Select(select) => self.check_select(select),
+            SetExpr::Query(query) => self.check_query(query),
+            SetExpr::SetOperation { left, right, .. } => {
+                self.check_set_expr(left);
+                self.check_set_expr(right);
+                self.check_set_operation_compatibility(left, right);
+            }
+            _ => {}
         }
-        // TODO: Handle UNION, INTERSECT, EXCEPT
+    }
+
+    /// Validate projection compatibility between two sides of a set operation.
+    fn check_set_operation_compatibility(&mut self, left: &SetExpr, right: &SetExpr) {
+        let left_types = match self.infer_set_expr_projection_types(left) {
+            Some(types) => types,
+            None => return,
+        };
+        let right_types = match self.infer_set_expr_projection_types(right) {
+            Some(types) => types,
+            None => return,
+        };
+
+        if left_types.len() != right_types.len() {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!(
+                        "Set operation column count mismatch: left has {}, right has {}",
+                        left_types.len(),
+                        right_types.len()
+                    ),
+                )
+                .with_span(Span::from_sqlparser(&right.span()))
+                .with_help("UNION/INTERSECT/EXCEPT requires both sides to have the same number of columns."),
+            );
+            return;
+        }
+
+        for (idx, (left_ty, right_ty)) in left_types
+            .into_iter()
+            .zip(right_types.into_iter())
+            .enumerate()
+        {
+            let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_ty, right_ty) else {
+                continue;
+            };
+
+            let compat_lr = lt.is_compatible_with(&rt);
+            let compat_rl = rt.is_compatible_with(&lt);
+            if compat_lr == TypeCompatibility::ExplicitCast
+                && compat_rl == TypeCompatibility::ExplicitCast
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::TypeMismatch,
+                        format!(
+                            "Set operation type mismatch at column {}: {} vs {}",
+                            idx + 1,
+                            lt.display_name(),
+                            rt.display_name()
+                        ),
+                    )
+                    .with_span(Span::from_sqlparser(&right.span()))
+                    .with_help("Corresponding columns in UNION/INTERSECT/EXCEPT should be type-compatible."),
+                );
+            }
+        }
+    }
+
+    /// Infer projection types for a set expression.
+    /// Returns None when projection width is indeterminate (e.g., wildcard).
+    fn infer_set_expr_projection_types(
+        &mut self,
+        set_expr: &SetExpr,
+    ) -> Option<Vec<ExpressionType>> {
+        match set_expr {
+            SetExpr::Select(select) => self.infer_select_projection_types(select),
+            SetExpr::Query(query) => self.infer_set_expr_projection_types(&query.body),
+            // SQL semantics: result column shape of a set operation is based on the left side.
+            SetExpr::SetOperation { left, .. } => self.infer_set_expr_projection_types(left),
+            _ => None,
+        }
+    }
+
+    /// Infer projection types for a SELECT list.
+    /// Returns None when wildcard expansion would be required.
+    fn infer_select_projection_types(&mut self, select: &Select) -> Option<Vec<ExpressionType>> {
+        let mut types = Vec::with_capacity(select.projection.len());
+        for item in &select.projection {
+            match item {
+                sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                    types.push(self.infer_expr_type(expr));
+                }
+                sqlparser::ast::SelectItem::Wildcard(_)
+                | sqlparser::ast::SelectItem::QualifiedWildcard(_, _) => return None,
+            }
+        }
+        Some(types)
     }
 
     /// Check types in a SELECT statement

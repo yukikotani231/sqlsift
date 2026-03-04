@@ -1328,16 +1328,112 @@ fn test_union_column_count_validation() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // UNION with different column counts
-    // Note: This is currently not validated (limitation)
-    // This test documents current behavior
     let diagnostics = analyzer.analyze(
         "SELECT id, name FROM users
             UNION
             SELECT id FROM orders",
     );
-    // Current implementation doesn't validate UNION column count
-    // This is a known limitation - just document that the query doesn't crash
-    let _ = diagnostics;
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch
+                && d.message.contains("column count mismatch")),
+        "Expected set-operation column count mismatch diagnostic, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_union_type_mismatch_validation() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let diagnostics = analyzer.analyze(
+        "SELECT id FROM users
+            UNION
+            SELECT name FROM users",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
+        "Expected set-operation type mismatch diagnostic, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_intersect_type_mismatch_validation() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let diagnostics = analyzer.analyze(
+        "SELECT id FROM users
+            INTERSECT
+            SELECT name FROM users",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
+        "Expected INTERSECT type mismatch diagnostic, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_except_type_mismatch_validation() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let diagnostics = analyzer.analyze(
+        "SELECT id FROM users
+            EXCEPT
+            SELECT name FROM users",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
+        "Expected EXCEPT type mismatch diagnostic, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_union_type_compatible_validation() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let diagnostics = analyzer.analyze(
+        "SELECT id FROM users
+            UNION
+            SELECT user_id FROM orders",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "Compatible UNION should not produce diagnostics: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_union_with_wildcard_no_set_op_type_diagnostic() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let diagnostics = analyzer.analyze(
+        "SELECT * FROM users
+            UNION
+            SELECT * FROM orders",
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.contains("Set operation")),
+        "Wildcard UNION should not emit set-operation projection diagnostics: {:?}",
+        diagnostics
+    );
 }
 
 #[test]

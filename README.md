@@ -134,6 +134,7 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ✅ WHERE clause comparisons (`WHERE id = 'text'`)
 - ✅ Arithmetic operations (`SELECT name + 10`)
 - ✅ JOIN conditions (`ON users.id = orders.user_name`)
+- ✅ Set operations column validation (`UNION` / `INTERSECT` / `EXCEPT` column count and type compatibility)
 - ✅ INSERT value type mismatches (`INSERT INTO users (id) VALUES ('text')`)
 - ✅ UPDATE assignment type mismatches (`UPDATE users SET id = 'text'`)
 - ✅ CAST expression type inference (`CAST(name AS INTEGER)`)
@@ -181,9 +182,9 @@ Options:
       --disable <RULE>      Disable specific rules (e.g., E0001, E0002)
   -d, --dialect <NAME>      SQL dialect [default: postgresql]
   -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
-      --max-errors <N>      Maximum number of errors before stopping [default: 100]
-  -v, --verbose             Enable verbose output
-  -q, --quiet               Suppress non-error output
+      --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
+  -v, --verbose             Enable verbose logging (-vv for debug)
+  -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help
 ```
 

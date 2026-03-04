@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Implement `--max-errors` early-stop behavior in `check`
+- Implement `-q/--quiet` summary suppression behavior
+- Implement `-v/--verbose` logging level behavior (`-vv` enables debug)
+
+### Added
+- Add CLI integration tests for `--max-errors`, `-q`, and `-v`
+
 ## [0.1.2](https://github.com/yukikotani231/sqlsift/compare/v0.1.1...v0.1.2) - 2026-02-19
 
 ### Added
