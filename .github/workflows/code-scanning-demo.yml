@@ -21,9 +21,9 @@ jobs:
         run: |
           set +e
           cargo run -p sqlsift-cli -- check \
-            --schema examples/code-scanning/schema.sql \
+            --schema tests/fixtures/schema.sql \
             -f sarif \
-            examples/code-scanning/bad.sql > results.sarif
+            tests/fixtures/invalid_query.sql > results.sarif
           status=$?
           echo "sqlsift_exit_code=$status"
           if [ ! -s results.sarif ]; then
