@@ -1,0 +1,39 @@
+name: Code Scanning Demo (sqlsift)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sqlsift-code-scanning:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate SARIF with sqlsift
+        shell: bash
+        run: |
+          set +e
+          cargo run -p sqlsift-cli -- check \
+            --schema examples/code-scanning/schema.sql \
+            -f sarif \
+            examples/code-scanning/bad.sql > results.sarif
+          status=$?
+          echo "sqlsift_exit_code=$status"
+          if [ ! -s results.sarif ]; then
+            echo "SARIF output was empty" >&2
+            exit 1
+          fi
+          exit 0
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

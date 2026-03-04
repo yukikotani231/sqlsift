@@ -1,0 +1,1 @@
+SELECT naem FROM users;
