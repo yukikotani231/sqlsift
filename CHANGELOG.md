@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Validate set operation compatibility (`UNION` / `INTERSECT` / `EXCEPT`) for column count and type mismatches
+- Add integration tests for CLI behavior (`--max-errors`, `-q`, `-v`)
+
+### Changed
+- Wire up CLI runtime behavior for `--max-errors` early stop
+- Wire up CLI runtime behavior for `--quiet` (suppress summary output) and `--verbose` logging
+- Update README to match current CLI and analyzer behavior
+
 ## [0.1.0-alpha.8] - 2026-02-13
 
 ### Changed

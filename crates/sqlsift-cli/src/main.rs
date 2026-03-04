@@ -17,15 +17,8 @@ use crate::config::Config;
 use crate::output::OutputFormatter;
 
 fn main() -> ExitCode {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::WARN.into()),
-        )
-        .init();
-
     let args = Args::parse();
+    init_tracing(args.verbose, args.quiet);
 
     match run(args) {
         Ok(has_errors) => {
@@ -42,7 +35,23 @@ fn main() -> ExitCode {
     }
 }
 
+fn init_tracing(verbose: u8, quiet: bool) {
+    let level = if quiet {
+        tracing::Level::ERROR
+    } else {
+        match verbose {
+            0 => tracing::Level::WARN,
+            1 => tracing::Level::INFO,
+            _ => tracing::Level::DEBUG,
+        }
+    };
+
+    tracing_subscriber::fmt().with_max_level(level).init();
+}
+
 fn run(args: Args) -> Result<bool> {
+    let quiet = args.quiet;
+
     match args.command {
         Command::Check {
             files,
@@ -52,10 +61,11 @@ fn run(args: Args) -> Result<bool> {
             disable,
             dialect,
             format,
-            ..
+            max_errors,
         } => {
             // Parse and validate dialect
             let dialect: SqlDialect = dialect.parse().map_err(|e: String| miette::miette!(e))?;
+
             // Load configuration
             let config = if let Some(path) = config_path {
                 // Load from specified path
@@ -67,6 +77,11 @@ fn run(args: Args) -> Result<bool> {
 
             // Merge CLI args with config (CLI takes precedence)
             let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &disable);
+            tracing::info!(
+                schema_count = config.schema.len(),
+                query_pattern_count = config.files.len(),
+                "Loaded sqlsift configuration"
+            );
 
             // Get schema files from config or CLI
             let mut schema_files: Vec<std::path::PathBuf> =
@@ -141,12 +156,24 @@ fn run(args: Args) -> Result<bool> {
             let mut total_errors = 0;
             let mut total_warnings = 0;
             let mut analyzer = Analyzer::with_dialect(&catalog, dialect);
+            let max_errors = if max_errors == 0 {
+                usize::MAX
+            } else {
+                max_errors
+            };
+            let mut limit_reached = false;
 
             // Get disabled rules
             let disabled_rules: std::collections::HashSet<String> =
                 config.disable.iter().cloned().collect();
 
             for query_file in &query_files {
+                if total_errors >= max_errors {
+                    limit_reached = true;
+                    break;
+                }
+
+                tracing::debug!(file = %query_file.display(), "Analyzing SQL file");
                 let content = fs::read_to_string(query_file).into_diagnostic()?;
                 let diagnostics = analyzer.analyze(&content);
 
@@ -156,32 +183,51 @@ fn run(args: Args) -> Result<bool> {
                     .filter(|d| !disabled_rules.contains(d.code()))
                     .collect();
 
-                if !filtered_diagnostics.is_empty() {
+                let mut diagnostics_to_print = Vec::new();
+                for diag in filtered_diagnostics {
+                    if matches!(diag.severity, sqlsift_core::Severity::Error)
+                        && total_errors >= max_errors
+                    {
+                        limit_reached = true;
+                        break;
+                    }
+
+                    match diag.severity {
+                        sqlsift_core::Severity::Error => total_errors += 1,
+                        sqlsift_core::Severity::Warning => total_warnings += 1,
+                        _ => {}
+                    }
+                    diagnostics_to_print.push(diag);
+                }
+
+                if !diagnostics_to_print.is_empty() {
                     let formatter =
                         OutputFormatter::new(output_format, query_file.display().to_string());
-                    formatter.print_diagnostics(&filtered_diagnostics, &content);
+                    formatter.print_diagnostics(&diagnostics_to_print, &content);
+                }
 
-                    for diag in &filtered_diagnostics {
-                        match diag.severity {
-                            sqlsift_core::Severity::Error => total_errors += 1,
-                            sqlsift_core::Severity::Warning => total_warnings += 1,
-                            _ => {}
-                        }
-                    }
+                if limit_reached {
+                    break;
                 }
             }
 
             // Print summary
-            if total_errors > 0 || total_warnings > 0 {
-                eprintln!();
-                eprintln!(
-                    "Found {} error(s), {} warning(s) in {} file(s)",
-                    total_errors,
-                    total_warnings,
-                    query_files.len()
-                );
-            } else {
-                eprintln!("All {} file(s) passed validation", query_files.len());
+            if !quiet {
+                if limit_reached && max_errors != usize::MAX {
+                    eprintln!("Reached maximum error limit ({max_errors}). Stopped early.");
+                }
+
+                if total_errors > 0 || total_warnings > 0 {
+                    eprintln!();
+                    eprintln!(
+                        "Found {} error(s), {} warning(s) in {} file(s)",
+                        total_errors,
+                        total_warnings,
+                        query_files.len()
+                    );
+                } else {
+                    eprintln!("All {} file(s) passed validation", query_files.len());
+                }
             }
 
             Ok(total_errors > 0)
