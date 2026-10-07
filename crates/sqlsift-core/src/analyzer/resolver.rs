@@ -108,14 +108,7 @@ impl<'a> NameResolver<'a> {
                 .0
                 .last()
                 .map(|id| Span::from_sqlparser(&id.span));
-            let mut diag = Diagnostic::error(
-                DiagnosticKind::TableNotFound,
-                format!("Table '{}' not found", table_name),
-            )
-            .with_help("Check that the table exists in your schema definition");
-            if let Some(span) = table_span {
-                diag = diag.with_span(span);
-            }
+            let diag = self.table_not_found(&table_name, table_span);
             self.diagnostics.push(diag);
             return;
         };
@@ -141,6 +134,12 @@ impl<'a> NameResolver<'a> {
         }
 
         // Check column count vs value count
+        // (VALUES literals carry no source location, so point at the table name)
+        let insert_span = insert
+            .table_name
+            .0
+            .last()
+            .map(|id| Span::from_sqlparser(&id.span));
         if let Some(source) = &insert.source {
             if let SetExpr::Values(Values { rows, .. }) = source.body.as_ref() {
                 let expected_count = if specified_columns.is_empty() {
@@ -151,8 +150,7 @@ impl<'a> NameResolver<'a> {
 
                 for row in rows {
                     if row.len() != expected_count {
-                        self.diagnostics.push(
-                            Diagnostic::error(
+                        let mut diag = Diagnostic::error(
                                 DiagnosticKind::ColumnCountMismatch,
                                 format!(
                                     "INSERT has {} value(s) but {} column(s) were specified",
@@ -167,8 +165,9 @@ impl<'a> NameResolver<'a> {
                                 )
                             } else {
                                 format!("Provide {} value(s) to match the column list", expected_count)
-                            }),
-                        );
+                            });
+                        diag.span = insert_span;
+                        self.diagnostics.push(diag);
                     }
 
                     // Resolve expressions in values (for subqueries, etc.)
@@ -535,15 +534,24 @@ impl<'a> NameResolver<'a> {
                 if !is_cte && !is_view && !self.catalog.table_exists(&table_name) {
                     // Get span from the last identifier (table name)
                     let table_span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
-                    let mut diag = Diagnostic::error(
-                        DiagnosticKind::TableNotFound,
-                        format!("Table '{}' not found", table_name),
-                    )
-                    .with_help("Check that the table exists in your schema definition");
-                    if let Some(span) = table_span {
-                        diag = diag.with_span(span);
-                    }
+                    let diag = self.table_not_found(&table_name, table_span);
                     self.diagnostics.push(diag);
+
+                    // Register a placeholder with unknown columns, so references to the
+                    // missing table don't cascade into column/alias errors
+                    let alias_name = alias.as_ref().map(|a| a.name.value.clone());
+                    let lookup_name = alias_name
+                        .clone()
+                        .unwrap_or_else(|| table_name.name.clone());
+                    self.tables.insert(
+                        lookup_name,
+                        TableRef {
+                            table: table_name,
+                            alias: alias_name,
+                            view_columns: None,
+                            derived_columns: Some(Vec::new()),
+                        },
+                    );
                     return;
                 }
 
@@ -651,7 +659,7 @@ impl<'a> NameResolver<'a> {
                 // table.*
                 if let Some(first_ident) = name.0.first() {
                     let table_name = &first_ident.value;
-                    if !self.tables.contains_key(table_name.as_str()) {
+                    if lookup_ignore_case(&self.tables, table_name).is_none() {
                         let table_span = Span::from_sqlparser(&first_ident.span);
                         self.diagnostics.push(
                             Diagnostic::error(
@@ -967,10 +975,8 @@ impl<'a> NameResolver<'a> {
         if let Some(table_id) = table_ident {
             let table_alias = &table_id.value;
             // Qualified column reference (table.column)
-            if let Some(table_ref) = self
-                .tables
-                .get(table_alias)
-                .or_else(|| self.outer_tables.get(table_alias))
+            if let Some(table_ref) = lookup_ignore_case(&self.tables, table_alias)
+                .or_else(|| lookup_ignore_case(&self.outer_tables, table_alias))
             {
                 // Check derived table first
                 if let Some(derived_cols) = &table_ref.derived_columns {
@@ -1054,8 +1060,13 @@ impl<'a> NameResolver<'a> {
             // Unqualified column reference - search inner scope first, then outer
             let mut found_in: Vec<&str> = Vec::new();
 
+            // Tables with unknown columns (missing tables, table functions without
+            // a column list) could provide any column: they only matter when no
+            // table with known columns does, and never make a column ambiguous
             for (name, table_ref) in &self.tables {
-                if self.table_ref_has_column(table_ref, column_name) {
+                if !has_unknown_columns(table_ref)
+                    && self.table_ref_has_column(table_ref, column_name)
+                {
                     found_in.push(name);
                 }
             }
@@ -1063,10 +1074,22 @@ impl<'a> NameResolver<'a> {
             // If not found in inner scope, check outer scope (correlated subqueries)
             if found_in.is_empty() {
                 for (name, table_ref) in &self.outer_tables {
-                    if self.table_ref_has_column(table_ref, column_name) {
+                    if !has_unknown_columns(table_ref)
+                        && self.table_ref_has_column(table_ref, column_name)
+                    {
                         found_in.push(name);
                     }
                 }
+            }
+
+            if found_in.is_empty()
+                && self
+                    .tables
+                    .values()
+                    .chain(self.outer_tables.values())
+                    .any(has_unknown_columns)
+            {
+                return;
             }
 
             match found_in.len() {
@@ -1125,7 +1148,29 @@ impl<'a> NameResolver<'a> {
         }
     }
 
-    /// Consume the resolver and return collected diagnostics
+    /// Build a "table not found" diagnostic, suggesting a similarly named table, view or CTE
+    fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
+        let candidates = self
+            .catalog
+            .table_or_view_names()
+            .into_iter()
+            .map(|n| n.name)
+            .chain(self.ctes.keys().cloned());
+        let help = match find_similar_name(candidates, &table_name.name) {
+            Some(suggestion) => format!("Did you mean '{}'?", suggestion),
+            None => "Check that the table exists in your schema definition".to_string(),
+        };
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::TableNotFound,
+            format!("Table '{}' not found", table_name),
+        )
+        .with_help(help);
+        if let Some(span) = span {
+            diag = diag.with_span(span);
+        }
+        diag
+    }
+
     /// Consume the resolver and return collected diagnostics
     ///
     /// Returns all diagnostics collected during name resolution.
@@ -1154,20 +1199,43 @@ fn table_with_joins_to_name(factor: &TableFactor) -> Option<QualifiedName> {
 
 /// Find a similar column name (for suggestions)
 fn find_similar_column(table: &TableDef, name: &str) -> Option<String> {
-    let name_lower = name.to_lowercase();
-    let mut best_match: Option<(usize, &str)> = None;
+    find_similar_name(table.columns.keys().cloned(), name)
+}
 
-    for col_name in table.columns.keys() {
-        let col_lower = col_name.to_lowercase();
-        let distance = levenshtein_distance(&name_lower, &col_lower);
+/// Find the candidate most similar to `name` (for "did you mean" suggestions)
+fn find_similar_name(candidates: impl IntoIterator<Item = String>, name: &str) -> Option<String> {
+    let name_lower = name.to_lowercase();
+    let mut best_match: Option<(usize, String)> = None;
+
+    for candidate in candidates {
+        let distance = levenshtein_distance(&name_lower, &candidate.to_lowercase());
 
         // Only suggest if reasonably similar (distance <= 3)
-        if distance <= 3 && (best_match.is_none() || distance < best_match.unwrap().0) {
-            best_match = Some((distance, col_name));
+        if distance <= 3
+            && best_match
+                .as_ref()
+                .map_or(true, |(best, _)| distance < *best)
+        {
+            best_match = Some((distance, candidate));
         }
     }
 
-    best_match.map(|(_, name)| name.to_string())
+    best_match.map(|(_, name)| name)
+}
+
+/// Whether a table reference has an unknown column list (a missing table, or a
+/// table function without column aliases), so any column may belong to it
+fn has_unknown_columns(table_ref: &TableRef) -> bool {
+    matches!(&table_ref.derived_columns, Some(columns) if columns.is_empty())
+}
+
+/// Look up a table reference by alias or name, falling back to a case-insensitive match
+pub(super) fn lookup_ignore_case<'m, V>(map: &'m HashMap<String, V>, key: &str) -> Option<&'m V> {
+    map.get(key).or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
+    })
 }
 
 /// Simple Levenshtein distance implementation

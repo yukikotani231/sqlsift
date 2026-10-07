@@ -143,6 +143,8 @@ sqlsift check --schema schema/*.sql queries/**/*.sql
 - ✅ Nested expressions (`WHERE (a + b) * 2 = 'text'`)
 - ✅ All comparison operators (=, !=, <, >, <=, >=)
 - ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
+- ✅ String literals coerce to the column type like in the database (`created_at > '2024-01-01'`, `status = 'active'`, `id = '42'`), while impossible values are still reported (`id = 'abc'`)
+- ✅ Date/time arithmetic (`now() - interval '7 days'`, `placed_on + 7`, `ts1 - ts2`)
 
 **Not Yet Detected:**
 - ⏳ CASE expression type consistency

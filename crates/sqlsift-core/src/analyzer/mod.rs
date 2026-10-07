@@ -106,7 +106,7 @@ impl<'a> Analyzer<'a> {
             resolver.resolve_statement(stmt);
 
             // Phase 2: Type inference and checking
-            let mut type_resolver = TypeResolver::new(self.catalog);
+            let mut type_resolver = TypeResolver::new(self.catalog).with_dialect(self.dialect);
             type_resolver.inherit_scope(&resolver);
             type_resolver.check_statement(stmt);
 
