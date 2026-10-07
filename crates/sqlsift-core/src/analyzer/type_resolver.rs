@@ -21,11 +21,12 @@
 //! - Current coverage: ~85% of real-world type errors
 //! - Type inference is performed in a separate pass after name resolution
 
+use indexmap::IndexMap;
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
     Insert, Query, Select, SetExpr, Spanned, Statement, TableFactor, TableWithJoins, Value, Values,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -61,9 +62,9 @@ struct TableRef {
 pub struct TypeResolver<'a> {
     catalog: &'a Catalog,
     /// Current scope's table references (alias or name -> TableRef)
-    tables: HashMap<String, TableRef>,
+    tables: IndexMap<String, TableRef>,
     /// Enclosing query blocks' scopes, innermost last (for correlated subqueries)
-    outer_scopes: Vec<HashMap<String, TableRef>>,
+    outer_scopes: Vec<IndexMap<String, TableRef>>,
     /// CTE names visible in the current query (lowercase); they shadow catalog tables
     ctes: HashSet<String>,
     /// Collected diagnostics
@@ -77,7 +78,7 @@ impl<'a> TypeResolver<'a> {
     pub fn new(catalog: &'a Catalog) -> Self {
         Self {
             catalog,
-            tables: HashMap::new(),
+            tables: IndexMap::new(),
             outer_scopes: Vec::new(),
             ctes: HashSet::new(),
             diagnostics: Vec::new(),
@@ -362,8 +363,8 @@ impl<'a> TypeResolver<'a> {
     }
 
     /// Table references introduced by a FROM clause (alias or name -> TableRef)
-    fn scope_of_from_items(&self, from: &[TableWithJoins]) -> HashMap<String, TableRef> {
-        let mut scope = HashMap::new();
+    fn scope_of_from_items(&self, from: &[TableWithJoins]) -> IndexMap<String, TableRef> {
+        let mut scope = IndexMap::new();
         for table in from {
             self.add_relation(&table.relation, &mut scope);
             for join in &table.joins {
@@ -374,7 +375,7 @@ impl<'a> TypeResolver<'a> {
     }
 
     /// Register a FROM relation in `scope`
-    fn add_relation(&self, factor: &TableFactor, scope: &mut HashMap<String, TableRef>) {
+    fn add_relation(&self, factor: &TableFactor, scope: &mut IndexMap<String, TableRef>) {
         // Relations whose column types are unknown (CTEs, subqueries, functions, missing tables)
         let unknown = |name: &str| TableRef {
             table_name: QualifiedName::new(name),
@@ -1073,7 +1074,7 @@ impl<'a> TypeResolver<'a> {
     /// scope has it
     fn infer_column_type_in_scope(
         &self,
-        scope: &HashMap<String, TableRef>,
+        scope: &IndexMap<String, TableRef>,
         col_name: &str,
     ) -> Option<ExpressionType> {
         let mut found_type: Option<SqlType> = None;

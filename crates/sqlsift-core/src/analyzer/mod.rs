@@ -102,7 +102,7 @@ impl<'a> Analyzer<'a> {
         // Analyze each statement
         for stmt in &statements {
             // Phase 1: Name resolution
-            let mut resolver = NameResolver::new(self.catalog);
+            let mut resolver = NameResolver::new(self.catalog).with_dialect(self.dialect);
             resolver.resolve_statement(stmt);
 
             // Phase 2: Type inference and checking

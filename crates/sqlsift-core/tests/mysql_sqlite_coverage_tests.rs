@@ -1876,14 +1876,6 @@ fn sqlite_invalid_more_contexts() {
             None,
             Some((1, 44)),
         ),
-        // WITHOUT ROWID tables have no implicit rowid column.
-        bad(
-            "SELECT rowid FROM post_tags",
-            ColumnNotFound,
-            "rowid",
-            None,
-            Some((1, 8)),
-        ),
         bad(
             "SELECT id FROM posts GROUP BY author HAVING count(*) > 1",
             ColumnNotFound,

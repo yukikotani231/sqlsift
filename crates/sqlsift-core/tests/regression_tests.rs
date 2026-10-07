@@ -493,3 +493,149 @@ fn table_names_are_case_insensitive_in_mysql_and_sqlite() {
         assert_valid(schema, dialect, "SELECT id FROM ACCOUNTS");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Name resolution gaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_by_can_reference_select_aliases() {
+    for sql in [
+        "SELECT user_id AS u, count(*) FROM orders GROUP BY u",
+        "SELECT date_trunc('day', created_at) AS d, count(*) FROM users GROUP BY d ORDER BY d",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn default_keyword_is_not_a_column() {
+    for sql in [
+        "INSERT INTO orders (id, user_id, total) VALUES (DEFAULT, 1, 2)",
+        "UPDATE users SET updated_at = DEFAULT WHERE id = 1",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn whole_row_references_are_allowed() {
+    for sql in [
+        "SELECT json_agg(u) FROM users u",
+        "SELECT to_jsonb(o) FROM orders o WHERE o.id = 1",
+        "SELECT row_to_json(users) FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn table_functions_without_alias_are_allowed() {
+    for sql in [
+        "SELECT * FROM generate_series(1, 10)",
+        "SELECT generate_series FROM generate_series(1, 10)",
+        "SELECT key, value FROM users, jsonb_each(metadata)",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    assert_valid(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "SELECT value FROM json_each('[1, 2]')",
+    );
+}
+
+#[test]
+fn system_columns_and_tables_are_known() {
+    for sql in [
+        "DELETE FROM orders WHERE ctid IN (SELECT ctid FROM orders LIMIT 10)",
+        "SELECT xmin, id FROM users",
+        "SELECT tableoid::regclass, id FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    for sql in [
+        "SELECT rowid, name FROM users",
+        "SELECT oid, _rowid_ FROM users",
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+        "SELECT name FROM sqlite_schema",
+    ] {
+        assert_valid(SQLITE_SCHEMA, SqlDialect::SQLite, sql);
+    }
+}
+
+const MYSQL_SHOP: &str = r#"
+    CREATE TABLE customers (id INT PRIMARY KEY, balance DECIMAL(10,2), created_at DATETIME);
+    CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total DECIMAL(10,2), placed_at DATETIME);
+"#;
+
+#[test]
+fn mysql_multi_table_update_and_delete() {
+    for sql in [
+        "UPDATE orders o JOIN customers c ON c.id = o.customer_id SET c.balance = c.balance - o.total WHERE o.id = 1",
+        "DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.id = 1",
+        "DELETE FROM o USING orders o JOIN customers c ON c.id = o.customer_id WHERE c.id = 1",
+    ] {
+        assert_valid(MYSQL_SHOP, SqlDialect::MySQL, sql);
+    }
+    let diagnostics = analyze(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "UPDATE orders o JOIN customers c ON c.id = o.customer_id SET c.balanse = 0",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn mysql_keywords_and_variables_are_not_columns() {
+    for sql in [
+        "SELECT TIMESTAMPDIFF(DAY, placed_at, NOW()) FROM orders",
+        "SELECT id FROM orders WHERE customer_id = @uid",
+        "SELECT DATE_ADD(placed_at, INTERVAL 1 DAY) FROM orders",
+    ] {
+        assert_valid(MYSQL_SHOP, SqlDialect::MySQL, sql);
+    }
+}
+
+#[test]
+fn insert_into_view_is_allowed() {
+    let schema = format!("{PG_SCHEMA} CREATE VIEW active_users AS SELECT id, name FROM users;");
+    assert_valid(
+        &schema,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO active_users (name) VALUES ('a')",
+    );
+}
+
+#[test]
+fn ambiguity_message_and_suggestions_are_deterministic() {
+    let first = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users, orders",
+    );
+    for _ in 0..20 {
+        let again = analyze(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            "SELECT id FROM users, orders",
+        );
+        assert_eq!(first[0].message, again[0].message);
+        assert_eq!(first[0].help, again[0].help);
+    }
+    assert_eq!(
+        first[0].message,
+        "Column 'id' is ambiguous (found in tables: users, orders)"
+    );
+}
+
+#[test]
+fn suggestions_require_real_similarity() {
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, "SELECT zz FROM users");
+    assert_eq!(diagnostics[0].help, None, "{diagnostics:#?}");
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, "SELECT emial FROM users");
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("Did you mean 'email'?")
+    );
+}
