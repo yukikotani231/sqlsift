@@ -26,24 +26,24 @@ WHERE u.id = 'abc';
 $ npx sqlsift-cli check --schema schema.sql queries/report.sql
 error[E0002]: Column 'naem' not found in table 'users'
   --> queries/report.sql:1:10
-   |
+    |
   1 | SELECT u.naem, o.total
-   |          ^^^^
-   = help: Did you mean 'name'?
+    |          ^^^^
+    = help: Did you mean 'name'?
 
 error[E0007]: JOIN condition type mismatch: integer vs text
   --> queries/report.sql:3:18
-   |
+    |
   3 | JOIN orders o ON o.user_id = u.email
-   |                  ^^^^^^^^^
-   = help: JOIN condition should compare compatible types. Consider using explicit CAST.
+    |                  ^^^^^^^^^
+    = help: JOIN condition should compare compatible types. Consider using explicit CAST.
 
 error[E0003]: Type mismatch: cannot compare integer with text
   --> queries/report.sql:4:7
-   |
+    |
   4 | WHERE u.id = 'abc';
-   |       ^^^^
-   = help: Types are not implicitly compatible. Consider using explicit CAST.
+    |       ^^^^
+    = help: Types are not implicitly compatible. Consider using explicit CAST.
 
 
 Found 3 error(s), 0 warning(s) in 1 file(s)
