@@ -114,12 +114,12 @@ impl SqlType {
 
             DataType::Time(precision, tz) => SqlType::Time {
                 precision: *precision,
-                with_timezone: matches!(tz, sqlparser::ast::TimezoneInfo::WithTimeZone),
+                with_timezone: has_time_zone(tz),
             },
 
             DataType::Timestamp(precision, tz) => SqlType::Timestamp {
                 precision: *precision,
-                with_timezone: matches!(tz, sqlparser::ast::TimezoneInfo::WithTimeZone),
+                with_timezone: has_time_zone(tz),
             },
 
             DataType::Datetime(precision) => SqlType::Timestamp {
@@ -193,10 +193,20 @@ impl SqlType {
             (TinyInt | SmallInt | MediumInt | Integer | BigInt, Decimal { .. }) => {
                 TypeCompatibility::ImplicitCast
             }
+            // NUMERIC with different precision/scale, and NUMERIC → floating point
+            (Decimal { .. }, Decimal { .. } | Real | DoublePrecision) => {
+                TypeCompatibility::ImplicitCast
+            }
 
-            // String type coercion
-            (Char { .. }, Varchar { .. } | Text) => TypeCompatibility::ImplicitCast,
-            (Varchar { .. }, Text) => TypeCompatibility::ImplicitCast,
+            // String type coercion (including different lengths)
+            (Char { .. }, Char { .. } | Varchar { .. } | Text) => TypeCompatibility::ImplicitCast,
+            (Varchar { .. }, Varchar { .. } | Text) => TypeCompatibility::ImplicitCast,
+
+            // Date/time coercion: precision and time zone differences are implicit,
+            // and DATE widens to TIMESTAMP
+            (Timestamp { .. }, Timestamp { .. }) => TypeCompatibility::ImplicitCast,
+            (Time { .. }, Time { .. }) => TypeCompatibility::ImplicitCast,
+            (Date, Timestamp { .. }) => TypeCompatibility::ImplicitCast,
 
             // JSON coercion
             (Json, Jsonb) => TypeCompatibility::ImplicitCast,
@@ -209,8 +219,104 @@ impl SqlType {
                 TypeCompatibility::ImplicitCast
             }
 
+            // Other user-defined types (domains, extension types such as citext, ...)
+            // carry no information about their casts, so don't report them
+            (Custom(_), _) | (_, Custom(_)) => TypeCompatibility::ImplicitCast,
+
             // Any type can be explicitly cast
             _ => TypeCompatibility::ExplicitCast,
+        }
+    }
+
+    /// Check whether a quoted string literal can be implicitly converted to this type.
+    ///
+    /// String literals are untyped until they meet another operand, so `'2024-01-01'`
+    /// is a valid DATE and `'42'` a valid INTEGER. Only numeric and boolean literals are
+    /// validated; for other types (dates, JSON, arrays, enums, ...) the database's input
+    /// format is too permissive to check reliably, so the literal is accepted.
+    pub fn accepts_string_literal(&self, literal: &str) -> bool {
+        let value = literal.trim();
+        match self {
+            SqlType::TinyInt
+            | SqlType::SmallInt
+            | SqlType::MediumInt
+            | SqlType::Integer
+            | SqlType::BigInt => value.parse::<i128>().is_ok(),
+            SqlType::Decimal { .. } | SqlType::Real | SqlType::DoublePrecision => {
+                value.parse::<f64>().is_ok()
+            }
+            SqlType::Boolean => matches!(
+                value.to_ascii_lowercase().as_str(),
+                "t" | "true" | "f" | "false" | "y" | "yes" | "n" | "no" | "on" | "off" | "1" | "0"
+            ),
+            _ => true,
+        }
+    }
+
+    /// Check whether this is a numeric type
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            SqlType::TinyInt
+                | SqlType::SmallInt
+                | SqlType::MediumInt
+                | SqlType::Integer
+                | SqlType::BigInt
+                | SqlType::Real
+                | SqlType::DoublePrecision
+                | SqlType::Decimal { .. }
+        )
+    }
+
+    /// Check whether this is an integer type
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            SqlType::TinyInt
+                | SqlType::SmallInt
+                | SqlType::MediumInt
+                | SqlType::Integer
+                | SqlType::BigInt
+        )
+    }
+
+    /// Result type of date/time arithmetic (`left op right`), following PostgreSQL rules.
+    ///
+    /// Returns `None` if the operands are not a valid date/time combination.
+    pub fn temporal_arithmetic_result(
+        left: &SqlType,
+        op: ArithmeticOp,
+        right: &SqlType,
+    ) -> Option<SqlType> {
+        use ArithmeticOp::*;
+        use SqlType::*;
+        let timestamp = Timestamp {
+            precision: None,
+            with_timezone: false,
+        };
+        match (left, op, right) {
+            (Timestamp { .. }, Add | Subtract, Interval) | (Interval, Add, Timestamp { .. }) => {
+                let ts = if matches!(left, Timestamp { .. }) {
+                    left
+                } else {
+                    right
+                };
+                Some(ts.clone())
+            }
+            (Timestamp { .. }, Subtract, Timestamp { .. } | Date) => Some(Interval),
+            (Date, Subtract, Timestamp { .. }) => Some(Interval),
+            (Date, Add | Subtract, Interval) | (Interval, Add, Date) => Some(timestamp),
+            (Date, Add, Time { .. }) | (Time { .. }, Add, Date) => Some(timestamp),
+            (Date, Add | Subtract, r) if r.is_integer() => Some(Date),
+            (l, Add, Date) if l.is_integer() => Some(Date),
+            (Date, Subtract, Date) => Some(Integer),
+            (Time { .. }, Add | Subtract, Interval) => Some(left.clone()),
+            (Interval, Add, Time { .. }) => Some(right.clone()),
+            (Time { .. }, Subtract, Time { .. }) => Some(Interval),
+            (Interval, Add | Subtract, Interval) => Some(Interval),
+            (Interval, Multiply | Divide, r) if r.is_numeric() => Some(Interval),
+            (l, Multiply, Interval) if l.is_numeric() => Some(Interval),
+            _ => None,
         }
     }
 
@@ -262,12 +368,30 @@ impl SqlType {
     }
 }
 
+/// Whether a TIME/TIMESTAMP type carries a time zone (`WITH TIME ZONE`, or the `TIMESTAMPTZ` / `TIMETZ` shorthand)
+fn has_time_zone(tz: &sqlparser::ast::TimezoneInfo) -> bool {
+    matches!(
+        tz,
+        sqlparser::ast::TimezoneInfo::WithTimeZone | sqlparser::ast::TimezoneInfo::Tz
+    )
+}
+
 /// Extract character length from CharacterLength if present
 fn extract_char_length(info: Option<&sqlparser::ast::CharacterLength>) -> Option<u64> {
     info.map(|i| match i {
         sqlparser::ast::CharacterLength::IntegerLength { length, .. } => *length,
         sqlparser::ast::CharacterLength::Max => u64::MAX,
     })
+}
+
+/// Arithmetic operator, used for date/time arithmetic rules
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
 }
 
 /// Result of type compatibility check
@@ -294,6 +418,103 @@ mod tests {
         assert_eq!(
             SqlType::Integer.is_compatible_with(&SqlType::Integer),
             TypeCompatibility::Exact
+        );
+    }
+
+    #[test]
+    fn test_parameterized_types_are_compatible() {
+        let ts = |tz| SqlType::Timestamp {
+            precision: None,
+            with_timezone: tz,
+        };
+        assert_eq!(
+            ts(false).is_compatible_with(&ts(true)),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Date.is_compatible_with(&ts(true)),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Varchar { length: Some(10) }
+                .is_compatible_with(&SqlType::Varchar { length: Some(20) }),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Decimal {
+                precision: Some(10),
+                scale: Some(2)
+            }
+            .is_compatible_with(&SqlType::Decimal {
+                precision: None,
+                scale: None
+            }),
+            TypeCompatibility::ImplicitCast
+        );
+        assert_eq!(
+            SqlType::Integer.is_compatible_with(&SqlType::Boolean),
+            TypeCompatibility::ExplicitCast
+        );
+    }
+
+    #[test]
+    fn test_accepts_string_literal() {
+        assert!(SqlType::Integer.accepts_string_literal("42"));
+        assert!(SqlType::BigInt.accepts_string_literal(" -7 "));
+        assert!(!SqlType::Integer.accepts_string_literal("abc"));
+        assert!(!SqlType::Integer.accepts_string_literal("1.5"));
+        assert!(SqlType::Decimal {
+            precision: None,
+            scale: None
+        }
+        .accepts_string_literal("1.5"));
+        assert!(SqlType::Boolean.accepts_string_literal("TRUE"));
+        assert!(!SqlType::Boolean.accepts_string_literal("maybe"));
+        assert!(SqlType::Date.accepts_string_literal("2024-01-01"));
+        assert!(SqlType::Jsonb.accepts_string_literal("{}"));
+    }
+
+    #[test]
+    fn test_temporal_arithmetic() {
+        let tstz = SqlType::Timestamp {
+            precision: None,
+            with_timezone: true,
+        };
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(&tstz, ArithmeticOp::Subtract, &SqlType::Interval),
+            Some(tstz.clone())
+        );
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(&tstz, ArithmeticOp::Subtract, &tstz),
+            Some(SqlType::Interval)
+        );
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(
+                &SqlType::Date,
+                ArithmeticOp::Add,
+                &SqlType::Integer
+            ),
+            Some(SqlType::Date)
+        );
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(
+                &SqlType::Date,
+                ArithmeticOp::Subtract,
+                &SqlType::Date
+            ),
+            Some(SqlType::Integer)
+        );
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(&tstz, ArithmeticOp::Add, &tstz),
+            None
+        );
+        assert_eq!(
+            SqlType::temporal_arithmetic_result(
+                &SqlType::Text,
+                ArithmeticOp::Add,
+                &SqlType::Interval
+            ),
+            None
         );
     }
 
