@@ -324,11 +324,12 @@ fn columns_of_known_tables_are_still_checked_next_to_a_missing_table() {
         SqlDialect::PostgreSQL,
         "SELECT u.naem FROM users u JOIN ordrs o ON o.user_id = u.id",
     );
+    // diagnostics are reported in source order
     assert_eq!(
         kinds(&diagnostics),
         vec![
-            DiagnosticKind::TableNotFound,
-            DiagnosticKind::ColumnNotFound
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::TableNotFound
         ]
     );
 }
@@ -799,4 +800,68 @@ fn enum_literals_are_checked_against_enum_values() {
             DiagnosticKind::TypeMismatch,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spans for literals and parse errors
+// ---------------------------------------------------------------------------
+
+#[test]
+fn literal_type_mismatches_have_locations() {
+    let sql = "SELECT 1;\nUPDATE orders SET placed_on = 5 WHERE id = 1;";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "placed_on");
+
+    let sql = "INSERT INTO orders (user_id, total)\nVALUES (1, 'free');";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "total");
+
+    let sql = "SELECT id FROM users WHERE 'abc' = id";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "id");
+}
+
+#[test]
+fn parse_error_has_location_and_does_not_hide_other_statements() {
+    let sql = "SELECT naem FROM users;\nSELECT id,\n  FROM users WHERE;\nSELECT emial FROM users;";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ParseError,
+            DiagnosticKind::ColumnNotFound
+        ],
+        "{diagnostics:#?}"
+    );
+    let parse_error = &diagnostics[1];
+    let span = parse_error.span.expect("parse error should have a span");
+    assert_eq!(span.line, 3, "{parse_error:#?}");
+    assert!(
+        !parse_error.message.contains("sql parser error")
+            && !parse_error.message.contains("at Line:"),
+        "message should be clean: {}",
+        parse_error.message
+    );
+    // spans of later statements are still absolute
+    assert_eq!(diagnostics[2].span.unwrap().line, 4);
+}
+
+#[test]
+fn parse_error_at_end_of_input_points_at_the_end() {
+    let sql = "SELECT id FROM users WHERE";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ParseError]);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!(span.line, 1);
+    assert!(span.column >= 21, "{span:?}");
+}
+
+#[test]
+fn parse_errors_can_be_suppressed_inline() {
+    let sql = "SELECT id FROM users WHERE; -- sqlsift:disable E1000";
+    assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
 }

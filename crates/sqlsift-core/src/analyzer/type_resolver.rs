@@ -308,20 +308,19 @@ impl<'a> TypeResolver<'a> {
                         if let Some((expected, actual)) =
                             self.type_conflict(&column_type, &value_type)
                         {
-                            let span = Span::from_sqlparser(&value_expr.span());
-                            self.diagnostics.push(
-                                Diagnostic::error(
-                                    DiagnosticKind::TypeMismatch,
-                                    format!(
-                                        "Type mismatch: column '{}' expects {}, but got {}",
-                                        col_name, expected, actual
-                                    ),
-                                )
-                                .with_span(span)
-                                .with_help(
-                                    "Value type is not compatible with the column type. Consider using explicit CAST.",
+                            let mut diag = Diagnostic::error(
+                                DiagnosticKind::TypeMismatch,
+                                format!(
+                                    "Type mismatch: column '{}' expects {}, but got {}",
+                                    col_name, expected, actual
                                 ),
+                            )
+                            .with_help(
+                                "Value type is not compatible with the column type. Consider using explicit CAST.",
                             );
+                            // Literals carry no location: fall back to the target column
+                            diag.span = located_span(value_expr).or(column_span);
+                            self.diagnostics.push(diag);
                         }
                     }
                 }
@@ -403,20 +402,19 @@ impl<'a> TypeResolver<'a> {
                 continue;
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
-                let span = Span::from_sqlparser(&assignment.value.span());
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        DiagnosticKind::TypeMismatch,
-                        format!(
-                            "Type mismatch: column '{}' expects {}, but got {}",
-                            col_name, expected, actual
-                        ),
-                    )
-                    .with_span(span)
-                    .with_help(
-                        "Value type is not compatible with the column type. Consider using explicit CAST.",
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!(
+                        "Type mismatch: column '{}' expects {}, but got {}",
+                        col_name, expected, actual
                     ),
+                )
+                .with_help(
+                    "Value type is not compatible with the column type. Consider using explicit CAST.",
                 );
+                // Literals carry no location: fall back to the target column
+                diag.span = located_span(&assignment.value).or(target_span);
+                self.diagnostics.push(diag);
             }
         }
     }
@@ -708,7 +706,9 @@ impl<'a> TypeResolver<'a> {
                     let right_type = self.infer_expr_type(right);
 
                     if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
-                        let span = Span::from_sqlparser(&left.span());
+                        let span = located_span(left)
+                            .or_else(|| located_span(right))
+                            .unwrap_or_else(|| Span::from_sqlparser(&left.span()));
                         self.diagnostics.push(
                             Diagnostic::error(
                                 DiagnosticKind::JoinTypeMismatch,
@@ -850,22 +850,19 @@ impl<'a> TypeResolver<'a> {
         let right_type = self.infer_expr_type(right);
 
         if self.is_comparison_operator(op) {
-            let span = Some(Span::from_sqlparser(&left.span()));
+            // Literals carry no location: use the other operand's
+            let span = located_span(left).or_else(|| located_span(right));
             if self.report_enum_literal(&left_type, &right_type, span) {
                 return;
             }
             if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
-                let span = Span::from_sqlparser(&left.span());
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        DiagnosticKind::TypeMismatch,
-                        format!("Type mismatch: cannot compare {} with {}", lt, rt),
-                    )
-                    .with_span(span)
-                    .with_help(
-                        "Types are not implicitly compatible. Consider using explicit CAST.",
-                    ),
-                );
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!("Type mismatch: cannot compare {} with {}", lt, rt),
+                )
+                .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
+                diag.span = span;
+                self.diagnostics.push(diag);
             }
             return;
         }
@@ -891,7 +888,12 @@ impl<'a> TypeResolver<'a> {
                             t.display_name()
                         ),
                     )
-                    .with_span(Span::from_sqlparser(&lit_expr.span())),
+                    .with_span(
+                        located_span(lit_expr)
+                            .or_else(|| located_span(left))
+                            .or_else(|| located_span(right))
+                            .unwrap_or_else(|| Span::from_sqlparser(&lit_expr.span())),
+                    ),
                 );
             }
             return;
@@ -1228,6 +1230,13 @@ impl<'a> TypeResolver<'a> {
 
         ExpressionType::Unknown
     }
+}
+
+/// Source span of an expression, or `None` if the parser recorded no location
+/// (sqlparser 0.53 doesn't track spans of literal values)
+fn located_span(expr: &Expr) -> Option<Span> {
+    let span = expr.span();
+    (span.start.line > 0).then(|| Span::from_sqlparser(&span))
 }
 
 /// Expression type of a column with the given declared type. Columns whose type

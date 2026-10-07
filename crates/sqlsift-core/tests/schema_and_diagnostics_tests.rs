@@ -2077,7 +2077,7 @@ fn e0007_operand_order_reflected_in_message() {
 }
 
 // =====================================================================
-// 10. Parse errors (E1000) - current behavior
+// 10. Parse errors (E1000)
 // =====================================================================
 
 #[test]
@@ -2087,25 +2087,28 @@ fn e1000_parse_error_message_contains_location() {
     assert_eq!(d.code(), "E1000");
     assert_eq!(d.kind, DiagnosticKind::ParseError);
     assert!(d.message.starts_with("Parse error: "), "{}", d.message);
-    assert!(
-        d.message.contains("Line: 1, Column: 13"),
-        "message should carry parser location: {}",
-        d.message
-    );
-    assert!(d.span.is_some());
+    assert!(!d.message.contains("sql parser error"), "{}", d.message);
+    // The parser location is the diagnostic's span rather than part of the message
+    let span = d.span.unwrap();
+    assert_eq!((span.line, span.column), (1, 13));
 }
 
 #[test]
-fn e1000_parse_error_in_one_statement_suppresses_all_other_diagnostics() {
-    // Current behavior: the whole input is parsed at once, so a syntax error in
-    // statement 2 means statements 1 and 3 are not analyzed at all.
+fn e1000_parse_error_in_one_statement_does_not_hide_other_diagnostics() {
+    // Statements are parsed one by one when the input doesn't parse as a whole
     let c = diag_catalog();
     let diags = analyze(
         &c,
         "SELECT naem FROM users;\nSELECT FROM WHERE;\nSELECT id FROM userz;",
     );
-    assert_eq!(codes(&diags), vec!["E1000"], "{:?}", diags);
-    assert!(diags[0].message.contains("Line: 2, Column: 13"));
+    assert_eq!(
+        codes(&diags),
+        vec!["E0002", "E1000", "E0001"],
+        "{:?}",
+        diags
+    );
+    let span = diags[1].span.unwrap();
+    assert_eq!((span.line, span.column), (2, 13));
 }
 
 #[test]
@@ -2114,7 +2117,8 @@ fn e1000_misspelled_keyword_on_later_line() {
     let d = single(&c, "SELECT id FROM users;\n\nSELEC id FROM users;");
     assert_eq!(d.kind, DiagnosticKind::ParseError);
     assert!(d.message.contains("SELEC"), "{}", d.message);
-    assert!(d.message.contains("Line: 3, Column: 1"), "{}", d.message);
+    let span = d.span.unwrap();
+    assert_eq!((span.line, span.column), (3, 1));
 }
 
 #[test]
@@ -2158,10 +2162,10 @@ fn diagnostics_ordered_by_statement() {
 }
 
 #[test]
-fn name_resolution_diagnostics_precede_type_diagnostics_within_statement() {
+fn diagnostics_within_a_statement_are_in_source_order() {
     let c = diag_catalog();
     let diags = analyze(&c, "SELECT id FROM users WHERE id = 'x' AND nme = 'y'");
-    assert_eq!(codes(&diags), vec!["E0002", "E0003"]);
+    assert_eq!(codes(&diags), vec!["E0003", "E0002"]);
 }
 
 #[test]
