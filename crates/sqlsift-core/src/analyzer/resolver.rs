@@ -1334,9 +1334,10 @@ impl<'a> NameResolver<'a> {
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(column_name))
         } else if let Some(view_cols) = &table_ref.view_columns {
-            view_cols
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(column_name))
+            view_cols.is_empty()
+                || view_cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(column_name))
         } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
             table_def.column_exists(column_name) || is_system_column(self.dialect, column_name)
         } else {
@@ -1396,10 +1397,11 @@ impl<'a> NameResolver<'a> {
                         );
                     }
                 } else if let Some(view_cols) = &table_ref.view_columns {
-                    // Validate against VIEW columns
-                    if !view_cols
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(column_name))
+                    // Validate against VIEW columns (unless they couldn't be inferred)
+                    if !view_cols.is_empty()
+                        && !view_cols
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(column_name))
                     {
                         self.diagnostics.push(
                             Diagnostic::error(
@@ -1575,9 +1577,9 @@ impl<'a> NameResolver<'a> {
     /// function without column aliases, or a CTE/subquery whose columns can't be inferred),
     /// so any column may belong to it
     fn has_unknown_columns(&self, table_ref: &TableRef) -> bool {
-        match &table_ref.derived_columns {
-            Some(columns) => columns.is_empty(),
-            None => self
+        match (&table_ref.derived_columns, &table_ref.view_columns) {
+            (Some(columns), _) | (None, Some(columns)) => columns.is_empty(),
+            (None, None) => self
                 .cte(&table_ref.table.name)
                 .is_some_and(|cte| cte.columns.is_empty()),
         }

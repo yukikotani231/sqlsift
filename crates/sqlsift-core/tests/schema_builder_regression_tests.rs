@@ -526,8 +526,6 @@ fn view_with_unknown_columns_is_empty() {
 }
 
 #[test]
-#[ignore = "analyzer: a view with an empty column list rejects every column (E0002) \
-            instead of treating it as unknown"]
 fn query_against_view_with_unknown_columns_is_not_validated() {
     let c = pg("CREATE VIEW v AS SELECT * FROM generate_series(1, 3);");
     assert_clean(&c, "SELECT generate_series FROM v");

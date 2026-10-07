@@ -270,7 +270,23 @@ impl<'a> TypeResolver<'a> {
                             None => continue, // Column not found - already reported
                         };
 
-                        if !col_def.nullable && matches!(value_expr, Expr::Value(Value::Null)) {
+                        // MySQL/SQLite generate the key when NULL is inserted into an
+                        // integer primary key (AUTO_INCREMENT / rowid alias)
+                        let single_column_key =
+                            table_def
+                                .primary_key
+                                .as_ref()
+                                .map_or(col_def.is_primary_key, |pk| {
+                                    pk.columns.len() == 1
+                                        && pk.columns[0].eq_ignore_ascii_case(&col_def.name)
+                                });
+                        let generates_key = self.dialect != SqlDialect::PostgreSQL
+                            && single_column_key
+                            && col_def.data_type.is_integer();
+                        if !col_def.nullable
+                            && !generates_key
+                            && matches!(value_expr, Expr::Value(Value::Null))
+                        {
                             // NULL literals carry no source location: point at the
                             // target column, or the table name without a column list
                             let span = Span::from_sqlparser(
@@ -1184,7 +1200,9 @@ impl<'a> TypeResolver<'a> {
                     return Some(ExpressionType::Unknown);
                 }
             } else if let Some(ref view_cols) = table_ref.view_columns {
-                if view_cols.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
+                if view_cols.is_empty() {
+                    has_unknown_relation = true;
+                } else if view_cols.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
                     // Column exists in view, but we don't know its type without analyzing the view
                     return Some(ExpressionType::Unknown);
                 }

@@ -865,3 +865,25 @@ fn parse_errors_can_be_suppressed_inline() {
     let sql = "SELECT id FROM users WHERE; -- sqlsift:disable E1000";
     assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
 }
+
+#[test]
+fn null_into_auto_generated_integer_key() {
+    // MySQL AUTO_INCREMENT / SQLite rowid alias generate the key from NULL
+    assert_valid(
+        "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT);",
+        SqlDialect::MySQL,
+        "INSERT INTO t (id, name) VALUES (NULL, 'a')",
+    );
+    assert_valid(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "INSERT INTO users (id, name) VALUES (NULL, 'a')",
+    );
+    // PostgreSQL rejects NULL for serial / identity columns
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (NULL, 1, 2)",
+        DiagnosticKind::PotentialNullViolation,
+    );
+}
