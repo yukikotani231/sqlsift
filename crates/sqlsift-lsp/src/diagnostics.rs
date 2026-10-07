@@ -4,21 +4,25 @@ use tower_lsp::lsp_types::{self, NumberOrString, Position, Range};
 
 use sqlsift_core::{Diagnostic, Severity, Span};
 
-/// Convert sqlsift diagnostics to LSP diagnostics, filtering disabled rules
+/// Convert sqlsift diagnostics to LSP diagnostics, filtering disabled rules.
+///
+/// `text` is the analyzed document, used to convert character columns into
+/// the UTF-16 code unit offsets that LSP positions use.
 pub fn to_lsp_diagnostics(
     diagnostics: &[Diagnostic],
     disabled_rules: &HashSet<String>,
+    text: &str,
 ) -> Vec<lsp_types::Diagnostic> {
     diagnostics
         .iter()
         .filter(|d| !disabled_rules.contains(d.code()))
-        .map(to_lsp_diagnostic)
+        .map(|d| to_lsp_diagnostic(d, text))
         .collect()
 }
 
-fn to_lsp_diagnostic(diag: &Diagnostic) -> lsp_types::Diagnostic {
+fn to_lsp_diagnostic(diag: &Diagnostic, text: &str) -> lsp_types::Diagnostic {
     lsp_types::Diagnostic {
-        range: span_to_range(diag.span.as_ref()),
+        range: span_to_range(diag.span.as_ref(), text),
         severity: Some(to_lsp_severity(diag.severity)),
         code: Some(NumberOrString::String(diag.code().to_string())),
         source: Some("sqlsift".to_string()),
@@ -27,19 +31,32 @@ fn to_lsp_diagnostic(diag: &Diagnostic) -> lsp_types::Diagnostic {
     }
 }
 
-/// Convert Span (1-indexed) to LSP Range (0-indexed)
-fn span_to_range(span: Option<&Span>) -> Range {
+/// Convert Span (1-indexed, character columns) to LSP Range (0-indexed, UTF-16 columns)
+fn span_to_range(span: Option<&Span>, text: &str) -> Range {
     match span {
         Some(s) if s.line > 0 => {
+            let line_text = text.lines().nth(s.line - 1).unwrap_or("");
+            let start_chars = s.column.saturating_sub(1);
             let line = (s.line - 1) as u32;
-            let col = s.column.saturating_sub(1) as u32;
             Range {
-                start: Position::new(line, col),
-                end: Position::new(line, col + s.length as u32),
+                start: Position::new(line, utf16_offset(line_text, start_chars)),
+                end: Position::new(line, utf16_offset(line_text, start_chars + s.length)),
             }
         }
         _ => Range::default(),
     }
+}
+
+/// Number of UTF-16 code units in the first `chars` characters of `line`.
+/// Characters past the end of the line count as one unit each.
+fn utf16_offset(line: &str, chars: usize) -> u32 {
+    let mut units = 0;
+    let mut count = 0;
+    for c in line.chars().take(chars) {
+        units += c.len_utf16();
+        count += 1;
+    }
+    (units + chars.saturating_sub(count)) as u32
 }
 
 fn to_lsp_severity(severity: Severity) -> lsp_types::DiagnosticSeverity {
@@ -65,22 +82,32 @@ mod tests {
     #[test]
     fn test_span_to_range_1indexed_to_0indexed() {
         let span = Span::with_location(1, 1, 5);
-        let range = span_to_range(Some(&span));
+        let range = span_to_range(Some(&span), "");
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 0);
         assert_eq!(range.end.character, 5);
     }
 
     #[test]
+    fn test_span_to_range_utf16() {
+        // 'é' is 1 UTF-16 unit, U+1F600 is 2
+        let text = "x\nSELECT '\u{1F600}é', nme";
+        let span = Span::with_location(2, 14, 3);
+        let range = span_to_range(Some(&span), text);
+        assert_eq!(range.start, Position::new(1, 14));
+        assert_eq!(range.end, Position::new(1, 17));
+    }
+
+    #[test]
     fn test_span_to_range_no_span() {
-        let range = span_to_range(None);
+        let range = span_to_range(None, "");
         assert_eq!(range, Range::default());
     }
 
     #[test]
     fn test_span_to_range_zero_line_fallback() {
         let span = Span::new(0, 10);
-        let range = span_to_range(Some(&span));
+        let range = span_to_range(Some(&span), "");
         assert_eq!(range, Range::default());
     }
 
@@ -123,7 +150,7 @@ mod tests {
             Diagnostic::error(DiagnosticKind::TypeMismatch, "Type mismatch"),
         ];
         let disabled: HashSet<String> = ["E0001".to_string()].into();
-        let result = to_lsp_diagnostics(&diagnostics, &disabled);
+        let result = to_lsp_diagnostics(&diagnostics, &disabled, "");
         assert_eq!(result.len(), 2);
         assert_eq!(
             result[0].code,

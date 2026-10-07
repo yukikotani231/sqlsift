@@ -44,9 +44,9 @@ pub enum Command {
         #[arg(long = "disable", value_name = "RULE")]
         disable: Vec<String>,
 
-        /// SQL dialect
-        #[arg(short, long, default_value = "postgresql")]
-        dialect: String,
+        /// SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+        #[arg(short, long)]
+        dialect: Option<String>,
 
         /// Output format
         #[arg(short, long, value_enum)]

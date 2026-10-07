@@ -5,16 +5,17 @@ mod config;
 mod output;
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use sqlsift_core::schema::SchemaBuilder;
 use sqlsift_core::{Analyzer, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
 use crate::config::Config;
-use crate::output::OutputFormatter;
+use crate::output::{FileDiagnostics, OutputFormatter};
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -46,7 +47,30 @@ fn init_tracing(verbose: u8, quiet: bool) {
         }
     };
 
-    tracing_subscriber::fmt().with_max_level(level).init();
+    // Logs go to stderr so that JSON/SARIF on stdout stay machine-readable
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .with_ansi(output::use_color())
+        .init();
+}
+
+/// Read a file, naming the path in the error message
+fn read_file(path: &Path) -> Result<String> {
+    fs::read_to_string(path)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", path.display(), e))
+}
+
+/// Whether a path pattern contains glob metacharacters
+fn is_glob(pattern: &str) -> bool {
+    pattern.contains(['*', '?', '['])
+}
+
+/// Expand a glob pattern into matching paths (sorted, as returned by `glob`)
+fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>> {
+    let paths = glob::glob(pattern)
+        .map_err(|e| miette::miette!("Invalid glob pattern '{}': {}", pattern, e))?;
+    Ok(paths.flatten().collect())
 }
 
 fn run(args: Args) -> Result<bool> {
@@ -63,9 +87,6 @@ fn run(args: Args) -> Result<bool> {
             format,
             max_errors,
         } => {
-            // Parse and validate dialect
-            let dialect: SqlDialect = dialect.parse().map_err(|e: String| miette::miette!(e))?;
-
             // Load configuration
             let config = if let Some(path) = config_path {
                 // Load from specified path
@@ -76,47 +97,74 @@ fn run(args: Args) -> Result<bool> {
             };
 
             // Merge CLI args with config (CLI takes precedence)
-            let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &disable);
+            let config =
+                config.merge_with_args(&schema, &schema_dir, &files, &format, &disable, &dialect);
             tracing::info!(
                 schema_count = config.schema.len(),
                 query_pattern_count = config.files.len(),
                 "Loaded sqlsift configuration"
             );
 
-            // Get schema files from config or CLI
-            let mut schema_files: Vec<std::path::PathBuf> =
-                config.schema.iter().map(std::path::PathBuf::from).collect();
+            // Parse and validate dialect
+            let dialect: SqlDialect = match &config.dialect {
+                Some(d) => d.parse().map_err(|e: String| miette::miette!(e))?,
+                None => SqlDialect::default(),
+            };
+
+            // Determine output format
+            let output_format = match config.format.as_deref() {
+                None | Some("human") => OutputFormat::Human,
+                Some("json") => OutputFormat::Json,
+                Some("sarif") => OutputFormat::Sarif,
+                Some(other) => {
+                    return Err(miette::miette!(
+                        "Invalid format '{}'. Supported formats: human, json, sarif.",
+                        other
+                    ))
+                }
+            };
+
+            // Get schema files from config or CLI (glob patterns are expanded)
+            let mut schema_files: Vec<PathBuf> = Vec::new();
+            for pattern in &config.schema {
+                if is_glob(pattern) {
+                    let matches = expand_glob(pattern)?;
+                    if matches.is_empty() {
+                        miette::bail!("No schema files match pattern '{}'", pattern);
+                    }
+                    schema_files.extend(matches);
+                } else {
+                    schema_files.push(PathBuf::from(pattern));
+                }
+            }
 
             if let Some(dir) = &config.schema_dir {
-                let pattern = format!("{}/**/*.sql", dir);
-                for path in glob::glob(&pattern).into_diagnostic()?.flatten() {
-                    schema_files.push(path);
+                if !Path::new(dir).is_dir() {
+                    miette::bail!("Schema directory not found: {}", dir);
                 }
+                let matches = expand_glob(&format!("{}/**/*.sql", dir))?;
+                if matches.is_empty() {
+                    miette::bail!("No .sql files found in schema directory {}", dir);
+                }
+                schema_files.extend(matches);
             }
 
             if schema_files.is_empty() {
                 miette::bail!("No schema files specified. Use --schema, --schema-dir, or configure in sqlsift.toml");
             }
 
-            // Determine output format
-            let output_format = if let Some(fmt_str) = &config.format {
-                match fmt_str.as_str() {
-                    "json" => OutputFormat::Json,
-                    "sarif" => OutputFormat::Sarif,
-                    _ => OutputFormat::Human,
-                }
-            } else {
-                OutputFormat::Human
-            };
+            let formatter = OutputFormatter::new(output_format);
 
             // Build schema catalog
             let mut builder = SchemaBuilder::with_dialect(dialect);
             for schema_file in &schema_files {
-                let content = fs::read_to_string(schema_file).into_diagnostic()?;
+                let content = read_file(schema_file)?;
                 if let Err(diags) = builder.parse(&content) {
-                    let formatter =
-                        OutputFormatter::new(output_format, schema_file.display().to_string());
-                    formatter.print_diagnostics(&diags, &content);
+                    formatter.print(&[FileDiagnostics {
+                        file: schema_file.display().to_string(),
+                        source: content,
+                        diagnostics: diags,
+                    }]);
                     return Ok(true);
                 }
             }
@@ -124,27 +172,21 @@ fn run(args: Args) -> Result<bool> {
 
             if !schema_diags.is_empty() {
                 eprintln!(
-                    "Warning: Schema parsing produced {} warnings",
+                    "Warning: Schema parsing produced {} warning(s):",
                     schema_diags.len()
                 );
+                for diag in &schema_diags {
+                    eprintln!("  - {}", diag.message);
+                }
             }
 
-            // Collect query files from config or CLI
+            // Collect query files from config or CLI (glob patterns are expanded)
             let mut query_files = Vec::new();
-            let file_patterns: Vec<std::path::PathBuf> = if !config.files.is_empty() {
-                config.files.iter().map(std::path::PathBuf::from).collect()
-            } else {
-                vec![]
-            };
-
-            for pattern in &file_patterns {
-                let pattern_str = pattern.display().to_string();
-                if pattern_str.contains('*') {
-                    for path in glob::glob(&pattern_str).into_diagnostic()?.flatten() {
-                        query_files.push(path);
-                    }
+            for pattern in &config.files {
+                if is_glob(pattern) {
+                    query_files.extend(expand_glob(pattern)?);
                 } else {
-                    query_files.push(pattern.clone());
+                    query_files.push(PathBuf::from(pattern));
                 }
             }
 
@@ -155,6 +197,8 @@ fn run(args: Args) -> Result<bool> {
             // Analyze each query file
             let mut total_errors = 0;
             let mut total_warnings = 0;
+            let mut files_checked = 0;
+            let mut results = Vec::new();
             let mut analyzer = Analyzer::with_dialect(&catalog, dialect);
             let max_errors = if max_errors == 0 {
                 usize::MAX
@@ -174,8 +218,9 @@ fn run(args: Args) -> Result<bool> {
                 }
 
                 tracing::debug!(file = %query_file.display(), "Analyzing SQL file");
-                let content = fs::read_to_string(query_file).into_diagnostic()?;
+                let content = read_file(query_file)?;
                 let diagnostics = analyzer.analyze(&content);
+                files_checked += 1;
 
                 // Filter out disabled rules
                 let filtered_diagnostics: Vec<_> = diagnostics
@@ -200,33 +245,40 @@ fn run(args: Args) -> Result<bool> {
                     diagnostics_to_print.push(diag);
                 }
 
-                if !diagnostics_to_print.is_empty() {
-                    let formatter =
-                        OutputFormatter::new(output_format, query_file.display().to_string());
-                    formatter.print_diagnostics(&diagnostics_to_print, &content);
-                }
+                results.push(FileDiagnostics {
+                    file: query_file.display().to_string(),
+                    source: content,
+                    diagnostics: diagnostics_to_print,
+                });
 
                 if limit_reached {
                     break;
                 }
             }
 
+            formatter.print(&results);
+
             // Print summary
             if !quiet {
                 if limit_reached && max_errors != usize::MAX {
-                    eprintln!("Reached maximum error limit ({max_errors}). Stopped early.");
+                    let unchecked = query_files.len() - files_checked;
+                    if unchecked > 0 {
+                        eprintln!(
+                            "Reached maximum error limit ({max_errors}). Stopped early. {unchecked} file(s) not checked."
+                        );
+                    } else {
+                        eprintln!("Reached maximum error limit ({max_errors}). Stopped early.");
+                    }
                 }
 
                 if total_errors > 0 || total_warnings > 0 {
                     eprintln!();
                     eprintln!(
                         "Found {} error(s), {} warning(s) in {} file(s)",
-                        total_errors,
-                        total_warnings,
-                        query_files.len()
+                        total_errors, total_warnings, files_checked
                     );
                 } else {
-                    eprintln!("All {} file(s) passed validation", query_files.len());
+                    eprintln!("All {} file(s) passed validation", files_checked);
                 }
             }
 
@@ -237,7 +289,7 @@ fn run(args: Args) -> Result<bool> {
             // Build and display schema information
             let mut builder = SchemaBuilder::new();
             for schema_file in &files {
-                let content = fs::read_to_string(schema_file).into_diagnostic()?;
+                let content = read_file(schema_file)?;
                 let _ = builder.parse(&content);
             }
             let (catalog, _) = builder.build();
@@ -265,7 +317,7 @@ fn run(args: Args) -> Result<bool> {
 
         Command::Parse { file } => {
             // Parse and display AST (for debugging)
-            let content = fs::read_to_string(&file).into_diagnostic()?;
+            let content = read_file(&file)?;
 
             use sqlparser::parser::Parser;
 

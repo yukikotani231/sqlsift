@@ -1,5 +1,6 @@
 # sqlsift configuration file
-# Place this file in your project root
+# Place this file in your project root.
+# Relative paths are resolved against the directory containing this file.
 
 # Schema definition files (supports glob patterns)
 schema = [
@@ -14,6 +15,9 @@ schema = [
 
 # Or use schema directory to automatically include all .sql files
 # schema_dir = "db/schema"
+
+# SQL dialect: "postgresql" (default), "mysql", or "sqlite"
+# dialect = "postgresql"
 
 # Output format: "human", "json", or "sarif"
 # format = "human"

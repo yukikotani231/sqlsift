@@ -15,6 +15,8 @@ pub struct ServerState {
     pub open_documents: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
     pub workspace_root: Option<PathBuf>,
+    /// Problems found while loading sqlsift.toml, to be shown to the user
+    pub config_warnings: Vec<String>,
 }
 
 impl ServerState {
@@ -26,6 +28,7 @@ impl ServerState {
             open_documents: HashMap::new(),
             schema_files: Vec::new(),
             workspace_root: None,
+            config_warnings: Vec::new(),
         }
     }
 
@@ -33,20 +36,33 @@ impl ServerState {
     pub fn load_config(&mut self, workspace_root: &Path) {
         self.workspace_root = Some(workspace_root.to_path_buf());
 
-        if let Some(config) = Config::find_from_root(workspace_root) {
-            // Resolve dialect
-            if let Some(dialect_str) = &config.dialect {
-                if let Ok(d) = dialect_str.parse() {
-                    self.dialect = d;
-                }
+        let Some((config_path, result)) = Config::find_from_root(workspace_root) else {
+            return;
+        };
+        let config = match result {
+            Ok(config) => config,
+            Err(e) => {
+                self.config_warnings.push(e);
+                return;
             }
+        };
 
-            // Set disabled rules
-            self.disabled_rules = config.disable.iter().cloned().collect();
-
-            // Resolve schema files
-            self.schema_files = resolve_schema_files(&config, workspace_root);
+        // Resolve dialect
+        if let Some(dialect_str) = &config.dialect {
+            match dialect_str.parse() {
+                Ok(d) => self.dialect = d,
+                Err(e) => self
+                    .config_warnings
+                    .push(format!("{}: {}", config_path.display(), e)),
+            }
         }
+
+        // Set disabled rules
+        self.disabled_rules = config.disable.iter().cloned().collect();
+
+        // Resolve schema files relative to the directory containing sqlsift.toml
+        let config_dir = config_path.parent().unwrap_or(workspace_root);
+        self.schema_files = resolve_schema_files(&config, config_dir);
     }
 
     /// Rebuild the catalog from schema files
@@ -215,15 +231,16 @@ impl ServerState {
     }
 }
 
-/// Resolve schema file paths from config (handles glob patterns and schema_dir)
-fn resolve_schema_files(config: &Config, workspace_root: &Path) -> Vec<PathBuf> {
+/// Resolve schema file paths from config (handles glob patterns and schema_dir).
+/// Relative paths are resolved against `base_dir` (the config file's directory).
+fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     for pattern in &config.schema {
         let abs_pattern = if Path::new(pattern).is_absolute() {
             pattern.clone()
         } else {
-            workspace_root.join(pattern).display().to_string()
+            base_dir.join(pattern).display().to_string()
         };
 
         match glob::glob(&abs_pattern) {
@@ -234,7 +251,7 @@ fn resolve_schema_files(config: &Config, workspace_root: &Path) -> Vec<PathBuf> 
             }
             Err(_) => {
                 // If glob fails, try as literal path
-                let path = workspace_root.join(pattern);
+                let path = base_dir.join(pattern);
                 if path.exists() {
                     files.push(path);
                 }
@@ -246,7 +263,7 @@ fn resolve_schema_files(config: &Config, workspace_root: &Path) -> Vec<PathBuf> 
         let abs_dir = if Path::new(dir).is_absolute() {
             dir.clone()
         } else {
-            workspace_root.join(dir).display().to_string()
+            base_dir.join(dir).display().to_string()
         };
         let pattern = format!("{abs_dir}/**/*.sql");
         if let Ok(paths) = glob::glob(&pattern) {

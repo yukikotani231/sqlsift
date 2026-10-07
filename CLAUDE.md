@@ -122,9 +122,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ### Adding Configuration File Options
 
-1. Add field to `Config` struct in `config.rs` with `#[serde(default)]`
+1. Add field to `Config` struct in `config.rs` with `#[serde(default)]`, and add the key to `KNOWN_KEYS` (unknown keys produce a warning)
 2. Update `Config::merge_with_args()` to merge with CLI arguments
-3. Document in `sqlsift.toml` sample file
+3. If the value is a path, resolve it relative to the config file's directory in `Config::from_file()` (and in `sqlsift-lsp/src/state.rs`)
+4. Document in `sqlsift.toml` sample file
 
 ## Dependencies
 

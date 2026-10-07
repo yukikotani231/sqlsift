@@ -26,24 +26,24 @@ WHERE u.id = 'abc';
 $ npx sqlsift-cli check --schema schema.sql queries/report.sql
 error[E0002]: Column 'naem' not found in table 'users'
   --> queries/report.sql:1:10
-   |
+    |
   1 | SELECT u.naem, o.total
-   |          ^^^^
-   = help: Did you mean 'name'?
+    |          ^^^^
+    = help: Did you mean 'name'?
 
 error[E0007]: JOIN condition type mismatch: integer vs text
   --> queries/report.sql:3:18
-   |
+    |
   3 | JOIN orders o ON o.user_id = u.email
-   |                  ^^^^^^^^^
-   = help: JOIN condition should compare compatible types. Consider using explicit CAST.
+    |                  ^^^^^^^^^
+    = help: JOIN condition should compare compatible types. Consider using explicit CAST.
 
 error[E0003]: Type mismatch: cannot compare integer with text
   --> queries/report.sql:4:7
-   |
+    |
   4 | WHERE u.id = 'abc';
-   |       ^^^^
-   = help: Types are not implicitly compatible. Consider using explicit CAST.
+    |       ^^^^
+    = help: Types are not implicitly compatible. Consider using explicit CAST.
 
 
 Found 3 error(s), 0 warning(s) in 1 file(s)
@@ -115,6 +115,26 @@ schema = ["db/schema.sql"]
 
 Then just run `sqlsift check queries/**/*.sql`.
 
+<details>
+<summary><b>Configuration file reference</b></summary>
+
+`sqlsift check` looks for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
+
+```toml
+schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
+# schema_dir = "db/migrations"    # all .sql files under this directory, in filename order
+files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
+dialect = "postgresql"            # postgresql, mysql or sqlite
+format = "human"                  # human, json or sarif
+disable = ["E0006"]               # rules to disable
+```
+
+Relative paths in the file are resolved against the directory containing `sqlsift.toml`. Unknown keys produce a warning; invalid `dialect` or `format` values are errors.
+
+Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported, `2` for usage or configuration errors (missing files, invalid config, etc.).
+
+</details>
+
 ## Use It With Your Stack
 
 sqlsift only needs SQL files for the schema, so it works with whatever produces them.
@@ -172,7 +192,34 @@ jobs:
           sarif_file: results.sarif
 ```
 
-JSON output is also available with `--format json`.
+### JSON output
+
+`--format json` writes a single JSON document to stdout (logs and the summary go to stderr). Only files with diagnostics are listed; `files` is empty when everything passes.
+
+```json
+{
+  "files": [
+    {
+      "file": "queries/fetch.sql",
+      "diagnostics": [
+        {
+          "code": "E0002",
+          "kind": "ColumnNotFound",
+          "severity": "error",
+          "message": "Column 'user_id' not found",
+          "help": "Did you mean 'id'?",
+          "line": 3,
+          "column": 15,
+          "span": { "line": 3, "column": 15, "length": 7, "offset": 0 },
+          "labels": []
+        }
+      ]
+    }
+  ]
+}
+```
+
+The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for all files and a `tool.driver.rules` entry for every diagnostic rule. Human output uses colors only when stderr is a terminal and `NO_COLOR` is not set.
 
 ## Diagnostic Rules
 
@@ -282,10 +329,10 @@ Options:
       --schema-dir <DIR>    Directory containing schema files
   -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
       --disable <RULE>      Disable specific rules (e.g., E0001, E0002)
-  -d, --dialect <NAME>      SQL dialect [default: postgresql]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
   -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
-  -v, --verbose             Enable verbose logging (-vv for debug)
+  -v, --verbose             Enable verbose logging to stderr (-vv for debug)
   -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help
 ```
