@@ -2,7 +2,17 @@
 
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Keys recognized in `sqlsift.toml`
+const KNOWN_KEYS: &[&str] = &[
+    "schema",
+    "files",
+    "dialect",
+    "format",
+    "disable",
+    "schema_dir",
+];
 
 /// Configuration for sqlsift
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -15,7 +25,7 @@ pub struct Config {
     #[serde(default)]
     pub files: Vec<String>,
 
-    /// SQL dialect (currently only "postgresql" is supported)
+    /// SQL dialect ("postgresql", "mysql", "sqlite")
     #[serde(default)]
     pub dialect: Option<String>,
 
@@ -32,10 +42,34 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration from a TOML file
-    pub fn from_file(path: &PathBuf) -> Result<Self> {
-        let contents = std::fs::read_to_string(path).into_diagnostic()?;
-        let config: Config = toml::from_str(&contents).into_diagnostic()?;
+    /// Load configuration from a TOML file.
+    ///
+    /// Relative paths in `schema`, `files` and `schema_dir` are resolved
+    /// against the directory containing the configuration file.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| miette::miette!("Failed to read config file {}: {}", path.display(), e))?;
+        let table: toml::Table = toml::from_str(&contents)
+            .map_err(|e| miette::miette!("Failed to parse {}: {}", path.display(), e))?;
+        for key in table.keys() {
+            if !KNOWN_KEYS.contains(&key.as_str()) {
+                eprintln!(
+                    "Warning: {}: unknown key '{}' (known keys: {})",
+                    path.display(),
+                    key,
+                    KNOWN_KEYS.join(", ")
+                );
+            }
+        }
+        let mut config: Config = table
+            .try_into()
+            .map_err(|e| miette::miette!("Failed to parse {}: {}", path.display(), e))?;
+
+        let base = config_base_dir(path);
+        let resolve = |p: &String| resolve_path(&base, p);
+        config.schema = config.schema.iter().map(resolve).collect();
+        config.files = config.files.iter().map(resolve).collect();
+        config.schema_dir = config.schema_dir.as_ref().map(resolve);
         Ok(config)
     }
 
@@ -67,6 +101,7 @@ impl Config {
         files: &[PathBuf],
         format: &Option<crate::args::OutputFormat>,
         disable: &[String],
+        dialect: &Option<String>,
     ) -> Self {
         // CLI args override config file
         if !schema.is_empty() {
@@ -89,6 +124,35 @@ impl Config {
             self.disable = disable.to_vec();
         }
 
+        if dialect.is_some() {
+            self.dialect = dialect.clone();
+        }
+
         self
+    }
+}
+
+/// Directory that relative paths in a config file are resolved against.
+///
+/// When the config lives under the current directory the result is kept
+/// relative, so that reported file names stay short (and SARIF URIs stay
+/// relative to the project root).
+fn config_base_dir(config_path: &Path) -> PathBuf {
+    let parent = config_path.parent().unwrap_or(Path::new("")).to_path_buf();
+    if parent.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = parent.strip_prefix(&cwd) {
+                return rel.to_path_buf();
+            }
+        }
+    }
+    parent
+}
+
+fn resolve_path(base: &Path, path: &str) -> String {
+    if base.as_os_str().is_empty() || Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        base.join(path).display().to_string()
     }
 }

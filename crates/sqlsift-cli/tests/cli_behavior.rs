@@ -137,10 +137,15 @@ fn test_verbose_emits_info_log() {
 
     assert!(output.status.success(), "expected success for valid SQL");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Loaded sqlsift configuration"),
+        "expected info-level log on stderr in verbose mode, stderr:\n{stderr}"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Loaded sqlsift configuration"),
-        "expected info-level log in verbose mode, stdout:\n{stdout}"
+        !stdout.contains("Loaded sqlsift configuration"),
+        "logs must not be written to stdout, stdout:\n{stdout}"
     );
 
     let _ = fs::remove_dir_all(&dir);
