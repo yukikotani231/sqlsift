@@ -314,19 +314,17 @@ impl SchemaBuilder {
                             }
                             ColumnOption::Generated {
                                 generated_as,
-                                generation_expr,
+                                generation_expr: None,
                                 ..
                             } => {
-                                if generation_expr.is_none() {
-                                    use sqlparser::ast::GeneratedAs;
-                                    let kind = match generated_as {
-                                        GeneratedAs::Always => IdentityKind::Always,
-                                        GeneratedAs::ByDefault => IdentityKind::ByDefault,
-                                        _ => continue,
-                                    };
-                                    col.identity = Some(kind);
-                                    col.nullable = false;
-                                }
+                                use sqlparser::ast::GeneratedAs;
+                                let kind = match generated_as {
+                                    GeneratedAs::Always => IdentityKind::Always,
+                                    GeneratedAs::ByDefault => IdentityKind::ByDefault,
+                                    _ => continue,
+                                };
+                                col.identity = Some(kind);
+                                col.nullable = false;
                             }
                             _ => {}
                         }
@@ -512,14 +510,13 @@ impl SchemaBuilder {
                     col.nullable = false; // IDENTITY columns are implicitly NOT NULL
                 }
             }
-            ColumnOption::DialectSpecific(tokens) => {
-                // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
-                if tokens
-                    .iter()
-                    .any(|t| matches!(t, Token::Word(w) if w.value == "AUTO_INCREMENT" || w.value == "AUTOINCREMENT"))
-                {
-                    col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
-                }
+            // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
+            ColumnOption::DialectSpecific(tokens)
+                if tokens.iter().any(|t| {
+                    matches!(t, Token::Word(w) if w.value == "AUTO_INCREMENT" || w.value == "AUTOINCREMENT")
+                }) =>
+            {
+                col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
             }
             _ => {}
         }
