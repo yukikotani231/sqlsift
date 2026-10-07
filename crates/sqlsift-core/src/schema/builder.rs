@@ -24,16 +24,14 @@ pub struct SchemaBuilder {
 
 impl SchemaBuilder {
     pub fn new() -> Self {
-        Self {
-            catalog: Catalog::new(),
-            diagnostics: Vec::new(),
-            dialect: SqlDialect::default(),
-        }
+        Self::with_dialect(SqlDialect::default())
     }
 
     pub fn with_dialect(dialect: SqlDialect) -> Self {
+        let mut catalog = Catalog::new();
+        catalog.case_sensitive_names = dialect == SqlDialect::PostgreSQL;
         Self {
-            catalog: Catalog::new(),
+            catalog,
             diagnostics: Vec::new(),
             dialect,
         }
@@ -134,7 +132,7 @@ impl SchemaBuilder {
 
     /// Process CREATE TABLE statement
     fn process_create_table(&mut self, create: &sqlparser::ast::CreateTable) {
-        let name = object_name_to_qualified(&create.name);
+        let name = self.catalog.qualified_name(&create.name);
         let mut table = TableDef::new(name);
 
         // Process columns
@@ -168,7 +166,7 @@ impl SchemaBuilder {
         query: &sqlparser::ast::Query,
         materialized: bool,
     ) {
-        let qualified = object_name_to_qualified(name);
+        let qualified = self.catalog.qualified_name(name);
 
         // Determine column names: explicit column list or inferred from SELECT
         let column_names = if !columns.is_empty() {
@@ -213,7 +211,7 @@ impl SchemaBuilder {
                     }
                     SelectItem::QualifiedWildcard(name, _) => {
                         // table.* - try to expand from the specified table
-                        let table_name = object_name_to_qualified(name);
+                        let table_name = self.catalog.qualified_name(name);
                         if let Some(table_def) = self.catalog.get_table(&table_name) {
                             for col_name in table_def.columns.keys() {
                                 columns.push(col_name.clone());
@@ -239,7 +237,7 @@ impl SchemaBuilder {
     ) {
         use sqlparser::ast::TableFactor;
         if let TableFactor::Table { name, .. } = factor {
-            let table_name = object_name_to_qualified(name);
+            let table_name = self.catalog.qualified_name(name);
             if let Some(table_def) = self.catalog.get_table(&table_name) {
                 for col_name in table_def.columns.keys() {
                     columns.push(col_name.clone());
@@ -272,7 +270,7 @@ impl SchemaBuilder {
             return;
         }
 
-        let table_name = object_name_to_qualified(name);
+        let table_name = self.catalog.qualified_name(name);
 
         // Check if table exists
         if !self.catalog.table_exists(&table_name) {
@@ -363,7 +361,7 @@ impl SchemaBuilder {
                 AlterTableOperation::RenameTable {
                     table_name: new_name,
                 } => {
-                    let new_qualified = object_name_to_qualified(new_name);
+                    let new_qualified = self.catalog.qualified_name(new_name);
                     let schema_name = table_name
                         .schema
                         .as_ref()
@@ -377,6 +375,12 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::AddConstraint(constraint) => {
+                    let references_table = match constraint {
+                        TableConstraint::ForeignKey { foreign_table, .. } => {
+                            Some(self.catalog.qualified_name(foreign_table))
+                        }
+                        _ => None,
+                    };
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         // Reuse the same constraint processing logic
                         match constraint {
@@ -403,7 +407,9 @@ impl SchemaBuilder {
                                 let fk = crate::schema::ForeignKeyDef {
                                     name: name.as_ref().map(|n| n.value.clone()),
                                     columns: columns.iter().map(|c| c.value.clone()).collect(),
-                                    references_table: object_name_to_qualified(foreign_table),
+                                    references_table: references_table.clone().unwrap_or_else(
+                                        || QualifiedName::new(foreign_table.to_string()),
+                                    ),
                                     references_columns: referred_columns
                                         .iter()
                                         .map(|c| c.value.clone())
@@ -438,7 +444,7 @@ impl SchemaBuilder {
 
     /// Process DROP TABLE statement
     fn process_drop_table(&mut self, name: &ObjectName) {
-        let table_name = object_name_to_qualified(name);
+        let table_name = self.catalog.qualified_name(name);
         self.catalog.drop_table(&table_name);
     }
 
@@ -448,7 +454,7 @@ impl SchemaBuilder {
         name: &ObjectName,
         representation: &UserDefinedTypeRepresentation,
     ) {
-        let qualified = object_name_to_qualified(name);
+        let qualified = self.catalog.qualified_name(name);
         match representation {
             UserDefinedTypeRepresentation::Enum { labels } => {
                 let enum_def = EnumTypeDef {
@@ -549,7 +555,7 @@ impl SchemaBuilder {
                 let fk = ForeignKeyDef {
                     name: name.as_ref().map(|n| n.value.clone()),
                     columns: columns.iter().map(|c| c.value.clone()).collect(),
-                    references_table: object_name_to_qualified(foreign_table),
+                    references_table: self.catalog.qualified_name(foreign_table),
                     references_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
                 };
                 table.foreign_keys.push(fk);
@@ -587,16 +593,6 @@ impl SchemaBuilder {
 impl Default for SchemaBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Convert sqlparser ObjectName to our QualifiedName
-fn object_name_to_qualified(name: &ObjectName) -> QualifiedName {
-    match name.0.as_slice() {
-        [table] => QualifiedName::new(&table.value),
-        [schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        [_catalog, schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        _ => QualifiedName::new(name.to_string()),
     }
 }
 

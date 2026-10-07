@@ -448,3 +448,48 @@ fn nested_query_blocks_are_typed_with_their_own_tables() {
         assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PostgreSQL identifier case rules
+// ---------------------------------------------------------------------------
+
+const QUOTED_SCHEMA: &str = r#"
+    CREATE TABLE "AuditLog" (id SERIAL PRIMARY KEY, "createdAt" TIMESTAMPTZ);
+    CREATE TABLE Accounts (id SERIAL PRIMARY KEY);
+"#;
+
+#[test]
+fn quoted_table_names_are_case_sensitive_in_postgres() {
+    for sql in [
+        r#"SELECT id FROM "AuditLog""#,
+        r#"SELECT a.id FROM "AuditLog" a"#,
+        // unquoted names fold to lowercase on both sides
+        "SELECT id FROM accounts",
+        "SELECT id FROM ACCOUNTS",
+        r#"SELECT id FROM "accounts""#,
+        "WITH Recent AS (SELECT id FROM accounts) SELECT id FROM recent",
+    ] {
+        assert_valid(QUOTED_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    for sql in [
+        "SELECT id FROM auditlog",
+        "SELECT id FROM AuditLog",
+        r#"SELECT id FROM "Accounts""#,
+    ] {
+        let diagnostics = analyze(QUOTED_SCHEMA, SqlDialect::PostgreSQL, sql);
+        assert_eq!(
+            kinds(&diagnostics),
+            vec![DiagnosticKind::TableNotFound],
+            "for `{sql}`"
+        );
+    }
+}
+
+#[test]
+fn table_names_are_case_insensitive_in_mysql_and_sqlite() {
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        let schema = "CREATE TABLE Accounts (id INTEGER PRIMARY KEY);";
+        assert_valid(schema, dialect, "SELECT id FROM accounts");
+        assert_valid(schema, dialect, "SELECT id FROM ACCOUNTS");
+    }
+}

@@ -169,7 +169,7 @@ impl<'a> TypeResolver<'a> {
 
     /// Check types in an INSERT statement
     fn check_insert(&mut self, insert: &Insert) {
-        let table_name = object_name_to_qualified(&insert.table_name);
+        let table_name = self.catalog.qualified_name(&insert.table_name);
         let table_def = match self.catalog.get_table(&table_name) {
             Some(def) => def,
             None => return, // Table not found - already reported by NameResolver
@@ -266,7 +266,7 @@ impl<'a> TypeResolver<'a> {
         assignments: &[sqlparser::ast::Assignment],
     ) {
         let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => object_name_to_qualified(name),
+            TableFactor::Table { name, .. } => self.catalog.qualified_name(name),
             _ => return,
         };
         let table_def = match self.catalog.get_table(&table_name) {
@@ -351,7 +351,7 @@ impl<'a> TypeResolver<'a> {
     /// Enter a query block: its FROM tables become the current scope and the
     /// previous scope becomes an outer scope
     fn push_scope(&mut self, from: &[TableWithJoins]) {
-        let local = self.from_scope(from);
+        let local = self.scope_of_from_items(from);
         let outer = std::mem::replace(&mut self.tables, local);
         self.outer_scopes.push(outer);
     }
@@ -362,7 +362,7 @@ impl<'a> TypeResolver<'a> {
     }
 
     /// Table references introduced by a FROM clause (alias or name -> TableRef)
-    fn from_scope(&self, from: &[TableWithJoins]) -> HashMap<String, TableRef> {
+    fn scope_of_from_items(&self, from: &[TableWithJoins]) -> HashMap<String, TableRef> {
         let mut scope = HashMap::new();
         for table in from {
             self.add_relation(&table.relation, &mut scope);
@@ -385,7 +385,7 @@ impl<'a> TypeResolver<'a> {
             TableFactor::Table {
                 name, alias, args, ..
             } => {
-                let table_name = object_name_to_qualified(name);
+                let table_name = self.catalog.qualified_name(name);
                 let key = alias
                     .as_ref()
                     .map_or_else(|| table_name.name.clone(), |a| a.name.value.clone());
@@ -1136,16 +1136,6 @@ impl<'a> TypeResolver<'a> {
         }
 
         ExpressionType::Unknown
-    }
-}
-
-/// Convert sqlparser ObjectName to our QualifiedName
-fn object_name_to_qualified(name: &sqlparser::ast::ObjectName) -> QualifiedName {
-    match name.0.as_slice() {
-        [table] => QualifiedName::new(&table.value),
-        [schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        [_catalog, schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        _ => QualifiedName::new(name.to_string()),
     }
 }
 

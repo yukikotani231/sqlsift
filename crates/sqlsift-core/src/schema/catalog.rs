@@ -2,6 +2,7 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::{Ident, ObjectName};
 
 use crate::types::SqlType;
 
@@ -14,6 +15,10 @@ pub struct Catalog {
     pub default_schema: String,
     /// Enum type definitions (name -> EnumTypeDef)
     pub enums: IndexMap<String, EnumTypeDef>,
+    /// PostgreSQL identifier rules: unquoted names fold to lowercase and quoted names
+    /// are case-sensitive. When false, table/view/schema names match case-insensitively.
+    #[serde(default)]
+    pub case_sensitive_names: bool,
 }
 
 impl Catalog {
@@ -22,6 +27,7 @@ impl Catalog {
             schemas: IndexMap::new(),
             default_schema: "public".to_string(),
             enums: IndexMap::new(),
+            case_sensitive_names: false,
         };
         // Create default schema
         catalog.schemas.insert(
@@ -69,22 +75,68 @@ impl Catalog {
     /// identifiers are case-insensitive in SQL).
     pub fn get_table(&self, name: &QualifiedName) -> Option<&TableDef> {
         let schema = self.get_schema(name)?;
-        get_ignore_case(&schema.tables, &name.name)
+        self.lookup(&schema.tables, &name.name)
     }
 
     /// Look up a table by name (mutable)
     pub fn get_table_mut(&mut self, name: &QualifiedName) -> Option<&mut TableDef> {
         let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        let schema_index = index_ignore_case(&self.schemas, schema_name)?;
+        let schema_index = self.index_of(&self.schemas, schema_name)?;
+        let table_index = self.index_of(&self.schemas[schema_index].tables, &name.name)?;
         let (_, schema) = self.schemas.get_index_mut(schema_index)?;
-        let table_index = index_ignore_case(&schema.tables, &name.name)?;
         schema.tables.get_index_mut(table_index).map(|(_, t)| t)
     }
 
     /// Look up the schema a (possibly unqualified) name refers to
     fn get_schema(&self, name: &QualifiedName) -> Option<&Schema> {
         let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        get_ignore_case(&self.schemas, schema_name)
+        self.lookup(&self.schemas, schema_name)
+    }
+
+    /// Name of an identifier as stored in the catalog: with PostgreSQL rules, unquoted
+    /// identifiers fold to lowercase and quoted ones are kept as written
+    pub fn ident_name(&self, ident: &Ident) -> String {
+        if self.case_sensitive_names && ident.quote_style.is_none() {
+            ident.value.to_lowercase()
+        } else {
+            ident.value.clone()
+        }
+    }
+
+    /// Convert a (possibly schema-qualified) object name to a [`QualifiedName`],
+    /// applying [`Self::ident_name`] to each part
+    pub fn qualified_name(&self, name: &ObjectName) -> QualifiedName {
+        match name.0.as_slice() {
+            [table] => QualifiedName::new(self.ident_name(table)),
+            [schema, table] | [_, schema, table] => {
+                QualifiedName::with_schema(self.ident_name(schema), self.ident_name(table))
+            }
+            _ => QualifiedName::new(name.to_string()),
+        }
+    }
+
+    /// Whether two catalog names refer to the same object
+    pub fn names_match(&self, a: &str, b: &str) -> bool {
+        if self.case_sensitive_names {
+            a == b
+        } else {
+            a.eq_ignore_ascii_case(b)
+        }
+    }
+
+    /// Look up `key` in `map` following the catalog's case rules
+    fn lookup<'m, V>(&self, map: &'m IndexMap<String, V>, key: &str) -> Option<&'m V> {
+        self.index_of(map, key)
+            .and_then(|i| map.get_index(i).map(|(_, v)| v))
+    }
+
+    /// Index of `key` in `map` following the catalog's case rules
+    fn index_of<V>(&self, map: &IndexMap<String, V>, key: &str) -> Option<usize> {
+        if self.case_sensitive_names {
+            map.get_index_of(key)
+        } else {
+            index_ignore_case(map, key)
+        }
     }
 
     /// Check if a table exists
@@ -110,13 +162,11 @@ impl Catalog {
     /// Drop a table from the catalog
     pub fn drop_table(&mut self, name: &QualifiedName) {
         let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        let Some(schema_index) = index_ignore_case(&self.schemas, schema_name) else {
+        let Some(schema_index) = self.index_of(&self.schemas, schema_name) else {
             return;
         };
-        if let Some((_, schema)) = self.schemas.get_index_mut(schema_index) {
-            if let Some(index) = index_ignore_case(&schema.tables, &name.name) {
-                schema.tables.shift_remove_index(index);
-            }
+        if let Some(index) = self.index_of(&self.schemas[schema_index].tables, &name.name) {
+            self.schemas[schema_index].tables.shift_remove_index(index);
         }
     }
 
@@ -134,7 +184,7 @@ impl Catalog {
     /// Look up a view by name
     pub fn get_view(&self, name: &QualifiedName) -> Option<&ViewDef> {
         let schema = self.get_schema(name)?;
-        get_ignore_case(&schema.views, &name.name)
+        self.lookup(&schema.views, &name.name)
     }
 
     /// Check if a view exists
