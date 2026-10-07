@@ -1194,7 +1194,7 @@ fn span_and_help_table_not_found() {
         1,
         15,
         "userz",
-        Some("Check that the table exists"),
+        Some("Did you mean 'users'?"),
     );
     assert_single(
         "SELECT 1\nFROM ordres o",
@@ -1202,6 +1202,14 @@ fn span_and_help_table_not_found() {
         2,
         6,
         "ordres",
+        Some("Did you mean 'orders'?"),
+    );
+    assert_single(
+        "SELECT 1 FROM zzzzzz",
+        DiagnosticKind::TableNotFound,
+        1,
+        15,
+        "zzzzzz",
         Some("Check that the table exists"),
     );
 }

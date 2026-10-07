@@ -4,7 +4,7 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, Delete, Expr, GroupByExpr, Ident, Insert, ObjectName, Query,
     Select, SelectItem, SetExpr, Statement, Subscript, TableFactor, TableWithJoins, Values,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{Catalog, QualifiedName, TableDef};
@@ -50,6 +50,9 @@ pub struct NameResolver<'a> {
     pub(super) ctes: HashMap<String, CteDefinition>,
     /// SELECT aliases visible in ORDER BY (set before resolving ORDER BY)
     select_aliases: Vec<String>,
+    /// Columns merged by `JOIN ... USING` / `NATURAL JOIN` in the current query
+    /// (lowercase); unqualified references to them are not ambiguous
+    using_columns: HashSet<String>,
     /// Collected diagnostics
     diagnostics: Vec<Diagnostic>,
 }
@@ -64,6 +67,7 @@ impl<'a> NameResolver<'a> {
             tables: HashMap::new(),
             outer_tables: HashMap::new(),
             select_aliases: Vec::new(),
+            using_columns: HashSet::new(),
             ctes: HashMap::new(),
             diagnostics: Vec::new(),
         }
@@ -275,6 +279,12 @@ impl<'a> NameResolver<'a> {
 
     /// Resolve names in a query
     fn resolve_query(&mut self, query: &Query) {
+        let saved_using = std::mem::take(&mut self.using_columns);
+        self.resolve_query_inner(query);
+        self.using_columns = saved_using;
+    }
+
+    fn resolve_query_inner(&mut self, query: &Query) {
         // Handle CTEs (WITH clause)
         if let Some(with) = &query.with {
             let is_recursive = with.recursive;
@@ -332,7 +342,11 @@ impl<'a> NameResolver<'a> {
         if let Some(order_by) = &query.order_by {
             // Collect SELECT aliases so ORDER BY can reference them
             let saved_aliases = std::mem::take(&mut self.select_aliases);
-            self.select_aliases = self.collect_select_aliases(&query.body);
+            self.select_aliases = match query.body.as_ref() {
+                // ORDER BY of a set operation refers to its output columns
+                SetExpr::SetOperation { .. } => self.infer_cte_columns(&query.body),
+                body => self.collect_select_aliases(body),
+            };
             for ob in &order_by.exprs {
                 self.resolve_expr(&ob.expr);
             }
@@ -361,45 +375,57 @@ impl<'a> NameResolver<'a> {
     }
 
     /// Infer column names from a SELECT body
+    ///
+    /// Returns an empty list when the columns can't be determined (e.g. `SELECT *`
+    /// over a table function), which callers treat as "any column".
     fn infer_cte_columns(&self, set_expr: &SetExpr) -> Vec<String> {
         // For UNION/INTERSECT/EXCEPT, infer from the left side
         if let SetExpr::SetOperation { left, .. } = set_expr {
             return self.infer_cte_columns(left);
         }
 
-        let select_items: Option<&[SelectItem]> = match set_expr {
-            SetExpr::Select(select) => Some(&select.projection),
-            SetExpr::Insert(Statement::Insert(Insert { returning, .. })) => returning.as_deref(),
-            SetExpr::Update(Statement::Update { returning, .. }) => returning.as_deref(),
-            _ => None,
+        let (select_items, from): (Option<&[SelectItem]>, &[TableWithJoins]) = match set_expr {
+            SetExpr::Select(select) => (Some(&select.projection), &select.from),
+            SetExpr::Query(query) => return self.infer_cte_columns(&query.body),
+            SetExpr::Insert(Statement::Insert(Insert { returning, .. })) => {
+                (returning.as_deref(), &[])
+            }
+            SetExpr::Update(Statement::Update { returning, .. }) => (returning.as_deref(), &[]),
+            _ => (None, &[]),
         };
 
         let mut columns = Vec::new();
         if let Some(items) = select_items {
-            for (idx, item) in items.iter().enumerate() {
+            for item in items {
                 match item {
-                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                        columns.push(ident.value.clone());
-                    }
                     SelectItem::ExprWithAlias { alias, .. } => {
                         columns.push(alias.value.clone());
                     }
-                    SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) => {
-                        // table.column -> use column name
-                        if let Some(col) = idents.last() {
-                            columns.push(col.value.clone());
-                        }
+                    SelectItem::UnnamedExpr(expr) => {
+                        columns.push(
+                            implicit_column_name(expr).unwrap_or_else(|| "?column?".to_string()),
+                        );
                     }
                     SelectItem::Wildcard(_) => {
-                        // Can't infer columns from * - would need to expand
-                        // For now, skip validation of CTE columns when * is used
+                        // Expand * from every relation in FROM
+                        let relations = self.from_relation_columns(from);
+                        let Some(relations) = relations else {
+                            return Vec::new();
+                        };
+                        columns.extend(relations.into_iter().flat_map(|(_, cols)| cols));
                     }
-                    SelectItem::QualifiedWildcard(_, _) => {
-                        // table.* - can't infer easily
-                    }
-                    _ => {
-                        // Other expressions - generate a name
-                        columns.push(format!("?column?{}", idx + 1));
+                    SelectItem::QualifiedWildcard(name, _) => {
+                        // Expand t.* from the matching relation
+                        let qualifier = name.0.last().map(|i| i.value.as_str()).unwrap_or("");
+                        let relation = self.from_relation_columns(from).and_then(|relations| {
+                            relations
+                                .into_iter()
+                                .find(|(n, _)| n.eq_ignore_ascii_case(qualifier))
+                        });
+                        let Some((_, cols)) = relation else {
+                            return Vec::new();
+                        };
+                        columns.extend(cols);
                     }
                 }
             }
@@ -408,14 +434,70 @@ impl<'a> NameResolver<'a> {
         columns
     }
 
+    /// Column names of each relation in a FROM clause, keyed by alias (or table name).
+    /// Returns `None` if any relation's columns can't be determined.
+    fn from_relation_columns(&self, from: &[TableWithJoins]) -> Option<Vec<(String, Vec<String>)>> {
+        let mut relations = Vec::new();
+        for table in from {
+            for factor in
+                std::iter::once(&table.relation).chain(table.joins.iter().map(|j| &j.relation))
+            {
+                relations.push(self.relation_columns(factor)?);
+            }
+        }
+        Some(relations)
+    }
+
+    /// Column names of a single FROM relation, with its alias (or table name)
+    fn relation_columns(&self, factor: &TableFactor) -> Option<(String, Vec<String>)> {
+        match factor {
+            TableFactor::Table {
+                name,
+                alias,
+                args: None,
+                ..
+            } => {
+                let table_name = object_name_to_qualified(name);
+                let key = alias
+                    .as_ref()
+                    .map_or_else(|| table_name.name.clone(), |a| a.name.value.clone());
+                let columns = if let Some(cte) = self.ctes.get(&table_name.name) {
+                    cte.columns.clone()
+                } else if let Some(table_def) = self.catalog.get_table(&table_name) {
+                    table_def.columns.keys().cloned().collect()
+                } else {
+                    self.catalog.get_view(&table_name)?.columns.clone()
+                };
+                (!columns.is_empty()).then_some((key, columns))
+            }
+            TableFactor::Derived {
+                subquery,
+                alias: Some(alias),
+                ..
+            } => {
+                let columns = if alias.columns.is_empty() {
+                    self.infer_cte_columns(&subquery.body)
+                } else {
+                    alias.columns.iter().map(|c| c.name.value.clone()).collect()
+                };
+                (!columns.is_empty()).then(|| (alias.name.value.clone(), columns))
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve names in a set expression (SELECT, UNION, etc.)
     fn resolve_set_expr(&mut self, set_expr: &SetExpr) {
         match set_expr {
             SetExpr::Select(select) => self.resolve_select(select),
             SetExpr::Query(query) => self.resolve_query(query),
             SetExpr::SetOperation { left, right, .. } => {
+                // Each branch has its own FROM scope
+                let saved_tables = self.tables.clone();
                 self.resolve_set_expr(left);
+                self.tables = saved_tables.clone();
                 self.resolve_set_expr(right);
+                self.tables = saved_tables;
             }
             SetExpr::Insert(stmt) => self.resolve_statement(stmt),
             SetExpr::Update(stmt) => self.resolve_statement(stmt),
@@ -464,12 +546,16 @@ impl<'a> NameResolver<'a> {
         for join in &table.joins {
             self.resolve_table_factor(&join.relation);
             // Resolve join condition
-            self.resolve_join_condition(&join.join_operator);
+            self.resolve_join_condition(&join.join_operator, &join.relation);
         }
     }
 
     /// Resolve JOIN condition (ON clause)
-    fn resolve_join_condition(&mut self, join_op: &sqlparser::ast::JoinOperator) {
+    fn resolve_join_condition(
+        &mut self,
+        join_op: &sqlparser::ast::JoinOperator,
+        relation: &TableFactor,
+    ) {
         use sqlparser::ast::JoinConstraint;
         use sqlparser::ast::JoinOperator::*;
 
@@ -485,12 +571,34 @@ impl<'a> NameResolver<'a> {
                     self.resolve_expr(expr);
                 }
                 JoinConstraint::Using(columns) => {
-                    // For USING clause, check that columns exist in both tables
+                    // USING columns exist in both sides by definition and are merged
+                    // into a single unqualified column, so only check they exist
                     for col in columns {
-                        self.resolve_column(None, col);
+                        let exists = self.tables.values().any(|t| {
+                            self.has_unknown_columns(t) || self.table_ref_has_column(t, &col.value)
+                        });
+                        if !exists {
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    DiagnosticKind::ColumnNotFound,
+                                    format!("Column '{}' not found", col.value),
+                                )
+                                .with_span(Span::from_sqlparser(&col.span)),
+                            );
+                        }
+                        self.using_columns.insert(col.value.to_lowercase());
                     }
                 }
-                JoinConstraint::Natural | JoinConstraint::None => {}
+                JoinConstraint::Natural => {
+                    // NATURAL JOIN merges every column the two sides have in common
+                    if let Some(table_def) =
+                        table_with_joins_to_name(relation).and_then(|n| self.catalog.get_table(&n))
+                    {
+                        self.using_columns
+                            .extend(table_def.columns.keys().map(|c| c.to_lowercase()));
+                    }
+                }
+                JoinConstraint::None => {}
             }
         }
     }
@@ -587,15 +695,19 @@ impl<'a> NameResolver<'a> {
             } => {
                 // Save current table scope so subquery resolution doesn't leak
                 let saved_tables = self.tables.clone();
+                let saved_outer = self.outer_tables.clone();
 
-                // Non-LATERAL subqueries cannot reference outer FROM tables,
-                // so clear the table scope. LATERAL subqueries can see outer tables.
-                if !lateral {
+                // Non-LATERAL subqueries cannot reference outer FROM tables.
+                // LATERAL subqueries can, with lower precedence than their own tables.
+                if *lateral {
+                    self.outer_tables.extend(self.tables.drain());
+                } else {
                     self.tables.clear();
                 }
 
                 // Resolve subquery
                 self.resolve_query(subquery);
+                self.outer_tables = saved_outer;
 
                 // Infer column names from the subquery projection
                 let derived_columns = self.infer_cte_columns(&subquery.body);
@@ -955,7 +1067,9 @@ impl<'a> NameResolver<'a> {
                     .iter()
                     .any(|c| c.eq_ignore_ascii_case(column_name))
         } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
-            cte.columns.iter().any(|c| c == column_name)
+            cte.columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(column_name))
         } else if let Some(view_cols) = &table_ref.view_columns {
             view_cols
                 .iter()
@@ -985,7 +1099,7 @@ impl<'a> NameResolver<'a> {
                         && !derived_cols
                             .iter()
                             .any(|c| c.eq_ignore_ascii_case(column_name))
-                        && !derived_cols.iter().any(|c| c.starts_with("?column?"))
+                        && !derived_cols.iter().any(|c| c == "?column?")
                     {
                         self.diagnostics.push(
                             Diagnostic::error(
@@ -999,8 +1113,14 @@ impl<'a> NameResolver<'a> {
                         );
                     }
                 } else if let Some(cte) = self.ctes.get(&table_ref.table.name) {
-                    // Validate against CTE columns
-                    if !cte.columns.contains(column_name) {
+                    // Validate against CTE columns (unless they couldn't be inferred)
+                    if !cte.columns.is_empty()
+                        && !cte
+                            .columns
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(column_name))
+                        && !cte.columns.iter().any(|c| c == "?column?")
+                    {
                         self.diagnostics.push(
                             Diagnostic::error(
                                 DiagnosticKind::ColumnNotFound,
@@ -1064,7 +1184,7 @@ impl<'a> NameResolver<'a> {
             // a column list) could provide any column: they only matter when no
             // table with known columns does, and never make a column ambiguous
             for (name, table_ref) in &self.tables {
-                if !has_unknown_columns(table_ref)
+                if !self.has_unknown_columns(table_ref)
                     && self.table_ref_has_column(table_ref, column_name)
                 {
                     found_in.push(name);
@@ -1074,7 +1194,7 @@ impl<'a> NameResolver<'a> {
             // If not found in inner scope, check outer scope (correlated subqueries)
             if found_in.is_empty() {
                 for (name, table_ref) in &self.outer_tables {
-                    if !has_unknown_columns(table_ref)
+                    if !self.has_unknown_columns(table_ref)
                         && self.table_ref_has_column(table_ref, column_name)
                     {
                         found_in.push(name);
@@ -1087,7 +1207,7 @@ impl<'a> NameResolver<'a> {
                     .tables
                     .values()
                     .chain(self.outer_tables.values())
-                    .any(has_unknown_columns)
+                    .any(|t| self.has_unknown_columns(t))
             {
                 return;
             }
@@ -1126,6 +1246,9 @@ impl<'a> NameResolver<'a> {
                 1 => {
                     // Found in exactly one table - OK
                 }
+                _ if self.using_columns.contains(&column_name.to_lowercase()) => {
+                    // Merged by JOIN ... USING / NATURAL JOIN - not ambiguous
+                }
                 _ => {
                     // Ambiguous - found in multiple tables
                     self.diagnostics.push(
@@ -1145,6 +1268,19 @@ impl<'a> NameResolver<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Whether a table reference has an unknown column list (a missing table, a table
+    /// function without column aliases, or a CTE/subquery whose columns can't be inferred),
+    /// so any column may belong to it
+    fn has_unknown_columns(&self, table_ref: &TableRef) -> bool {
+        match &table_ref.derived_columns {
+            Some(columns) => columns.is_empty(),
+            None => self
+                .ctes
+                .get(&table_ref.table.name)
+                .is_some_and(|cte| cte.columns.is_empty()),
         }
     }
 
@@ -1189,6 +1325,18 @@ fn object_name_to_qualified(name: &ObjectName) -> QualifiedName {
     }
 }
 
+/// Name PostgreSQL gives an unaliased SELECT expression (`count(*)` -> `count`,
+/// `t.col` -> `col`, `col::int` -> `col`), or `None` for `?column?`
+fn implicit_column_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
+        Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
+        _ => None,
+    }
+}
+
 /// Get table name from TableFactor
 fn table_with_joins_to_name(factor: &TableFactor) -> Option<QualifiedName> {
     match factor {
@@ -1221,12 +1369,6 @@ fn find_similar_name(candidates: impl IntoIterator<Item = String>, name: &str) -
     }
 
     best_match.map(|(_, name)| name)
-}
-
-/// Whether a table reference has an unknown column list (a missing table, or a
-/// table function without column aliases), so any column may belong to it
-fn has_unknown_columns(table_ref: &TableRef) -> bool {
-    matches!(&table_ref.derived_columns, Some(columns) if columns.is_empty())
 }
 
 /// Look up a table reference by alias or name, falling back to a case-insensitive match

@@ -349,3 +349,102 @@ fn table_not_found_suggests_similar_table() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scoping: set operations, USING / NATURAL joins, LATERAL
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_operation_branches_have_their_own_scope() {
+    for sql in [
+        "SELECT id FROM users UNION SELECT id FROM orders",
+        "SELECT id FROM users UNION ALL SELECT id FROM orders ORDER BY id",
+        "SELECT id, 'u' AS src FROM users UNION SELECT id, 'o' FROM orders ORDER BY src",
+        "SELECT email FROM users EXCEPT SELECT note FROM orders",
+        "SELECT * FROM (SELECT id FROM users INTERSECT SELECT user_id FROM orders) t WHERE t.id > 1",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn set_operation_order_by_unknown_column_is_reported() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users UNION SELECT id FROM orders ORDER BY nope",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn using_and_natural_join_columns_are_not_ambiguous() {
+    for sql in [
+        "SELECT a.id FROM orders a JOIN orders b USING (user_id)",
+        "SELECT user_id, a.total FROM orders a JOIN orders b USING (user_id) ORDER BY user_id",
+        "SELECT id FROM users JOIN orders USING (id) WHERE id > 1",
+        "SELECT id, name FROM users NATURAL JOIN orders",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn using_unknown_column_is_reported() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT 1 FROM users JOIN orders USING (nope)",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn lateral_subquery_prefers_its_own_tables() {
+    for sql in [
+        "SELECT u.name, x.id FROM users u JOIN LATERAL (SELECT id FROM orders WHERE user_id = u.id) x ON true",
+        "SELECT u.name FROM users u, LATERAL (SELECT id, total FROM orders o WHERE o.user_id = u.id LIMIT 1) x",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type checks apply in every query block
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_errors_are_reported_in_nested_query_blocks() {
+    for sql in [
+        "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.total = 'free')",
+        "WITH a AS (SELECT id FROM users WHERE id = 'x') SELECT * FROM a",
+        "SELECT * FROM (SELECT * FROM users WHERE is_admin = 1) t",
+        "SELECT user_id FROM orders GROUP BY user_id HAVING count(*) > 'many'",
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 'x')",
+        "SELECT (SELECT max(total) FROM orders WHERE user_id = 'abc') FROM users",
+        "SELECT id FROM users UNION SELECT id FROM orders WHERE total = 'free'",
+        "INSERT INTO orders (user_id, total) SELECT id, 0 FROM users WHERE id = 'abc'",
+        "SELECT id FROM users WHERE id + 'x' > 1",
+    ] {
+        let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+        assert_eq!(
+            kinds(&diagnostics),
+            vec![DiagnosticKind::TypeMismatch],
+            "for `{sql}`: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn nested_query_blocks_are_typed_with_their_own_tables() {
+    for sql in [
+        // `total` resolves to orders.total (numeric) inside the subquery
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 10)",
+        // inner `id` is orders.id, outer `name` is users.name
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE id = 1 AND name = 'x')",
+        "WITH t AS (SELECT user_id, sum(total) AS s FROM orders GROUP BY user_id) SELECT * FROM t WHERE s > 10",
+        "SELECT id + '1' FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
