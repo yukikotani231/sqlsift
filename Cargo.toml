@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sqlsift-core", "crates/sqlsift-cli", "crates/sqlsift-lsp"]
+members = ["crates/sqlsift-core", "crates/sqlsift-cli", "crates/sqlsift-lsp", "crates/sqlsift-wasm"]
 
 [workspace.package]
 version = "0.1.4"
