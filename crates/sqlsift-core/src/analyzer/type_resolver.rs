@@ -21,11 +21,12 @@
 //! - Current coverage: ~85% of real-world type errors
 //! - Type inference is performed in a separate pass after name resolution
 
+use indexmap::IndexMap;
 use sqlparser::ast::{
-    AssignmentTarget, BinaryOperator, Expr, Insert, Query, Select, SetExpr, Spanned, Statement,
-    TableFactor, Value, Values,
+    AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    Insert, Query, Select, SetExpr, Spanned, Statement, TableFactor, TableWithJoins, Value, Values,
 };
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -61,7 +62,11 @@ struct TableRef {
 pub struct TypeResolver<'a> {
     catalog: &'a Catalog,
     /// Current scope's table references (alias or name -> TableRef)
-    tables: HashMap<String, TableRef>,
+    tables: IndexMap<String, TableRef>,
+    /// Enclosing query blocks' scopes, innermost last (for correlated subqueries)
+    outer_scopes: Vec<IndexMap<String, TableRef>>,
+    /// CTE names visible in the current query (lowercase); they shadow catalog tables
+    ctes: HashSet<String>,
     /// Collected diagnostics
     diagnostics: Vec<Diagnostic>,
     /// SQL dialect (affects dialect-specific coercions such as MySQL booleans)
@@ -73,7 +78,9 @@ impl<'a> TypeResolver<'a> {
     pub fn new(catalog: &'a Catalog) -> Self {
         Self {
             catalog,
-            tables: HashMap::new(),
+            tables: IndexMap::new(),
+            outer_scopes: Vec::new(),
+            ctes: HashSet::new(),
             diagnostics: Vec::new(),
             dialect: SqlDialect::default(),
         }
@@ -83,6 +90,53 @@ impl<'a> TypeResolver<'a> {
     pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
         self.dialect = dialect;
         self
+    }
+
+    /// Report a string literal that is not a value of the enum type on the other side.
+    /// Returns true if a diagnostic was emitted.
+    fn report_enum_literal(
+        &mut self,
+        left: &ExpressionType,
+        right: &ExpressionType,
+        span: Option<Span>,
+    ) -> bool {
+        let (enum_name, literal) = match (left, right) {
+            (ExpressionType::Known(SqlType::Custom(name)), ExpressionType::StringLiteral(lit))
+            | (ExpressionType::StringLiteral(lit), ExpressionType::Known(SqlType::Custom(name))) => {
+                (name, lit)
+            }
+            _ => return false,
+        };
+        let Some(enum_def) = self.catalog.get_enum(enum_name) else {
+            return false;
+        };
+        if enum_def.values.is_empty() || enum_def.values.iter().any(|v| v == literal) {
+            return false;
+        }
+        let help = super::resolver::find_similar_name(enum_def.values.iter().cloned(), literal)
+            .map(|v| format!("Did you mean '{}'?", v))
+            .unwrap_or_else(|| {
+                format!(
+                    "Valid values: {}",
+                    enum_def
+                        .values
+                        .iter()
+                        .map(|v| format!("'{}'", v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::TypeMismatch,
+            format!(
+                "Invalid value '{}' for enum type '{}'",
+                literal, enum_def.name
+            ),
+        )
+        .with_help(help);
+        diag.span = span;
+        self.diagnostics.push(diag);
+        true
     }
 
     /// Check whether two expression types conflict, i.e. neither can be implicitly
@@ -130,6 +184,8 @@ impl<'a> TypeResolver<'a> {
     pub fn check_statement(&mut self, stmt: &Statement) {
         match stmt {
             Statement::Query(query) => {
+                // Query blocks build their own scopes from their FROM clauses
+                self.tables.clear();
                 self.check_query(query);
             }
             Statement::Insert(insert) => {
@@ -142,6 +198,9 @@ impl<'a> TypeResolver<'a> {
                 ..
             } => {
                 self.check_update(table, assignments);
+                for assignment in assignments {
+                    self.check_expr_recursive(&assignment.value);
+                }
                 if let Some(expr) = selection {
                     self.check_expr_recursive(expr);
                 }
@@ -158,7 +217,7 @@ impl<'a> TypeResolver<'a> {
 
     /// Check types in an INSERT statement
     fn check_insert(&mut self, insert: &Insert) {
-        let table_name = object_name_to_qualified(&insert.table_name);
+        let table_name = self.catalog.qualified_name(&insert.table_name);
         let table_def = match self.catalog.get_table(&table_name) {
             Some(def) => def,
             None => return, // Table not found - already reported by NameResolver
@@ -171,6 +230,31 @@ impl<'a> TypeResolver<'a> {
         } else {
             insert.columns.iter().map(|c| c.value.clone()).collect()
         };
+
+        // ON CONFLICT DO UPDATE / ON DUPLICATE KEY UPDATE assignments
+        match &insert.on {
+            Some(sqlparser::ast::OnInsert::DuplicateKeyUpdate(assignments)) => {
+                self.check_assignments(table_def, assignments);
+            }
+            Some(sqlparser::ast::OnInsert::OnConflict(on_conflict)) => {
+                if let sqlparser::ast::OnConflictAction::DoUpdate(update) = &on_conflict.action {
+                    self.check_assignments(table_def, &update.assignments);
+                    if let Some(selection) = &update.selection {
+                        self.check_expr_recursive(selection);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // INSERT ... SELECT: the source query has its own scope
+        if let Some(source) = &insert.source {
+            if !matches!(source.body.as_ref(), SetExpr::Values(_)) {
+                let saved = std::mem::take(&mut self.tables);
+                self.check_query(source);
+                self.tables = saved;
+            }
+        }
 
         // Check VALUES rows
         if let Some(source) = &insert.source {
@@ -186,7 +270,23 @@ impl<'a> TypeResolver<'a> {
                             None => continue, // Column not found - already reported
                         };
 
-                        if !col_def.nullable && matches!(value_expr, Expr::Value(Value::Null)) {
+                        // MySQL/SQLite generate the key when NULL is inserted into an
+                        // integer primary key (AUTO_INCREMENT / rowid alias)
+                        let single_column_key =
+                            table_def
+                                .primary_key
+                                .as_ref()
+                                .map_or(col_def.is_primary_key, |pk| {
+                                    pk.columns.len() == 1
+                                        && pk.columns[0].eq_ignore_ascii_case(&col_def.name)
+                                });
+                        let generates_key = self.dialect != SqlDialect::PostgreSQL
+                            && single_column_key
+                            && col_def.data_type.is_integer();
+                        if !col_def.nullable
+                            && !generates_key
+                            && matches!(value_expr, Expr::Value(Value::Null))
+                        {
                             // NULL literals carry no source location: point at the
                             // target column, or the table name without a column list
                             let span = Span::from_sqlparser(
@@ -213,25 +313,30 @@ impl<'a> TypeResolver<'a> {
                             continue;
                         }
 
+                        self.check_expr_recursive(value_expr);
                         let value_type = self.infer_expr_type(value_expr);
                         let column_type = ExpressionType::Known(col_def.data_type.clone());
+                        let column_span =
+                            insert.columns.get(i).map(|c| Span::from_sqlparser(&c.span));
+                        if self.report_enum_literal(&column_type, &value_type, column_span) {
+                            continue;
+                        }
                         if let Some((expected, actual)) =
                             self.type_conflict(&column_type, &value_type)
                         {
-                            let span = Span::from_sqlparser(&value_expr.span());
-                            self.diagnostics.push(
-                                Diagnostic::error(
-                                    DiagnosticKind::TypeMismatch,
-                                    format!(
-                                        "Type mismatch: column '{}' expects {}, but got {}",
-                                        col_name, expected, actual
-                                    ),
-                                )
-                                .with_span(span)
-                                .with_help(
-                                    "Value type is not compatible with the column type. Consider using explicit CAST.",
+                            let mut diag = Diagnostic::error(
+                                DiagnosticKind::TypeMismatch,
+                                format!(
+                                    "Type mismatch: column '{}' expects {}, but got {}",
+                                    col_name, expected, actual
                                 ),
+                            )
+                            .with_help(
+                                "Value type is not compatible with the column type. Consider using explicit CAST.",
                             );
+                            // Literals carry no location: fall back to the target column
+                            diag.span = located_span(value_expr).or(column_span);
+                            self.diagnostics.push(diag);
                         }
                     }
                 }
@@ -246,14 +351,22 @@ impl<'a> TypeResolver<'a> {
         assignments: &[sqlparser::ast::Assignment],
     ) {
         let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => object_name_to_qualified(name),
+            TableFactor::Table { name, .. } => self.catalog.qualified_name(name),
             _ => return,
         };
         let table_def = match self.catalog.get_table(&table_name) {
             Some(def) => def,
             None => return, // Table not found - already reported by NameResolver
         };
+        self.check_assignments(table_def, assignments);
+    }
 
+    /// Check `SET col = value` assignments against the target table's column types
+    fn check_assignments(
+        &mut self,
+        table_def: &crate::schema::TableDef,
+        assignments: &[sqlparser::ast::Assignment],
+    ) {
         for assignment in assignments {
             let col_name = match &assignment.target {
                 AssignmentTarget::ColumnName(name) => match name.0.last() {
@@ -295,28 +408,144 @@ impl<'a> TypeResolver<'a> {
 
             let value_type = self.infer_expr_type(&assignment.value);
             let column_type = ExpressionType::Known(col_def.data_type.clone());
+            let target_span = match &assignment.target {
+                AssignmentTarget::ColumnName(name) => {
+                    name.0.last().map(|i| Span::from_sqlparser(&i.span))
+                }
+                AssignmentTarget::Tuple(_) => None,
+            };
+            if self.report_enum_literal(&column_type, &value_type, target_span) {
+                continue;
+            }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
-                let span = Span::from_sqlparser(&assignment.value.span());
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        DiagnosticKind::TypeMismatch,
-                        format!(
-                            "Type mismatch: column '{}' expects {}, but got {}",
-                            col_name, expected, actual
-                        ),
-                    )
-                    .with_span(span)
-                    .with_help(
-                        "Value type is not compatible with the column type. Consider using explicit CAST.",
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!(
+                        "Type mismatch: column '{}' expects {}, but got {}",
+                        col_name, expected, actual
                     ),
+                )
+                .with_help(
+                    "Value type is not compatible with the column type. Consider using explicit CAST.",
                 );
+                // Literals carry no location: fall back to the target column
+                diag.span = located_span(&assignment.value).or(target_span);
+                self.diagnostics.push(diag);
             }
         }
     }
 
     /// Check types in a query
     fn check_query(&mut self, query: &Query) {
+        let saved_ctes = self.ctes.clone();
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                // Registered first so recursive CTEs can reference themselves
+                self.ctes.insert(cte.alias.name.value.to_lowercase());
+                self.check_query(&cte.query);
+            }
+        }
         self.check_set_expr(&query.body);
+        self.ctes = saved_ctes;
+    }
+
+    /// Enter a query block: its FROM tables become the current scope and the
+    /// previous scope becomes an outer scope
+    fn push_scope(&mut self, from: &[TableWithJoins]) {
+        let local = self.scope_of_from_items(from);
+        let outer = std::mem::replace(&mut self.tables, local);
+        self.outer_scopes.push(outer);
+    }
+
+    /// Leave a query block entered with [`Self::push_scope`]
+    fn pop_scope(&mut self) {
+        self.tables = self.outer_scopes.pop().unwrap_or_default();
+    }
+
+    /// Table references introduced by a FROM clause (alias or name -> TableRef)
+    fn scope_of_from_items(&self, from: &[TableWithJoins]) -> IndexMap<String, TableRef> {
+        let mut scope = IndexMap::new();
+        for table in from {
+            self.add_relation(&table.relation, &mut scope);
+            for join in &table.joins {
+                self.add_relation(&join.relation, &mut scope);
+            }
+        }
+        scope
+    }
+
+    /// Register a FROM relation in `scope`
+    fn add_relation(&self, factor: &TableFactor, scope: &mut IndexMap<String, TableRef>) {
+        // Relations whose column types are unknown (CTEs, subqueries, functions, missing tables)
+        let unknown = |name: &str| TableRef {
+            table_name: QualifiedName::new(name),
+            view_columns: None,
+            derived_columns: Some(Vec::new()),
+        };
+        match factor {
+            TableFactor::Table {
+                name, alias, args, ..
+            } => {
+                let table_name = self.catalog.qualified_name(name);
+                let key = alias
+                    .as_ref()
+                    .map_or_else(|| table_name.name.clone(), |a| a.name.value.clone());
+                let is_cte = table_name.schema.is_none()
+                    && self.ctes.contains(&table_name.name.to_lowercase());
+                let table_ref = if args.is_some() || is_cte {
+                    unknown(&key)
+                } else if self.catalog.get_table(&table_name).is_some() {
+                    TableRef {
+                        table_name,
+                        view_columns: None,
+                        derived_columns: None,
+                    }
+                } else if let Some(view) = self.catalog.get_view(&table_name) {
+                    TableRef {
+                        table_name,
+                        view_columns: Some(view.columns.clone()),
+                        derived_columns: None,
+                    }
+                } else {
+                    unknown(&key)
+                };
+                scope.insert(key, table_ref);
+            }
+            TableFactor::Derived { alias: Some(a), .. }
+            | TableFactor::TableFunction { alias: Some(a), .. }
+            | TableFactor::Function { alias: Some(a), .. }
+            | TableFactor::UNNEST { alias: Some(a), .. } => {
+                scope.insert(a.name.value.clone(), unknown(&a.name.value));
+            }
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => {
+                self.add_relation(&table_with_joins.relation, scope);
+                for join in &table_with_joins.joins {
+                    self.add_relation(&join.relation, scope);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Type check subqueries in FROM (derived tables). Non-LATERAL subqueries are
+    /// checked before the block's own scope is entered, since they can't see it.
+    fn check_from_subqueries(&mut self, from: &[TableWithJoins], lateral_only: bool) {
+        for table in from {
+            for factor in
+                std::iter::once(&table.relation).chain(table.joins.iter().map(|j| &j.relation))
+            {
+                if let TableFactor::Derived {
+                    lateral, subquery, ..
+                } = factor
+                {
+                    if *lateral == lateral_only {
+                        self.check_query(subquery);
+                    }
+                }
+            }
+        }
     }
 
     /// Check types in a set expression (SELECT, UNION, INTERSECT, EXCEPT, ...)
@@ -397,6 +626,13 @@ impl<'a> TypeResolver<'a> {
     /// Infer projection types for a SELECT list.
     /// Returns None when wildcard expansion would be required.
     fn infer_select_projection_types(&mut self, select: &Select) -> Option<Vec<ExpressionType>> {
+        self.push_scope(&select.from);
+        let types = self.infer_projection_types_in_scope(select);
+        self.pop_scope();
+        types
+    }
+
+    fn infer_projection_types_in_scope(&mut self, select: &Select) -> Option<Vec<ExpressionType>> {
         let mut types = Vec::with_capacity(select.projection.len());
         for item in &select.projection {
             match item {
@@ -413,6 +649,14 @@ impl<'a> TypeResolver<'a> {
 
     /// Check types in a SELECT statement
     fn check_select(&mut self, select: &Select) {
+        self.check_from_subqueries(&select.from, false);
+        self.push_scope(&select.from);
+        self.check_from_subqueries(&select.from, true);
+        self.check_select_in_scope(select);
+        self.pop_scope();
+    }
+
+    fn check_select_in_scope(&mut self, select: &Select) {
         // Check JOIN conditions
         for table_with_joins in &select.from {
             for join in &table_with_joins.joins {
@@ -439,7 +683,10 @@ impl<'a> TypeResolver<'a> {
             self.check_expr_recursive(selection);
         }
 
-        // TODO: Check HAVING, GROUP BY, etc.
+        // Check HAVING clause
+        if let Some(ref having) = select.having {
+            self.check_expr_recursive(having);
+        }
     }
 
     /// Check types in a JOIN condition
@@ -475,7 +722,9 @@ impl<'a> TypeResolver<'a> {
                     let right_type = self.infer_expr_type(right);
 
                     if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
-                        let span = Span::from_sqlparser(&left.span());
+                        let span = located_span(left)
+                            .or_else(|| located_span(right))
+                            .unwrap_or_else(|| Span::from_sqlparser(&left.span()));
                         self.diagnostics.push(
                             Diagnostic::error(
                                 DiagnosticKind::JoinTypeMismatch,
@@ -543,6 +792,42 @@ impl<'a> TypeResolver<'a> {
                     self.check_expr_recursive(item);
                 }
             }
+            Expr::Subquery(query)
+            | Expr::Exists {
+                subquery: query, ..
+            } => {
+                self.check_query(query);
+            }
+            Expr::InSubquery { expr, subquery, .. } => {
+                self.check_expr_recursive(expr);
+                self.check_query(subquery);
+            }
+            Expr::IsNull(expr)
+            | Expr::IsNotNull(expr)
+            | Expr::IsTrue(expr)
+            | Expr::IsFalse(expr)
+            | Expr::IsNotTrue(expr)
+            | Expr::IsNotFalse(expr)
+            | Expr::Cast { expr, .. } => {
+                self.check_expr_recursive(expr);
+            }
+            Expr::Function(func) => {
+                if let FunctionArguments::List(list) = &func.args {
+                    for arg in &list.args {
+                        if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                        | FunctionArg::Named {
+                            arg: FunctionArgExpr::Expr(expr),
+                            ..
+                        } = arg
+                        {
+                            self.check_expr_recursive(expr);
+                        }
+                    }
+                }
+                if let Some(filter) = &func.filter {
+                    self.check_expr_recursive(filter);
+                }
+            }
             Expr::Between {
                 expr, low, high, ..
             } => {
@@ -581,25 +866,57 @@ impl<'a> TypeResolver<'a> {
         let right_type = self.infer_expr_type(right);
 
         if self.is_comparison_operator(op) {
+            // Literals carry no location: use the other operand's
+            let span = located_span(left).or_else(|| located_span(right));
+            if self.report_enum_literal(&left_type, &right_type, span) {
+                return;
+            }
             if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
-                let span = Span::from_sqlparser(&left.span());
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!("Type mismatch: cannot compare {} with {}", lt, rt),
+                )
+                .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
+                diag.span = span;
+                self.diagnostics.push(diag);
+            }
+            return;
+        }
+
+        let Some(arith_op) = arithmetic_op(op) else {
+            return;
+        };
+
+        // Numeric arithmetic with a string literal: the literal must be a number
+        let literal_operand = match (&left_type, &right_type) {
+            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => Some((t, lit, right)),
+            (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => Some((t, lit, left)),
+            _ => None,
+        };
+        if let Some((t, lit, lit_expr)) = literal_operand {
+            if t.is_numeric() && !t.accepts_string_literal(lit) {
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
-                        format!("Type mismatch: cannot compare {} with {}", lt, rt),
+                        format!(
+                            "Type mismatch: '{}' is not a valid {} in arithmetic",
+                            lit,
+                            t.display_name()
+                        ),
                     )
-                    .with_span(span)
-                    .with_help(
-                        "Types are not implicitly compatible. Consider using explicit CAST.",
+                    .with_span(
+                        located_span(lit_expr)
+                            .or_else(|| located_span(left))
+                            .or_else(|| located_span(right))
+                            .unwrap_or_else(|| Span::from_sqlparser(&lit_expr.span())),
                     ),
                 );
             }
             return;
         }
 
-        // Arithmetic operators: only check when both types are known
-        let (Some(arith_op), ExpressionType::Known(lt), ExpressionType::Known(rt)) =
-            (arithmetic_op(op), &left_type, &right_type)
+        // Otherwise only check when both types are known
+        let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (&left_type, &right_type)
         else {
             return;
         };
@@ -819,6 +1136,13 @@ impl<'a> TypeResolver<'a> {
                     _ => ExpressionType::Unknown,
                 }
             }
+            // Numeric arithmetic with a numeric string literal keeps the numeric type
+            (ExpressionType::Known(t), ExpressionType::StringLiteral(_))
+            | (ExpressionType::StringLiteral(_), ExpressionType::Known(t))
+                if t.is_numeric() && arithmetic_op(op).is_some() =>
+            {
+                ExpressionType::Known(t)
+            }
             _ => ExpressionType::Unknown,
         }
     }
@@ -845,42 +1169,69 @@ impl<'a> TypeResolver<'a> {
 
     /// Infer type from an unqualified column identifier
     fn infer_column_type_from_ident(&self, col_name: &str) -> ExpressionType {
-        // Search through all tables in scope to find the column
-        let mut found_type: Option<SqlType> = None;
+        // Innermost scope first: a column found there shadows outer query blocks
+        for scope in std::iter::once(&self.tables).chain(self.outer_scopes.iter().rev()) {
+            if let Some(result) = self.infer_column_type_in_scope(scope, col_name) {
+                return result;
+            }
+        }
+        ExpressionType::Unknown
+    }
 
-        for table_ref in self.tables.values() {
-            // Check if this is a derived table or view
+    /// Type of an unqualified column within one scope, or `None` if no table in the
+    /// scope has it
+    fn infer_column_type_in_scope(
+        &self,
+        scope: &IndexMap<String, TableRef>,
+        col_name: &str,
+    ) -> Option<ExpressionType> {
+        let mut found_type: Option<SqlType> = None;
+        let mut has_unknown_relation = false;
+
+        for table_ref in scope.values() {
             if let Some(ref derived_cols) = table_ref.derived_columns {
-                if derived_cols.contains(&col_name.to_string()) {
-                    // Column exists in derived table, but we don't know its type
-                    return ExpressionType::Unknown;
+                // Derived table / CTE / function: column types are unknown
+                if derived_cols.is_empty() {
+                    has_unknown_relation = true;
+                } else if derived_cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(col_name))
+                {
+                    return Some(ExpressionType::Unknown);
                 }
             } else if let Some(ref view_cols) = table_ref.view_columns {
-                if view_cols.contains(&col_name.to_string()) {
+                if view_cols.is_empty() {
+                    has_unknown_relation = true;
+                } else if view_cols.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
                     // Column exists in view, but we don't know its type without analyzing the view
-                    return ExpressionType::Unknown;
+                    return Some(ExpressionType::Unknown);
                 }
-            } else {
-                // Regular table - look up in catalog
-                if let Some(table_def) = self.catalog.get_table(&table_ref.table_name) {
-                    if let Some(col_def) = table_def.get_column(col_name) {
-                        if found_type.is_some() {
-                            // Column is ambiguous (exists in multiple tables)
-                            return ExpressionType::Unknown;
-                        }
-                        found_type = Some(col_def.data_type.clone());
+            } else if let Some(table_def) = self.catalog.get_table(&table_ref.table_name) {
+                if let Some(col_def) = table_def.get_column(col_name) {
+                    if found_type.is_some() {
+                        // Column is ambiguous (exists in multiple tables)
+                        return Some(ExpressionType::Unknown);
                     }
+                    found_type = Some(col_def.data_type.clone());
                 }
             }
         }
 
-        found_type.map_or(ExpressionType::Unknown, ExpressionType::Known)
+        match found_type {
+            Some(t) => Some(known_column_type(t)),
+            // The column may come from a relation with unknown columns
+            None if has_unknown_relation => Some(ExpressionType::Unknown),
+            None => None,
+        }
     }
 
     /// Infer type from a qualified column identifier (table.column)
     fn infer_column_type_qualified(&self, table_name: &str, col_name: &str) -> ExpressionType {
-        // Look up table in scope
-        if let Some(table_ref) = super::resolver::lookup_ignore_case(&self.tables, table_name) {
+        // Look up table in scope, innermost first
+        let table_ref = std::iter::once(&self.tables)
+            .chain(self.outer_scopes.iter().rev())
+            .find_map(|scope| super::resolver::lookup_ignore_case(scope, table_name));
+        if let Some(table_ref) = table_ref {
             // Check if this is a derived table or view
             if table_ref.derived_columns.is_some() || table_ref.view_columns.is_some() {
                 // We can't infer types for derived tables or views yet
@@ -890,7 +1241,7 @@ impl<'a> TypeResolver<'a> {
             // Regular table - look up in catalog
             if let Some(table_def) = self.catalog.get_table(&table_ref.table_name) {
                 if let Some(col_def) = table_def.get_column(col_name) {
-                    return ExpressionType::Known(col_def.data_type.clone());
+                    return known_column_type(col_def.data_type.clone());
                 }
             }
         }
@@ -899,13 +1250,19 @@ impl<'a> TypeResolver<'a> {
     }
 }
 
-/// Convert sqlparser ObjectName to our QualifiedName
-fn object_name_to_qualified(name: &sqlparser::ast::ObjectName) -> QualifiedName {
-    match name.0.as_slice() {
-        [table] => QualifiedName::new(&table.value),
-        [schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        [_catalog, schema, table] => QualifiedName::with_schema(&schema.value, &table.value),
-        _ => QualifiedName::new(name.to_string()),
+/// Source span of an expression, or `None` if the parser recorded no location
+/// (sqlparser 0.53 doesn't track spans of literal values)
+fn located_span(expr: &Expr) -> Option<Span> {
+    let span = expr.span();
+    (span.start.line > 0).then(|| Span::from_sqlparser(&span))
+}
+
+/// Expression type of a column with the given declared type. Columns whose type
+/// sqlsift doesn't model (typeless SQLite columns, unsupported types) are unknown.
+fn known_column_type(data_type: SqlType) -> ExpressionType {
+    match data_type {
+        SqlType::Unknown => ExpressionType::Unknown,
+        t => ExpressionType::Known(t),
     }
 }
 

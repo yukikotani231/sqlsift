@@ -82,6 +82,11 @@ impl SqlType {
             DataType::Double => SqlType::DoublePrecision,
             DataType::DoublePrecision => SqlType::DoublePrecision,
             DataType::Float8 => SqlType::DoublePrecision,
+            DataType::Float32 => SqlType::Real,
+            DataType::Float64 => SqlType::DoublePrecision,
+            // FLOAT(p): 1..=24 is REAL, otherwise DOUBLE PRECISION (plain FLOAT is double)
+            DataType::Float(Some(p)) if *p <= 24 => SqlType::Real,
+            DataType::Float(_) => SqlType::DoublePrecision,
 
             DataType::Decimal(info) | DataType::Numeric(info) => {
                 let (precision, scale) = match info {
@@ -104,11 +109,18 @@ impl SqlType {
                 SqlType::Varchar { length }
             }
 
+            DataType::Nvarchar(info) => SqlType::Varchar {
+                length: extract_char_length(info.as_ref()),
+            },
+
             DataType::Text => SqlType::Text,
             DataType::String(_) => SqlType::Text,
+            DataType::TinyText | DataType::MediumText | DataType::LongText => SqlType::Text,
+            DataType::Clob(_) => SqlType::Text,
 
             DataType::Bytea => SqlType::Bytea,
             DataType::Binary(_) | DataType::Varbinary(_) | DataType::Blob(_) => SqlType::Bytea,
+            DataType::TinyBlob | DataType::MediumBlob | DataType::LongBlob => SqlType::Bytea,
 
             DataType::Date => SqlType::Date,
 
