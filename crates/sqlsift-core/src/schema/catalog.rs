@@ -159,6 +159,30 @@ impl Catalog {
         self.get_enum(name).is_some()
     }
 
+    /// Get an enum type by name (mutable)
+    pub fn get_enum_mut(&mut self, name: &str) -> Option<&mut EnumTypeDef> {
+        let index = index_ignore_case(&self.enums, name)?;
+        self.enums.get_index_mut(index).map(|(_, e)| e)
+    }
+
+    /// Drop an enum type from the catalog
+    pub fn drop_enum(&mut self, name: &str) {
+        if let Some(index) = index_ignore_case(&self.enums, name) {
+            self.enums.shift_remove_index(index);
+        }
+    }
+
+    /// Drop a view from the catalog
+    pub fn drop_view(&mut self, name: &QualifiedName) {
+        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
+        let Some(schema_index) = self.index_of(&self.schemas, schema_name) else {
+            return;
+        };
+        if let Some(index) = self.index_of(&self.schemas[schema_index].views, &name.name) {
+            self.schemas[schema_index].views.shift_remove_index(index);
+        }
+    }
+
     /// Drop a table from the catalog
     pub fn drop_table(&mut self, name: &QualifiedName) {
         let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);

@@ -1,19 +1,36 @@
 //! Schema builder - converts SQL AST to Catalog
 
 use sqlparser::ast::{
-    AlterTableOperation, ColumnOption, ColumnOptionDef, ObjectName, ObjectType, Statement,
-    TableConstraint, UserDefinedTypeRepresentation,
+    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
+    Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Query, Select, SelectItem,
+    SetExpr, Statement, TableAlias, TableConstraint, TableFactor, TableWithJoins,
+    UserDefinedTypeRepresentation,
 };
-use sqlparser::parser::Parser;
-use sqlparser::tokenizer::Token;
+use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::dialect::SqlDialect;
-use crate::error::{Diagnostic, DiagnosticKind};
+use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{
     Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
     PrimaryKeyDef, QualifiedName, TableDef, UniqueConstraintDef, ViewDef,
 };
 use crate::types::SqlType;
+
+/// Columns of the CTEs visible while inferring a query's output columns
+/// (`None` = the CTE's columns could not be determined)
+type CteColumns = Vec<(String, Option<Vec<String>>)>;
+
+/// A relation in a FROM clause, as seen by view column inference
+struct FromRelation {
+    /// Alias, or the (unqualified) table name
+    name: String,
+    /// Output columns, or `None` when they can't be determined
+    columns: Option<Vec<String>>,
+    /// Columns (lowercased) merged into an earlier relation by a USING or
+    /// NATURAL join, which an unqualified `*` lists only once
+    merged: Vec<String>,
+}
 
 /// Builder for constructing a Catalog from SQL schema definitions
 pub struct SchemaBuilder {
@@ -69,25 +86,455 @@ impl SchemaBuilder {
     /// This allows sqlsift to handle schema files containing unsupported syntax
     /// (e.g., CREATE FUNCTION, CREATE TRIGGER, CREATE DOMAIN) by gracefully
     /// skipping unparseable statements while still processing the rest.
+    ///
+    /// Skipped statements that define tables, views or types produce a warning.
     fn parse_statements_individually(&mut self, sql: &str) {
         let dialect = self.dialect.parser_dialect();
 
-        for raw_stmt in split_sql_statements(sql) {
-            let trimmed = raw_stmt.trim();
-            if trimmed.is_empty() {
+        for raw_stmt in split_sql_statements(sql, self.dialect) {
+            if raw_stmt.trim().is_empty() {
                 continue;
             }
 
-            match Parser::parse_sql(dialect.as_ref(), trimmed) {
+            // Parse the untrimmed text so parser locations are relative to `raw_stmt`
+            match Parser::parse_sql(dialect.as_ref(), raw_stmt) {
                 Ok(stmts) => {
                     for stmt in stmts {
                         self.process_statement(&stmt);
                     }
                 }
-                Err(_) => {
-                    // Silently skip unparseable statements (functions, triggers, etc.)
+                Err(err) => {
+                    // `raw_stmt` is a subslice of `sql`
+                    let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
+                    self.process_unparsed_statement(sql, offset, raw_stmt, &err);
                 }
             }
+        }
+    }
+
+    /// Handle a statement sqlparser could not parse: apply the few forms we
+    /// understand from tokens (ALTER TYPE, DROP MATERIALIZED VIEW, LIKE with
+    /// INCLUDING options), warn about skipped table/view/type definitions, and
+    /// silently skip everything else (functions, triggers, GRANT, ...).
+    fn process_unparsed_statement(
+        &mut self,
+        sql: &str,
+        offset: usize,
+        stmt: &str,
+        err: &ParserError,
+    ) {
+        let parser_dialect = self.dialect.parser_dialect();
+        let Ok(tokens) = Tokenizer::new(parser_dialect.as_ref(), stmt)
+            .with_unescape(false)
+            .tokenize_with_location()
+        else {
+            return;
+        };
+        let significant: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+            .collect();
+        let Some(first) = significant.first() else {
+            return;
+        };
+        let words: Vec<String> = significant
+            .iter()
+            .map(|t| match &t.token {
+                Token::Word(w) if w.quote_style.is_none() => w.value.to_uppercase(),
+                _ => String::new(),
+            })
+            .collect();
+        let word = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+        let sig_tokens: Vec<&Token> = significant.iter().map(|t| &t.token).collect();
+
+        if word(0) == "ALTER" && word(1) == "TYPE" {
+            self.process_alter_type_tokens(&sig_tokens[2..]);
+            return;
+        }
+        if word(0) == "DROP" && word(1) == "MATERIALIZED" && word(2) == "VIEW" {
+            let mut rest = &sig_tokens[3..];
+            if words.get(3).map(String::as_str) == Some("IF") {
+                rest = rest.get(2..).unwrap_or(&[]);
+            }
+            for name in split_object_names(rest) {
+                let name = self.catalog.qualified_name(&name);
+                self.catalog.drop_view(&name);
+            }
+            return;
+        }
+
+        // Which definition statement is this, and where does its name start?
+        let (kind, name_start) = if word(0) == "CREATE" {
+            // Find the object keyword, skipping modifiers such as OR REPLACE, TEMP,
+            // UNLOGGED, MATERIALIZED or MySQL's ALGORITHM = x / DEFINER = x
+            let object = (1..words.len().min(16)).find_map(|i| {
+                let kind = match word(i) {
+                    "TABLE" => Some("CREATE TABLE"),
+                    "VIEW" => Some("CREATE VIEW"),
+                    "TYPE" => Some("CREATE TYPE"),
+                    "FUNCTION" | "PROCEDURE" | "TRIGGER" | "INDEX" | "EVENT" | "AGGREGATE"
+                    | "OPERATOR" | "DOMAIN" | "SEQUENCE" | "SCHEMA" | "EXTENSION" | "RULE"
+                    | "POLICY" | "ROLE" | "USER" | "DATABASE" | "SERVER" | "LANGUAGE" | "CAST"
+                    | "COLLATION" | "PUBLICATION" | "SUBSCRIPTION" | "STATISTICS"
+                    | "CONVERSION" | "TEXT" | "FOREIGN" | "TABLESPACE" | "ACCESS" => None,
+                    _ => return None,
+                };
+                Some((kind, i + 1))
+            });
+            match object {
+                Some((Some(kind), name_start)) => (kind, name_start),
+                _ => return,
+            }
+        } else if word(0) == "ALTER" && word(1) == "TABLE" {
+            ("ALTER TABLE", 2)
+        } else {
+            return;
+        };
+
+        // Retry `CREATE TABLE c (LIKE p INCLUDING ...)` / `... WITH NO DATA` without
+        // those clauses
+        if matches!(kind, "CREATE TABLE" | "CREATE VIEW")
+            && self.retry_without_unsupported_clauses(&tokens)
+        {
+            return;
+        }
+
+        // Skip IF [NOT] EXISTS / ONLY before the object name
+        let mut i = name_start;
+        let mut if_not_exists = false;
+        loop {
+            match word(i) {
+                "IF" if word(i + 1) == "NOT" => {
+                    if_not_exists = true;
+                    i += 3;
+                }
+                "IF" => i += 2,
+                "ONLY" => i += 1,
+                _ => break,
+            }
+        }
+        let name_tokens = sig_tokens.get(i..).unwrap_or(&[]);
+        let name_len = object_name_len(name_tokens);
+
+        if kind == "CREATE TABLE"
+            && word(i + name_len) == "PARTITION"
+            && word(i + name_len + 1) == "OF"
+            && self.process_partition_of(name_tokens, if_not_exists)
+        {
+            return;
+        }
+        let name = split_object_names(&name_tokens[..name_len])
+            .into_iter()
+            .next()
+            .map(|n| n.to_string());
+
+        if kind == "ALTER TABLE" {
+            // Only warn for operations that change columns; constraints, OWNER TO,
+            // ENABLE TRIGGER, REPLICA IDENTITY, ATTACH PARTITION, ... don't affect
+            // name resolution
+            let op = i + name_len;
+            let changes_columns = match word(op) {
+                "ADD" | "DROP" => !matches!(
+                    word(op + 1),
+                    "CONSTRAINT"
+                        | "PRIMARY"
+                        | "FOREIGN"
+                        | "UNIQUE"
+                        | "CHECK"
+                        | "EXCLUDE"
+                        | "INDEX"
+                        | "KEY"
+                        | "FULLTEXT"
+                        | "SPATIAL"
+                        | "PARTITION"
+                ),
+                "ALTER" | "RENAME" | "MODIFY" | "CHANGE" => {
+                    !matches!(word(op + 1), "CONSTRAINT" | "INDEX" | "KEY")
+                }
+                _ => false,
+            };
+            if !changes_columns {
+                return;
+            }
+        }
+
+        // Location of the statement in the original input
+        let (base_line, base_column) = line_column_at(sql, offset);
+        let start = first.span.start;
+        let (line, column) = absolute_location(
+            (base_line, base_column),
+            start.line as usize,
+            start.column as usize,
+        );
+        let start_offset =
+            offset + byte_offset_of(stmt, start.line as usize, start.column as usize).unwrap_or(0);
+        let length = sql[start_offset..]
+            .lines()
+            .next()
+            .map(|l| l.trim_end().len())
+            .unwrap_or(0)
+            .max(1);
+
+        let parser_message = relocate_parser_message(&err.to_string(), (base_line, base_column));
+        let what = match &name {
+            Some(name) => format!("{kind} statement for '{name}'"),
+            None => format!("{kind} statement"),
+        };
+        self.diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticKind::ParseError,
+                format!("Skipped {what} that could not be parsed: {parser_message}"),
+            )
+            .with_span(Span {
+                offset: start_offset,
+                length,
+                line,
+                column,
+            })
+            .with_help(
+                "The statement was ignored, so queries that use it may report missing tables or columns",
+            ),
+        );
+    }
+
+    /// Re-parse a CREATE TABLE / CREATE VIEW statement without clauses that don't
+    /// affect columns and that sqlparser can't parse: `LIKE p INCLUDING x` /
+    /// `EXCLUDING x` options, and a trailing `WITH [NO] DATA`. Returns true if
+    /// something was removed and the statement then parsed and was applied.
+    fn retry_without_unsupported_clauses(&mut self, tokens: &[TokenWithSpan]) -> bool {
+        let is_word = |t: &Token, kw: &str| matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(kw));
+        // Indexes (into `tokens`) of significant tokens, and which ones to drop
+        let significant: Vec<usize> = (0..tokens.len())
+            .filter(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
+            .collect();
+        let mut drop = vec![false; tokens.len()];
+        for (n, &i) in significant.iter().enumerate() {
+            if is_word(&tokens[i].token, "INCLUDING") || is_word(&tokens[i].token, "EXCLUDING") {
+                if let Some(&next) = significant.get(n + 1) {
+                    if matches!(tokens[next].token, Token::Word(_)) {
+                        drop[i] = true;
+                        drop[next] = true;
+                    }
+                }
+            }
+        }
+        // Trailing WITH [NO] DATA
+        let tail: Vec<usize> = significant
+            .iter()
+            .rev()
+            .skip_while(|&&i| tokens[i].token == Token::SemiColon)
+            .take(3)
+            .copied()
+            .collect();
+        if tail
+            .first()
+            .is_some_and(|&i| is_word(&tokens[i].token, "DATA"))
+        {
+            let with_at = if tail
+                .get(1)
+                .is_some_and(|&i| is_word(&tokens[i].token, "NO"))
+            {
+                2
+            } else {
+                1
+            };
+            if tail
+                .get(with_at)
+                .is_some_and(|&i| is_word(&tokens[i].token, "WITH"))
+            {
+                for &i in &tail[..=with_at] {
+                    drop[i] = true;
+                }
+            }
+        }
+        // PostgreSQL `INHERITS (parent [, ...])`: parsed separately, applied below
+        let mut parents = Vec::new();
+        if let Some(n) = significant
+            .iter()
+            .position(|&i| is_word(&tokens[i].token, "INHERITS"))
+        {
+            let close = significant[n..]
+                .iter()
+                .position(|&i| tokens[i].token == Token::RParen)
+                .map(|p| n + p);
+            if let Some(close) = close {
+                if significant
+                    .get(n + 1)
+                    .is_some_and(|&i| tokens[i].token == Token::LParen)
+                {
+                    let inner: Vec<&Token> = significant[n + 2..close]
+                        .iter()
+                        .map(|&i| &tokens[i].token)
+                        .collect();
+                    parents = split_object_names(&inner);
+                    for &i in &significant[n..=close] {
+                        drop[i] = true;
+                    }
+                }
+            }
+        }
+        if !drop.contains(&true) {
+            return false;
+        }
+
+        let rewritten: String = tokens
+            .iter()
+            .zip(&drop)
+            .filter(|(_, &dropped)| !dropped)
+            .map(|(t, _)| t.token.to_string())
+            .collect();
+        let dialect = self.dialect.parser_dialect();
+        let Ok(stmts) = Parser::parse_sql(dialect.as_ref(), &rewritten) else {
+            return false;
+        };
+        for stmt in stmts {
+            self.process_statement(&stmt);
+            if let Statement::CreateTable(create) = &stmt {
+                if !parents.is_empty() {
+                    let child = self.catalog.qualified_name(&create.name);
+                    self.inherit_columns(&child, &parents);
+                }
+            }
+        }
+        true
+    }
+
+    /// Put the columns of `parents` (in order) before the columns of `child`,
+    /// as PostgreSQL table inheritance does
+    fn inherit_columns(&mut self, child: &QualifiedName, parents: &[ObjectName]) {
+        let mut inherited: indexmap::IndexMap<String, ColumnDef> = indexmap::IndexMap::new();
+        for parent in parents {
+            let parent_name = self.catalog.qualified_name(parent);
+            match self.catalog.get_table(&parent_name) {
+                Some(parent_table) => {
+                    for (name, col) in &parent_table.columns {
+                        let mut col = col.clone();
+                        col.is_primary_key = false;
+                        inherited.entry(name.clone()).or_insert(col);
+                    }
+                }
+                None => self.diagnostics.push(Diagnostic::warning(
+                    DiagnosticKind::TableNotFound,
+                    format!(
+                        "Table '{}' inherits from table '{}' which was not found in schema",
+                        child, parent_name
+                    ),
+                )),
+            }
+        }
+        if let Some(table) = self.catalog.get_table_mut(child) {
+            for (name, col) in std::mem::take(&mut table.columns) {
+                // A column redeclared in the child is merged with the inherited one
+                match inherited.keys().position(|k| k.eq_ignore_ascii_case(&name)) {
+                    Some(index) => {
+                        inherited.shift_remove_index(index);
+                        inherited.shift_insert(index, name, col);
+                    }
+                    None => {
+                        inherited.insert(name, col);
+                    }
+                }
+            }
+            table.columns = inherited;
+        }
+    }
+
+    /// Apply `CREATE TABLE name PARTITION OF parent ...`: the partition has its
+    /// parent's columns. `tokens` start at the table name. Returns true if applied.
+    fn process_partition_of(&mut self, tokens: &[&Token], if_not_exists: bool) -> bool {
+        let name_len = object_name_len(tokens);
+        let (Some(name), Some(parent)) = (
+            split_object_names(&tokens[..name_len]).into_iter().next(),
+            split_object_names(tokens.get(name_len + 2..).unwrap_or(&[]))
+                .into_iter()
+                .next(),
+        ) else {
+            return false;
+        };
+        let name = self.catalog.qualified_name(&name);
+        if if_not_exists && self.relation_exists(&name) {
+            return true;
+        }
+        let parent = self.catalog.qualified_name(&parent);
+        let Some(parent_table) = self.catalog.get_table(&parent) else {
+            return false;
+        };
+        let mut table = TableDef::new(name);
+        table.columns = parent_table.columns.clone();
+        table.primary_key = parent_table.primary_key.clone();
+        table.check_constraints = parent_table.check_constraints.clone();
+        self.catalog.add_table(table);
+        true
+    }
+
+    /// Apply `ALTER TYPE name ADD VALUE ...` / `RENAME VALUE ...` / `RENAME TO ...`
+    /// (not parsed by sqlparser) to an enum. `tokens` start after `ALTER TYPE`.
+    fn process_alter_type_tokens(&mut self, tokens: &[&Token]) {
+        let name_len = object_name_len(tokens);
+        let Some(name) = split_object_names(&tokens[..name_len]).into_iter().next() else {
+            return;
+        };
+        let enum_name = self.catalog.qualified_name(&name).name;
+        let rest = &tokens[name_len..];
+        let kw = |i: usize| match rest.get(i) {
+            Some(Token::Word(w)) if w.quote_style.is_none() => w.value.to_uppercase(),
+            _ => String::new(),
+        };
+        let string = |i: usize| match rest.get(i) {
+            Some(Token::SingleQuotedString(s)) => Some(s.replace("''", "'")),
+            Some(Token::EscapedStringLiteral(s)) => Some(s.clone()),
+            _ => None,
+        };
+
+        // Name of the type in a RENAME TO, computed before borrowing the enum
+        let renamed_to = if kw(0) == "RENAME" && kw(1) == "TO" {
+            split_object_names(&rest[2..])
+                .into_iter()
+                .next()
+                .map(|n| self.catalog.qualified_name(&n).name)
+        } else {
+            None
+        };
+
+        if let Some(new_name) = renamed_to {
+            if let Some(mut def) = self.catalog.get_enum(&enum_name).cloned() {
+                self.catalog.drop_enum(&enum_name);
+                def.name = new_name;
+                self.catalog.add_enum(def);
+            }
+            return;
+        }
+
+        let Some(def) = self.catalog.get_enum_mut(&enum_name) else {
+            return;
+        };
+        match (kw(0).as_str(), kw(1).as_str()) {
+            ("ADD", "VALUE") => {
+                let mut i = 2;
+                if kw(2) == "IF" && kw(3) == "NOT" && kw(4) == "EXISTS" {
+                    i = 5;
+                }
+                let Some(value) = string(i) else {
+                    return;
+                };
+                if def.values.contains(&value) {
+                    return;
+                }
+                let anchor = string(i + 2).and_then(|a| def.values.iter().position(|v| *v == a));
+                match (kw(i + 1).as_str(), anchor) {
+                    ("BEFORE", Some(pos)) => def.values.insert(pos, value),
+                    ("AFTER", Some(pos)) => def.values.insert(pos + 1, value),
+                    _ => def.values.push(value),
+                }
+            }
+            ("RENAME", "VALUE") => {
+                if let (Some(old), true, Some(new)) = (string(2), kw(3) == "TO", string(4)) {
+                    if let Some(v) = def.values.iter_mut().find(|v| **v == old) {
+                        *v = new;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -108,9 +555,14 @@ impl SchemaBuilder {
                 columns,
                 query,
                 materialized,
+                if_not_exists,
                 ..
             } => {
-                self.process_create_view(name, columns, query, *materialized);
+                let qualified = self.catalog.qualified_name(name);
+                if *if_not_exists && self.relation_exists(&qualified) {
+                    return;
+                }
+                self.process_create_view(qualified, columns, query, *materialized);
             }
             Statement::AlterTable {
                 name, operations, ..
@@ -118,36 +570,94 @@ impl SchemaBuilder {
                 self.process_alter_table(name, operations);
             }
             Statement::Drop {
-                object_type: ObjectType::Table,
-                names,
-                ..
+                object_type, names, ..
             } => {
                 for name in names {
-                    self.process_drop_table(name);
+                    match object_type {
+                        ObjectType::Table => self.process_drop_table(name),
+                        ObjectType::View => {
+                            let name = self.catalog.qualified_name(name);
+                            self.catalog.drop_view(&name);
+                        }
+                        ObjectType::Type => {
+                            let name = self.catalog.qualified_name(name);
+                            self.catalog.drop_enum(&name.name);
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
         }
     }
 
+    /// Whether a table or view with this name exists
+    fn relation_exists(&self, name: &QualifiedName) -> bool {
+        self.catalog.table_exists(name) || self.catalog.view_exists(name)
+    }
+
     /// Process CREATE TABLE statement
     fn process_create_table(&mut self, create: &sqlparser::ast::CreateTable) {
         let name = self.catalog.qualified_name(&create.name);
-        let mut table = TableDef::new(name);
+        if create.if_not_exists && self.relation_exists(&name) {
+            return;
+        }
+        let mut table = TableDef::new(name.clone());
+
+        // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
+        if let Some(like) = create.like.as_ref().or(create.clone.as_ref()) {
+            let source = self.catalog.qualified_name(like);
+            match self.catalog.get_table(&source) {
+                Some(source_table) => {
+                    table.columns = source_table.columns.clone();
+                    table.primary_key = source_table.primary_key.clone();
+                    table.unique_constraints = source_table.unique_constraints.clone();
+                    table.check_constraints = source_table.check_constraints.clone();
+                }
+                None => self.warn_like_source_missing(&name, &source),
+            }
+        }
 
         // Process columns
         for column in &create.columns {
-            let col_name = column.name.value.clone();
-            let data_type = SqlType::from_ast(&column.data_type);
-
-            let mut col_def = ColumnDef::new(&col_name, data_type);
-
-            // Process column options
-            for option in &column.options {
-                self.process_column_option(&mut col_def, &mut table, option);
+            // `CREATE TABLE c (LIKE p)` parses as a column named LIKE of type `p`
+            if let Some(source) = like_pseudo_column(column) {
+                self.copy_like_columns(&mut table, source);
+                continue;
             }
 
-            table.columns.insert(col_name, col_def);
+            let (col_def, constraints) = build_column(
+                &self.catalog,
+                &name.name,
+                &column.name.value,
+                &column.data_type,
+                &column.options,
+            );
+            merge_constraints(&mut table, constraints);
+            table.columns.insert(col_def.name.clone(), col_def);
+        }
+
+        // CREATE TABLE ... AS SELECT: infer column names from the query
+        if let Some(query) = &create.query {
+            if create.columns.is_empty() {
+                match self.infer_query_columns(query, &Vec::new()) {
+                    Some(names) => {
+                        for col_name in names {
+                            table
+                                .columns
+                                .entry(col_name.clone())
+                                .or_insert_with(|| ColumnDef::new(col_name, SqlType::Unknown));
+                        }
+                    }
+                    None => self.diagnostics.push(Diagnostic::warning(
+                        DiagnosticKind::ParseError,
+                        format!(
+                            "Could not determine the columns of table '{}' created by CREATE TABLE ... AS",
+                            name
+                        ),
+                    ).with_help("Queries that reference its columns may report missing columns")),
+                }
+            }
         }
 
         // Process table constraints
@@ -158,21 +668,57 @@ impl SchemaBuilder {
         self.catalog.add_table(table);
     }
 
+    /// Copy the columns of `source` into `table` (`CREATE TABLE c (LIKE p)`)
+    fn copy_like_columns(&mut self, table: &mut TableDef, source: &ObjectName) {
+        let source = self.catalog.qualified_name(source);
+        if let Some(source_table) = self.catalog.get_table(&source) {
+            for (col_name, col) in &source_table.columns {
+                let mut col = col.clone();
+                // Constraints (and with them primary keys) are only copied with
+                // INCLUDING options; NOT NULL always is
+                col.is_primary_key = false;
+                table.columns.insert(col_name.clone(), col);
+            }
+        } else if let Some(view) = self.catalog.get_view(&source) {
+            for col_name in &view.columns {
+                table
+                    .columns
+                    .insert(col_name.clone(), ColumnDef::new(col_name, SqlType::Unknown));
+            }
+        } else {
+            let name = table.name.clone();
+            self.warn_like_source_missing(&name, &source);
+        }
+    }
+
+    fn warn_like_source_missing(&mut self, table: &QualifiedName, source: &QualifiedName) {
+        self.diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticKind::TableNotFound,
+                format!(
+                    "CREATE TABLE '{}' copies table '{}' (LIKE) which was not found in schema",
+                    table, source
+                ),
+            )
+            .with_help("Ensure the referenced table is created before the LIKE"),
+        );
+    }
+
     /// Process CREATE VIEW statement
     fn process_create_view(
         &mut self,
-        name: &ObjectName,
+        qualified: QualifiedName,
         columns: &[sqlparser::ast::ViewColumnDef],
-        query: &sqlparser::ast::Query,
+        query: &Query,
         materialized: bool,
     ) {
-        let qualified = self.catalog.qualified_name(name);
-
-        // Determine column names: explicit column list or inferred from SELECT
+        // Determine column names: explicit column list or inferred from SELECT.
+        // An empty list means the columns could not be determined.
         let column_names = if !columns.is_empty() {
             columns.iter().map(|c| c.name.value.clone()).collect()
         } else {
-            self.infer_view_columns(&query.body)
+            self.infer_query_columns(query, &Vec::new())
+                .unwrap_or_default()
         };
 
         let view = ViewDef {
@@ -183,71 +729,189 @@ impl SchemaBuilder {
         self.catalog.add_view(view);
     }
 
-    /// Infer column names from a SELECT body for VIEW definition
-    fn infer_view_columns(&self, set_expr: &sqlparser::ast::SetExpr) -> Vec<String> {
-        use sqlparser::ast::{Expr, SelectItem, SetExpr};
-
-        let mut columns = Vec::new();
-
-        if let SetExpr::Select(select) = set_expr {
-            for item in &select.projection {
-                match item {
-                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                        columns.push(ident.value.clone());
-                    }
-                    SelectItem::ExprWithAlias { alias, .. } => {
-                        columns.push(alias.value.clone());
-                    }
-                    SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) => {
-                        if let Some(col) = idents.last() {
-                            columns.push(col.value.clone());
-                        }
-                    }
-                    SelectItem::Wildcard(_) => {
-                        // Expand * by looking up FROM tables in the catalog
-                        for table_with_joins in &select.from {
-                            self.expand_wildcard_columns(&table_with_joins.relation, &mut columns);
-                        }
-                    }
-                    SelectItem::QualifiedWildcard(name, _) => {
-                        // table.* - try to expand from the specified table
-                        let table_name = self.catalog.qualified_name(name);
-                        if let Some(table_def) = self.catalog.get_table(&table_name) {
-                            for col_name in table_def.columns.keys() {
-                                columns.push(col_name.clone());
-                            }
-                        }
-                    }
-                    _ => {
-                        // Other expressions without alias - generate placeholder
-                        columns.push(format!("?column?{}", columns.len() + 1));
-                    }
-                }
+    /// Infer the output column names of a query (for views and CREATE TABLE AS).
+    ///
+    /// Returns `None` when the columns can't be determined (e.g. `SELECT *` over a
+    /// table function or an unknown table).
+    fn infer_query_columns(&self, query: &Query, ctes: &CteColumns) -> Option<Vec<String>> {
+        let mut scope = ctes.clone();
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                let columns = if cte.alias.columns.is_empty() {
+                    self.infer_query_columns(&cte.query, &scope)
+                } else {
+                    Some(
+                        cte.alias
+                            .columns
+                            .iter()
+                            .map(|c| c.name.value.clone())
+                            .collect(),
+                    )
+                };
+                scope.push((cte.alias.name.value.clone(), columns));
             }
         }
-
-        columns
+        self.infer_set_expr_columns(&query.body, &scope)
     }
 
-    /// Expand wildcard columns from a table factor
-    fn expand_wildcard_columns(
-        &self,
-        factor: &sqlparser::ast::TableFactor,
-        columns: &mut Vec<String>,
-    ) {
-        use sqlparser::ast::TableFactor;
-        if let TableFactor::Table { name, .. } = factor {
-            let table_name = self.catalog.qualified_name(name);
-            if let Some(table_def) = self.catalog.get_table(&table_name) {
-                for col_name in table_def.columns.keys() {
-                    columns.push(col_name.clone());
+    fn infer_set_expr_columns(&self, body: &SetExpr, ctes: &CteColumns) -> Option<Vec<String>> {
+        match body {
+            SetExpr::Select(select) => self.infer_select_columns(select, ctes),
+            SetExpr::Query(query) => self.infer_query_columns(query, ctes),
+            // UNION / INTERSECT / EXCEPT take their column names from the left branch
+            SetExpr::SetOperation { left, .. } => self.infer_set_expr_columns(left, ctes),
+            SetExpr::Values(values) => {
+                let width = values.rows.first()?.len();
+                Some((1..=width).map(|i| format!("column{i}")).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn infer_select_columns(&self, select: &Select, ctes: &CteColumns) -> Option<Vec<String>> {
+        let mut relations = Vec::new();
+        for from in &select.from {
+            self.collect_from_relations(from, ctes, &mut relations);
+        }
+
+        let mut columns: Vec<String> = Vec::new();
+        for item in &select.projection {
+            match item {
+                SelectItem::UnnamedExpr(expr) => {
+                    columns.push(implicit_column_name(expr).unwrap_or_else(|| "?column?".into()));
                 }
-            } else if let Some(view_def) = self.catalog.get_view(&table_name) {
-                for col_name in &view_def.columns {
-                    columns.push(col_name.clone());
+                SelectItem::ExprWithAlias { alias, .. } => columns.push(alias.value.clone()),
+                SelectItem::Wildcard(_) => {
+                    if relations.is_empty() {
+                        return None;
+                    }
+                    for relation in &relations {
+                        let relation_columns = relation.columns.as_ref()?;
+                        columns.extend(
+                            relation_columns
+                                .iter()
+                                .filter(|c| !relation.merged.contains(&c.to_lowercase()))
+                                .cloned(),
+                        );
+                    }
+                }
+                SelectItem::QualifiedWildcard(name, _) => {
+                    let qualifier = name.0.last()?;
+                    let relation = relations
+                        .iter()
+                        .rev()
+                        .find(|r| r.name.eq_ignore_ascii_case(&qualifier.value))?;
+                    columns.extend(relation.columns.clone()?);
                 }
             }
         }
+
+        Some(columns)
+    }
+
+    fn collect_from_relations(
+        &self,
+        from: &TableWithJoins,
+        ctes: &CteColumns,
+        relations: &mut Vec<FromRelation>,
+    ) {
+        let start = relations.len();
+        self.collect_factor_relations(&from.relation, ctes, relations);
+        for join in &from.joins {
+            let right = relations.len();
+            self.collect_factor_relations(&join.relation, ctes, relations);
+            let merged: Vec<String> = match join_constraint(&join.join_operator) {
+                Some(JoinConstraint::Using(columns)) => {
+                    columns.iter().map(|c| c.value.to_lowercase()).collect()
+                }
+                Some(JoinConstraint::Natural) => relations[start..right]
+                    .iter()
+                    .filter_map(|r| r.columns.as_ref())
+                    .flatten()
+                    .map(|c| c.to_lowercase())
+                    .collect(),
+                _ => continue,
+            };
+            for relation in &mut relations[right..] {
+                relation.merged.extend(merged.iter().cloned());
+            }
+        }
+    }
+
+    fn collect_factor_relations(
+        &self,
+        factor: &TableFactor,
+        ctes: &CteColumns,
+        relations: &mut Vec<FromRelation>,
+    ) {
+        match factor {
+            TableFactor::Table {
+                name, alias, args, ..
+            } => {
+                let columns = if args.is_some() {
+                    None // table-valued function
+                } else {
+                    self.relation_columns(name, ctes)
+                };
+                let default_name = name.0.last().map(|i| i.value.clone()).unwrap_or_default();
+                relations.push(aliased_relation(default_name, columns, alias.as_ref()));
+            }
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
+                let columns = self.infer_query_columns(subquery, ctes);
+                relations.push(aliased_relation(String::new(), columns, alias.as_ref()));
+            }
+            TableFactor::NestedJoin {
+                table_with_joins,
+                alias: None,
+            } => self.collect_from_relations(table_with_joins, ctes, relations),
+            TableFactor::NestedJoin {
+                table_with_joins,
+                alias: Some(alias),
+            } => {
+                let mut inner = Vec::new();
+                self.collect_from_relations(table_with_joins, ctes, &mut inner);
+                let columns = inner
+                    .into_iter()
+                    .map(|r| r.columns)
+                    .collect::<Option<Vec<_>>>()
+                    .map(|cols| cols.concat());
+                relations.push(aliased_relation(String::new(), columns, Some(alias)));
+            }
+            other => {
+                // Table functions, UNNEST, ... : columns unknown
+                let alias = match other {
+                    TableFactor::TableFunction { alias, .. }
+                    | TableFactor::Function { alias, .. }
+                    | TableFactor::UNNEST { alias, .. } => alias.as_ref(),
+                    _ => None,
+                };
+                relations.push(aliased_relation(String::new(), None, alias));
+            }
+        }
+    }
+
+    /// Columns of a table, view or CTE referenced by name in FROM
+    fn relation_columns(&self, name: &ObjectName, ctes: &CteColumns) -> Option<Vec<String>> {
+        if let [ident] = name.0.as_slice() {
+            if let Some((_, columns)) = ctes
+                .iter()
+                .rev()
+                .find(|(cte, _)| cte.eq_ignore_ascii_case(&ident.value))
+            {
+                return columns.clone();
+            }
+        }
+        let qualified = self.catalog.qualified_name(name);
+        if let Some(table) = self.catalog.get_table(&qualified) {
+            return Some(table.columns.keys().cloned().collect());
+        }
+        // An empty view column list means "unknown"
+        self.catalog
+            .get_view(&qualified)
+            .map(|v| v.columns.clone())
+            .filter(|c| !c.is_empty())
     }
 
     /// Process ALTER TABLE statement
@@ -263,6 +927,9 @@ impl SchemaBuilder {
                     | AlterTableOperation::RenameColumn { .. }
                     | AlterTableOperation::RenameTable { .. }
                     | AlterTableOperation::AddConstraint(_)
+                    | AlterTableOperation::AlterColumn { .. }
+                    | AlterTableOperation::ChangeColumn { .. }
+                    | AlterTableOperation::ModifyColumn { .. }
             )
         });
 
@@ -290,61 +957,23 @@ impl SchemaBuilder {
         for operation in operations {
             match operation {
                 AlterTableOperation::AddColumn { column_def, .. } => {
-                    let col_name = column_def.name.value.clone();
-                    let data_type = SqlType::from_ast(&column_def.data_type);
-                    let mut col = ColumnDef::new(&col_name, data_type);
-
-                    // Process column options
-                    // We need a temporary mutable table reference for check constraints
-                    // Process non-table options first
-                    for option in &column_def.options {
-                        match &option.option {
-                            ColumnOption::Null => col.nullable = true,
-                            ColumnOption::NotNull => col.nullable = false,
-                            ColumnOption::Default(expr) => {
-                                col.default = Some(expr_to_default(expr));
-                            }
-                            ColumnOption::Unique { is_primary, .. } => {
-                                if *is_primary {
-                                    col.is_primary_key = true;
-                                    col.nullable = false;
-                                }
-                            }
-                            ColumnOption::Generated {
-                                generated_as,
-                                generation_expr: None,
-                                ..
-                            } => {
-                                use sqlparser::ast::GeneratedAs;
-                                let kind = match generated_as {
-                                    GeneratedAs::Always => IdentityKind::Always,
-                                    GeneratedAs::ByDefault => IdentityKind::ByDefault,
-                                    _ => continue,
-                                };
-                                col.identity = Some(kind);
-                                col.nullable = false;
-                            }
-                            _ => {}
-                        }
-                    }
-
+                    let (col, constraints) = build_column(
+                        &self.catalog,
+                        &table_name.name,
+                        &column_def.name.value,
+                        &column_def.data_type,
+                        &column_def.options,
+                    );
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        // Collect check constraints from column options
-                        for option in &column_def.options {
-                            if let ColumnOption::Check(expr) = &option.option {
-                                let check = CheckConstraintDef {
-                                    name: option.name.as_ref().map(|n| n.value.clone()),
-                                    expression: expr.to_string(),
-                                };
-                                table.check_constraints.push(check);
-                            }
-                        }
-                        table.columns.insert(col_name, col);
+                        merge_constraints(table, constraints);
+                        table.columns.insert(col.name.clone(), col);
                     }
                 }
                 AlterTableOperation::DropColumn { column_name, .. } => {
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        table.columns.shift_remove(&column_name.value);
+                        if let Some(index) = column_index(table, &column_name.value) {
+                            table.columns.shift_remove_index(index);
+                        }
                     }
                 }
                 AlterTableOperation::RenameColumn {
@@ -352,9 +981,57 @@ impl SchemaBuilder {
                     new_column_name,
                 } => {
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        if let Some(mut col) = table.columns.shift_remove(&old_column_name.value) {
+                        if let Some(index) = column_index(table, &old_column_name.value) {
+                            let mut col = table.columns[index].clone();
                             col.name = new_column_name.value.clone();
-                            table.columns.insert(new_column_name.value.clone(), col);
+                            replace_column(table, index, col);
+                        }
+                    }
+                }
+                AlterTableOperation::AlterColumn { column_name, op } => {
+                    if let Some(col) = self.catalog.get_table_mut(&table_name).and_then(|t| {
+                        column_index(t, &column_name.value).map(|i| &mut t.columns[i])
+                    }) {
+                        apply_alter_column(col, op);
+                    }
+                }
+                AlterTableOperation::ModifyColumn {
+                    col_name,
+                    data_type,
+                    options,
+                    ..
+                }
+                | AlterTableOperation::ChangeColumn {
+                    old_name: col_name,
+                    data_type,
+                    options,
+                    ..
+                } => {
+                    let new_name = match operation {
+                        AlterTableOperation::ChangeColumn { new_name, .. } => new_name,
+                        _ => col_name,
+                    };
+                    let options: Vec<ColumnOptionDef> = options
+                        .iter()
+                        .map(|option| ColumnOptionDef {
+                            name: None,
+                            option: option.clone(),
+                        })
+                        .collect();
+                    let (col, constraints) = build_column(
+                        &self.catalog,
+                        &table_name.name,
+                        &new_name.value,
+                        data_type,
+                        &options,
+                    );
+                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
+                        merge_constraints(table, constraints);
+                        match column_index(table, &col_name.value) {
+                            Some(index) => replace_column(table, index, col),
+                            None => {
+                                table.columns.insert(col.name.clone(), col);
+                            }
                         }
                     }
                 }
@@ -375,64 +1052,19 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::AddConstraint(constraint) => {
-                    let references_table = match constraint {
-                        TableConstraint::ForeignKey { foreign_table, .. } => {
-                            Some(self.catalog.qualified_name(foreign_table))
-                        }
-                        _ => None,
-                    };
+                    let mut constraints = TableDef::new(table_name.clone());
+                    self.process_table_constraint(&mut constraints, constraint);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        // Reuse the same constraint processing logic
-                        match constraint {
-                            TableConstraint::PrimaryKey { columns, name, .. } => {
-                                let pk = crate::schema::PrimaryKeyDef {
-                                    name: name.as_ref().map(|n| n.value.clone()),
-                                    columns: columns.iter().map(|c| c.value.clone()).collect(),
-                                };
-                                for col_name in &pk.columns {
-                                    if let Some(col) = table.columns.get_mut(col_name) {
-                                        col.is_primary_key = true;
-                                        col.nullable = false;
-                                    }
+                        if let Some(pk) = &constraints.primary_key {
+                            for col_name in &pk.columns {
+                                if let Some(index) = column_index(table, col_name) {
+                                    let col = &mut table.columns[index];
+                                    col.is_primary_key = true;
+                                    col.nullable = false;
                                 }
-                                table.primary_key = Some(pk);
                             }
-                            TableConstraint::ForeignKey {
-                                columns,
-                                foreign_table,
-                                referred_columns,
-                                name,
-                                ..
-                            } => {
-                                let fk = crate::schema::ForeignKeyDef {
-                                    name: name.as_ref().map(|n| n.value.clone()),
-                                    columns: columns.iter().map(|c| c.value.clone()).collect(),
-                                    references_table: references_table.clone().unwrap_or_else(
-                                        || QualifiedName::new(foreign_table.to_string()),
-                                    ),
-                                    references_columns: referred_columns
-                                        .iter()
-                                        .map(|c| c.value.clone())
-                                        .collect(),
-                                };
-                                table.foreign_keys.push(fk);
-                            }
-                            TableConstraint::Unique { columns, name, .. } => {
-                                let unique = UniqueConstraintDef {
-                                    name: name.as_ref().map(|n| n.value.clone()),
-                                    columns: columns.iter().map(|c| c.value.clone()).collect(),
-                                };
-                                table.unique_constraints.push(unique);
-                            }
-                            TableConstraint::Check { name, expr, .. } => {
-                                let check = CheckConstraintDef {
-                                    name: name.as_ref().map(|n| n.value.clone()),
-                                    expression: expr.to_string(),
-                                };
-                                table.check_constraints.push(check);
-                            }
-                            _ => {}
                         }
+                        merge_constraints(table, constraints);
                     }
                 }
                 _ => {
@@ -469,65 +1101,6 @@ impl SchemaBuilder {
         }
     }
 
-    /// Process a column option (NOT NULL, DEFAULT, PRIMARY KEY, etc.)
-    fn process_column_option(
-        &mut self,
-        col: &mut ColumnDef,
-        table: &mut TableDef,
-        option: &ColumnOptionDef,
-    ) {
-        match &option.option {
-            ColumnOption::Null => {
-                col.nullable = true;
-            }
-            ColumnOption::NotNull => {
-                col.nullable = false;
-            }
-            ColumnOption::Default(expr) => {
-                col.default = Some(expr_to_default(expr));
-            }
-            ColumnOption::Unique { is_primary, .. } => {
-                if *is_primary {
-                    col.is_primary_key = true;
-                    col.nullable = false;
-                }
-            }
-            ColumnOption::Check(expr) => {
-                let check = CheckConstraintDef {
-                    name: option.name.as_ref().map(|n| n.value.clone()),
-                    expression: expr.to_string(),
-                };
-                table.check_constraints.push(check);
-            }
-            ColumnOption::Generated {
-                generated_as,
-                generation_expr,
-                ..
-            } => {
-                // IDENTITY columns (no generation expression = IDENTITY, not computed)
-                if generation_expr.is_none() {
-                    use sqlparser::ast::GeneratedAs;
-                    let kind = match generated_as {
-                        GeneratedAs::Always => IdentityKind::Always,
-                        GeneratedAs::ByDefault => IdentityKind::ByDefault,
-                        _ => return,
-                    };
-                    col.identity = Some(kind);
-                    col.nullable = false; // IDENTITY columns are implicitly NOT NULL
-                }
-            }
-            // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
-            ColumnOption::DialectSpecific(tokens)
-                if tokens.iter().any(|t| {
-                    matches!(t, Token::Word(w) if w.value == "AUTO_INCREMENT" || w.value == "AUTOINCREMENT")
-                }) =>
-            {
-                col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
-            }
-            _ => {}
-        }
-    }
-
     /// Process a table constraint (PRIMARY KEY, FOREIGN KEY, UNIQUE)
     fn process_table_constraint(&mut self, table: &mut TableDef, constraint: &TableConstraint) {
         match constraint {
@@ -538,7 +1111,8 @@ impl SchemaBuilder {
                 };
                 // Mark columns as primary key
                 for col_name in &pk.columns {
-                    if let Some(col) = table.columns.get_mut(col_name) {
+                    if let Some(index) = column_index(table, col_name) {
+                        let col = &mut table.columns[index];
                         col.is_primary_key = true;
                         col.nullable = false;
                     }
@@ -596,6 +1170,372 @@ impl Default for SchemaBuilder {
     }
 }
 
+/// Build a column definition from its name, type and options. Table-level
+/// constraints declared inline (PRIMARY KEY, UNIQUE, REFERENCES, CHECK) are
+/// collected into the returned `TableDef`, to be merged into the owning table.
+fn build_column(
+    catalog: &Catalog,
+    table_name: &str,
+    col_name: &str,
+    data_type: &DataType,
+    options: &[ColumnOptionDef],
+) -> (ColumnDef, TableDef) {
+    let mut col = ColumnDef::new(col_name, SqlType::from_ast(data_type));
+    let mut constraints = TableDef::new(QualifiedName::new(table_name));
+
+    for option in options {
+        let constraint_name = option.name.as_ref().map(|n| n.value.clone());
+        match &option.option {
+            ColumnOption::Null => col.nullable = true,
+            ColumnOption::NotNull => col.nullable = false,
+            ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
+            ColumnOption::Unique { is_primary, .. } => {
+                if *is_primary {
+                    col.is_primary_key = true;
+                    col.nullable = false;
+                    constraints.primary_key = Some(PrimaryKeyDef {
+                        name: constraint_name,
+                        columns: vec![col_name.to_string()],
+                    });
+                } else {
+                    constraints.unique_constraints.push(UniqueConstraintDef {
+                        name: constraint_name,
+                        columns: vec![col_name.to_string()],
+                    });
+                }
+            }
+            ColumnOption::ForeignKey {
+                foreign_table,
+                referred_columns,
+                ..
+            } => {
+                constraints.foreign_keys.push(ForeignKeyDef {
+                    name: constraint_name,
+                    columns: vec![col_name.to_string()],
+                    references_table: catalog.qualified_name(foreign_table),
+                    references_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                });
+            }
+            ColumnOption::Check(expr) => {
+                constraints.check_constraints.push(CheckConstraintDef {
+                    name: constraint_name,
+                    expression: expr.to_string(),
+                });
+            }
+            ColumnOption::Generated {
+                generated_as,
+                generation_expr: None,
+                ..
+            } => {
+                // IDENTITY columns (no generation expression = IDENTITY, not computed)
+                use sqlparser::ast::GeneratedAs;
+                let kind = match generated_as {
+                    GeneratedAs::Always => IdentityKind::Always,
+                    GeneratedAs::ByDefault => IdentityKind::ByDefault,
+                    _ => continue,
+                };
+                col.identity = Some(kind);
+                col.nullable = false; // IDENTITY columns are implicitly NOT NULL
+            }
+            // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
+            ColumnOption::DialectSpecific(tokens)
+                if tokens.iter().any(|t| {
+                    matches!(t, Token::Word(w) if w.value.eq_ignore_ascii_case("AUTO_INCREMENT") || w.value.eq_ignore_ascii_case("AUTOINCREMENT"))
+                }) =>
+            {
+                col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
+            }
+            _ => {}
+        }
+    }
+
+    // serial / bigserial / smallserial: NOT NULL with a sequence default
+    if is_serial_type(data_type) {
+        col.nullable = false;
+        if col.default.is_none() {
+            col.default = Some(DefaultValue::NextVal(format!(
+                "nextval('{table_name}_{col_name}_seq'::regclass)"
+            )));
+        }
+    }
+
+    (col, constraints)
+}
+
+/// Whether a data type is one of PostgreSQL's serial pseudo-types
+fn is_serial_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Custom(name, modifiers) if modifiers.is_empty() => {
+            matches!(
+                name.0.last().map(|i| i.value.to_lowercase()).as_deref(),
+                Some("serial" | "serial2" | "serial4" | "serial8" | "smallserial" | "bigserial")
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Add the constraints collected in `constraints` to `table`
+fn merge_constraints(table: &mut TableDef, constraints: TableDef) {
+    if constraints.primary_key.is_some() {
+        table.primary_key = constraints.primary_key;
+    }
+    table.foreign_keys.extend(constraints.foreign_keys);
+    table
+        .unique_constraints
+        .extend(constraints.unique_constraints);
+    table
+        .check_constraints
+        .extend(constraints.check_constraints);
+}
+
+/// Apply an `ALTER TABLE ... ALTER COLUMN` operation to a column
+fn apply_alter_column(col: &mut ColumnDef, op: &AlterColumnOperation) {
+    match op {
+        AlterColumnOperation::SetNotNull => col.nullable = false,
+        AlterColumnOperation::DropNotNull => col.nullable = true,
+        AlterColumnOperation::SetDefault { value } => col.default = Some(expr_to_default(value)),
+        AlterColumnOperation::DropDefault => col.default = None,
+        AlterColumnOperation::SetDataType { data_type, .. } => {
+            col.data_type = SqlType::from_ast(data_type);
+        }
+        AlterColumnOperation::AddGenerated { generated_as, .. } => {
+            use sqlparser::ast::GeneratedAs;
+            col.identity = Some(match generated_as {
+                Some(GeneratedAs::Always) => IdentityKind::Always,
+                _ => IdentityKind::ByDefault,
+            });
+            col.nullable = false;
+        }
+    }
+}
+
+/// Index of a column by name: exact match first, then ignoring case
+fn column_index(table: &TableDef, name: &str) -> Option<usize> {
+    table.columns.get_index_of(name).or_else(|| {
+        table
+            .columns
+            .keys()
+            .position(|k| k.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Replace the column at `index` with `col` (which may have a new name), keeping
+/// its position and updating constraints that reference a renamed column
+fn replace_column(table: &mut TableDef, index: usize, col: ColumnDef) {
+    let Some((old_name, _)) = table.columns.shift_remove_index(index) else {
+        return;
+    };
+    let new_name = col.name.clone();
+    table.columns.shift_insert(index, new_name.clone(), col);
+    if old_name == new_name {
+        return;
+    }
+    let rename = |columns: &mut Vec<String>| {
+        for c in columns.iter_mut() {
+            if *c == old_name {
+                *c = new_name.clone();
+            }
+        }
+    };
+    if let Some(pk) = &mut table.primary_key {
+        rename(&mut pk.columns);
+    }
+    for fk in &mut table.foreign_keys {
+        rename(&mut fk.columns);
+    }
+    for unique in &mut table.unique_constraints {
+        rename(&mut unique.columns);
+    }
+}
+
+/// If `column` is the pseudo-column sqlparser produces for `LIKE p` inside a
+/// CREATE TABLE column list, return the source table name
+fn like_pseudo_column(column: &sqlparser::ast::ColumnDef) -> Option<&ObjectName> {
+    if column.name.quote_style.is_some()
+        || !column.name.value.eq_ignore_ascii_case("LIKE")
+        || !column.options.is_empty()
+    {
+        return None;
+    }
+    match &column.data_type {
+        DataType::Custom(name, modifiers) if modifiers.is_empty() => Some(name),
+        _ => None,
+    }
+}
+
+/// Build a FROM relation, applying a table alias (and its column aliases, which
+/// rename the leading columns)
+fn aliased_relation(
+    default_name: String,
+    columns: Option<Vec<String>>,
+    alias: Option<&TableAlias>,
+) -> FromRelation {
+    let Some(alias) = alias else {
+        return FromRelation {
+            name: default_name,
+            columns,
+            merged: Vec::new(),
+        };
+    };
+    let renamed: Vec<String> = alias.columns.iter().map(|c| c.name.value.clone()).collect();
+    let columns = match columns {
+        Some(mut cols) => {
+            for (col, new_name) in cols.iter_mut().zip(&renamed) {
+                *col = new_name.clone();
+            }
+            if renamed.len() > cols.len() {
+                cols.extend(renamed[cols.len()..].iter().cloned());
+            }
+            Some(cols)
+        }
+        None if !renamed.is_empty() => Some(renamed),
+        None => None,
+    };
+    FromRelation {
+        name: alias.name.value.clone(),
+        columns,
+        merged: Vec::new(),
+    }
+}
+
+/// The join constraint (ON / USING / NATURAL) of a join, if it has one
+fn join_constraint(op: &JoinOperator) -> Option<&JoinConstraint> {
+    match op {
+        JoinOperator::Inner(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c) => Some(c),
+        JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        _ => None,
+    }
+}
+
+/// Name PostgreSQL gives an unaliased SELECT expression (`count(*)` -> `count`,
+/// `t.col` -> `col`, `col::int` -> `col`), or `None` for `?column?`
+fn implicit_column_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
+        Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
+        Expr::Case { .. } => Some("case".to_string()),
+        _ => None,
+    }
+}
+
+/// Number of tokens forming the (possibly qualified) object name `a.b.c` at the
+/// start of `tokens`
+fn object_name_len(tokens: &[&Token]) -> usize {
+    let mut len = 0;
+    while matches!(tokens.get(len), Some(Token::Word(_))) {
+        len += 1;
+        if matches!(tokens.get(len), Some(Token::Period))
+            && matches!(tokens.get(len + 1), Some(Token::Word(_)))
+        {
+            len += 1;
+        } else {
+            break;
+        }
+    }
+    len
+}
+
+/// Split a token sequence like `a.b, "C", d` into object names, stopping at the
+/// first token that isn't part of the list
+fn split_object_names(tokens: &[&Token]) -> Vec<ObjectName> {
+    let mut names = Vec::new();
+    let mut rest = tokens;
+    loop {
+        let len = object_name_len(rest);
+        if len == 0 {
+            break;
+        }
+        let parts = rest[..len]
+            .iter()
+            .filter_map(|t| match t {
+                Token::Word(w) => Some(match w.quote_style {
+                    Some(q) => Ident::with_quote(q, w.value.clone()),
+                    None => Ident::new(w.value.clone()),
+                }),
+                _ => None,
+            })
+            .collect();
+        names.push(ObjectName(parts));
+        match rest.get(len) {
+            Some(Token::Comma) => rest = &rest[len + 1..],
+            _ => break,
+        }
+    }
+    names
+}
+
+/// 1-indexed (line, column in characters) of a byte offset in `text`
+fn line_column_at(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    (line, before[line_start..].chars().count() + 1)
+}
+
+/// Convert a (line, column) relative to a statement starting at `base` into a
+/// location in the whole input
+fn absolute_location(base: (usize, usize), line: usize, column: usize) -> (usize, usize) {
+    if line <= 1 {
+        (base.0, base.1 + column.saturating_sub(1))
+    } else {
+        (base.0 + line - 1, column)
+    }
+}
+
+/// Byte offset in `text` of a 1-indexed (line, column in characters)
+fn byte_offset_of(text: &str, line: usize, column: usize) -> Option<usize> {
+    let mut offset = 0;
+    for (i, l) in text.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            let in_line = l
+                .char_indices()
+                .nth(column.saturating_sub(1))
+                .map(|(b, _)| b)
+                .unwrap_or(l.len());
+            return Some(offset + in_line);
+        }
+        offset += l.len();
+    }
+    None
+}
+
+/// Rewrite the `at Line: X, Column: Y` suffix of a parser error message (relative
+/// to the statement) into a location in the whole input
+fn relocate_parser_message(message: &str, base: (usize, usize)) -> String {
+    let message = message
+        .strip_prefix("sql parser error: ")
+        .unwrap_or(message);
+    let Some(at) = message.rfind(" at Line: ") else {
+        return message.to_string();
+    };
+    let location = &message[at + " at Line: ".len()..];
+    let parsed = location.split_once(", Column: ").and_then(|(l, c)| {
+        Some((
+            l.trim().parse::<usize>().ok()?,
+            c.trim().parse::<usize>().ok()?,
+        ))
+    });
+    match parsed {
+        Some((line, column)) => {
+            let (line, column) = absolute_location(base, line, column);
+            format!("{} at Line: {line}, Column: {column}", &message[..at])
+        }
+        None => message.to_string(),
+    }
+}
+
 /// Convert expression to DefaultValue
 fn expr_to_default(expr: &sqlparser::ast::Expr) -> DefaultValue {
     match expr {
@@ -617,34 +1557,64 @@ fn expr_to_default(expr: &sqlparser::ast::Expr) -> DefaultValue {
     }
 }
 
-/// Split SQL text into individual statements by semicolons,
-/// respecting string literals and dollar-quoted strings.
-fn split_sql_statements(sql: &str) -> Vec<&str> {
+/// Split SQL text into individual statements by semicolons, skipping semicolons
+/// inside string literals, quoted identifiers, dollar-quoted bodies and comments.
+///
+/// Quoting rules follow the dialect: MySQL strings use backslash escapes and
+/// backtick identifiers (as SQLite allows too), PostgreSQL only has backslash
+/// escapes in `E'...'` strings, supports dollar quoting and nests block comments.
+fn split_sql_statements(sql: &str, dialect: SqlDialect) -> Vec<&str> {
+    let mysql = dialect == SqlDialect::MySQL;
+    let postgres = dialect == SqlDialect::PostgreSQL;
+    let backticks = matches!(dialect, SqlDialect::MySQL | SqlDialect::SQLite);
+
     let mut statements = Vec::new();
     let mut start = 0;
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+
+    // Skip a quoted section starting at `i` (the opening quote); a doubled quote
+    // is an escaped quote, and with `backslash` a backslash escapes the next byte
+    let skip_quoted = |mut i: usize, quote: u8, backslash: bool| -> usize {
+        i += 1;
+        while i < len {
+            if backslash && bytes[i] == b'\\' {
+                i += 2;
+            } else if bytes[i] == quote {
+                i += 1;
+                if i < len && bytes[i] == quote {
+                    i += 1; // escaped quote
+                } else {
+                    return i;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        len
+    };
+
     while i < len {
         match bytes[i] {
             b'\'' => {
-                // Skip single-quoted string
-                i += 1;
-                while i < len {
-                    if bytes[i] == b'\'' {
-                        i += 1;
-                        if i < len && bytes[i] == b'\'' {
-                            i += 1; // escaped quote ''
-                        } else {
-                            break;
-                        }
-                    } else {
-                        i += 1;
-                    }
-                }
+                // PostgreSQL E'...' escape strings honor backslash escapes
+                let escape_string = postgres
+                    && i > 0
+                    && matches!(bytes[i - 1], b'E' | b'e')
+                    && (i < 2 || !is_ident_byte(bytes[i - 2]));
+                i = skip_quoted(i, b'\'', mysql || escape_string);
             }
-            b'$' => {
+            b'"' => {
+                // Quoted identifier (a string in MySQL)
+                i = skip_quoted(i, b'"', mysql);
+            }
+            b'`' if backticks => {
+                i = skip_quoted(i, b'`', false);
+            }
+            b'$' if postgres && (i == 0 || !is_ident_byte(bytes[i - 1])) => {
                 // Check for dollar-quoted string ($$...$$ or $tag$...$tag$)
                 if let Some(tag_end) = find_dollar_tag_end(sql, i) {
                     let tag = &sql[i..=tag_end];
@@ -665,15 +1635,26 @@ fn split_sql_statements(sql: &str) -> Vec<&str> {
                     i += 1;
                 }
             }
-            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
-                // Skip block comment
-                i += 2;
-                while i + 1 < len {
-                    if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                        i += 2;
-                        break;
-                    }
+            b'#' if mysql => {
+                // MySQL line comment
+                while i < len && bytes[i] != b'\n' {
                     i += 1;
+                }
+            }
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                // Skip block comment (PostgreSQL block comments nest)
+                i += 2;
+                let mut depth = 1;
+                while i < len && depth > 0 {
+                    if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else if postgres && bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
                 }
             }
             b';' => {
@@ -691,7 +1672,7 @@ fn split_sql_statements(sql: &str) -> Vec<&str> {
     }
 
     // Handle last statement (without trailing semicolon)
-    let last = &sql[start..];
+    let last = &sql[start..len.max(start)];
     if !last.trim().is_empty() {
         statements.push(last);
     }
@@ -709,7 +1690,10 @@ fn find_dollar_tag_end(sql: &str, start: usize) -> Option<usize> {
     if i < len && bytes[i] == b'$' {
         return Some(i); // $$ tag
     }
-    // Look for $identifier$
+    // Look for $identifier$ (tags can't start with a digit: `$1` is a parameter)
+    if i < len && bytes[i].is_ascii_digit() {
+        return None;
+    }
     while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
         i += 1;
     }
@@ -775,16 +1759,53 @@ mod tests {
     #[test]
     fn test_split_sql_statements() {
         let sql = "CREATE TABLE a (id INT); CREATE TABLE b (id INT);";
-        let stmts = split_sql_statements(sql);
+        let stmts = split_sql_statements(sql, SqlDialect::PostgreSQL);
         assert_eq!(stmts.len(), 2);
     }
 
     #[test]
     fn test_split_preserves_string_literals() {
         let sql = "SELECT 'hello; world'; CREATE TABLE t (id INT);";
-        let stmts = split_sql_statements(sql);
+        let stmts = split_sql_statements(sql, SqlDialect::PostgreSQL);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("hello; world"));
+    }
+
+    #[test]
+    fn test_split_quoted_identifiers_and_comments() {
+        let sql = "CREATE TABLE \"a;b\" (x int); -- c;d\nSELECT 1 /* e; /* f; */ g; */; SELECT 2";
+        let stmts = split_sql_statements(sql, SqlDialect::PostgreSQL);
+        assert_eq!(stmts.len(), 3, "{stmts:?}");
+        assert!(stmts[0].contains("\"a;b\""));
+    }
+
+    #[test]
+    fn test_split_backslash_escapes_depend_on_dialect() {
+        // MySQL: backslash escapes the quote
+        let sql = "SELECT 'a\\';b'; SELECT `c;d`; # e;f\nSELECT 3";
+        let stmts = split_sql_statements(sql, SqlDialect::MySQL);
+        assert_eq!(stmts.len(), 3, "{stmts:?}");
+
+        // PostgreSQL: backslash is literal in standard strings, an escape in E''
+        let sql = "SELECT 'a\\'; SELECT E'b\\';c'; SELECT $1, $tag$ x; $tag$";
+        let stmts = split_sql_statements(sql, SqlDialect::PostgreSQL);
+        assert_eq!(stmts.len(), 3, "{stmts:?}");
+        assert!(stmts[1].contains("E'b\\';c'"));
+    }
+
+    #[test]
+    fn test_relocate_parser_message() {
+        assert_eq!(
+            relocate_parser_message(
+                "sql parser error: Expected: x, found: y at Line: 1, Column: 5",
+                (3, 4)
+            ),
+            "Expected: x, found: y at Line: 3, Column: 8"
+        );
+        assert_eq!(
+            relocate_parser_message("Expected: x at Line: 2, Column: 5", (3, 4)),
+            "Expected: x at Line: 4, Column: 5"
+        );
     }
 
     #[test]
