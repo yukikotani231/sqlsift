@@ -324,11 +324,12 @@ fn columns_of_known_tables_are_still_checked_next_to_a_missing_table() {
         SqlDialect::PostgreSQL,
         "SELECT u.naem FROM users u JOIN ordrs o ON o.user_id = u.id",
     );
+    // diagnostics are reported in source order
     assert_eq!(
         kinds(&diagnostics),
         vec![
-            DiagnosticKind::TableNotFound,
-            DiagnosticKind::ColumnNotFound
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::TableNotFound
         ]
     );
 }
@@ -348,4 +349,541 @@ fn table_not_found_suggests_similar_table() {
             "for `{sql}`"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Scoping: set operations, USING / NATURAL joins, LATERAL
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_operation_branches_have_their_own_scope() {
+    for sql in [
+        "SELECT id FROM users UNION SELECT id FROM orders",
+        "SELECT id FROM users UNION ALL SELECT id FROM orders ORDER BY id",
+        "SELECT id, 'u' AS src FROM users UNION SELECT id, 'o' FROM orders ORDER BY src",
+        "SELECT email FROM users EXCEPT SELECT note FROM orders",
+        "SELECT * FROM (SELECT id FROM users INTERSECT SELECT user_id FROM orders) t WHERE t.id > 1",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn set_operation_order_by_unknown_column_is_reported() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users UNION SELECT id FROM orders ORDER BY nope",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn using_and_natural_join_columns_are_not_ambiguous() {
+    for sql in [
+        "SELECT a.id FROM orders a JOIN orders b USING (user_id)",
+        "SELECT user_id, a.total FROM orders a JOIN orders b USING (user_id) ORDER BY user_id",
+        "SELECT id FROM users JOIN orders USING (id) WHERE id > 1",
+        "SELECT id, name FROM users NATURAL JOIN orders",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn using_unknown_column_is_reported() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT 1 FROM users JOIN orders USING (nope)",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn lateral_subquery_prefers_its_own_tables() {
+    for sql in [
+        "SELECT u.name, x.id FROM users u JOIN LATERAL (SELECT id FROM orders WHERE user_id = u.id) x ON true",
+        "SELECT u.name FROM users u, LATERAL (SELECT id, total FROM orders o WHERE o.user_id = u.id LIMIT 1) x",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type checks apply in every query block
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_errors_are_reported_in_nested_query_blocks() {
+    for sql in [
+        "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.total = 'free')",
+        "WITH a AS (SELECT id FROM users WHERE id = 'x') SELECT * FROM a",
+        "SELECT * FROM (SELECT * FROM users WHERE is_admin = 1) t",
+        "SELECT user_id FROM orders GROUP BY user_id HAVING count(*) > 'many'",
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 'x')",
+        "SELECT (SELECT max(total) FROM orders WHERE user_id = 'abc') FROM users",
+        "SELECT id FROM users UNION SELECT id FROM orders WHERE total = 'free'",
+        "INSERT INTO orders (user_id, total) SELECT id, 0 FROM users WHERE id = 'abc'",
+        "SELECT id FROM users WHERE id + 'x' > 1",
+    ] {
+        let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+        assert_eq!(
+            kinds(&diagnostics),
+            vec![DiagnosticKind::TypeMismatch],
+            "for `{sql}`: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn nested_query_blocks_are_typed_with_their_own_tables() {
+    for sql in [
+        // `total` resolves to orders.total (numeric) inside the subquery
+        "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 10)",
+        // inner `id` is orders.id, outer `name` is users.name
+        "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE id = 1 AND name = 'x')",
+        "WITH t AS (SELECT user_id, sum(total) AS s FROM orders GROUP BY user_id) SELECT * FROM t WHERE s > 10",
+        "SELECT id + '1' FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PostgreSQL identifier case rules
+// ---------------------------------------------------------------------------
+
+const QUOTED_SCHEMA: &str = r#"
+    CREATE TABLE "AuditLog" (id SERIAL PRIMARY KEY, "createdAt" TIMESTAMPTZ);
+    CREATE TABLE Accounts (id SERIAL PRIMARY KEY);
+"#;
+
+#[test]
+fn quoted_table_names_are_case_sensitive_in_postgres() {
+    for sql in [
+        r#"SELECT id FROM "AuditLog""#,
+        r#"SELECT a.id FROM "AuditLog" a"#,
+        // unquoted names fold to lowercase on both sides
+        "SELECT id FROM accounts",
+        "SELECT id FROM ACCOUNTS",
+        r#"SELECT id FROM "accounts""#,
+        "WITH Recent AS (SELECT id FROM accounts) SELECT id FROM recent",
+    ] {
+        assert_valid(QUOTED_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    for sql in [
+        "SELECT id FROM auditlog",
+        "SELECT id FROM AuditLog",
+        r#"SELECT id FROM "Accounts""#,
+    ] {
+        let diagnostics = analyze(QUOTED_SCHEMA, SqlDialect::PostgreSQL, sql);
+        assert_eq!(
+            kinds(&diagnostics),
+            vec![DiagnosticKind::TableNotFound],
+            "for `{sql}`"
+        );
+    }
+}
+
+#[test]
+fn table_names_are_case_insensitive_in_mysql_and_sqlite() {
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        let schema = "CREATE TABLE Accounts (id INTEGER PRIMARY KEY);";
+        assert_valid(schema, dialect, "SELECT id FROM accounts");
+        assert_valid(schema, dialect, "SELECT id FROM ACCOUNTS");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Name resolution gaps
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_by_can_reference_select_aliases() {
+    for sql in [
+        "SELECT user_id AS u, count(*) FROM orders GROUP BY u",
+        "SELECT date_trunc('day', created_at) AS d, count(*) FROM users GROUP BY d ORDER BY d",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn default_keyword_is_not_a_column() {
+    for sql in [
+        "INSERT INTO orders (id, user_id, total) VALUES (DEFAULT, 1, 2)",
+        "UPDATE users SET updated_at = DEFAULT WHERE id = 1",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn whole_row_references_are_allowed() {
+    for sql in [
+        "SELECT json_agg(u) FROM users u",
+        "SELECT to_jsonb(o) FROM orders o WHERE o.id = 1",
+        "SELECT row_to_json(users) FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn table_functions_without_alias_are_allowed() {
+    for sql in [
+        "SELECT * FROM generate_series(1, 10)",
+        "SELECT generate_series FROM generate_series(1, 10)",
+        "SELECT key, value FROM users, jsonb_each(metadata)",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    assert_valid(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "SELECT value FROM json_each('[1, 2]')",
+    );
+}
+
+#[test]
+fn system_columns_and_tables_are_known() {
+    for sql in [
+        "DELETE FROM orders WHERE ctid IN (SELECT ctid FROM orders LIMIT 10)",
+        "SELECT xmin, id FROM users",
+        "SELECT tableoid::regclass, id FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    for sql in [
+        "SELECT rowid, name FROM users",
+        "SELECT oid, _rowid_ FROM users",
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+        "SELECT name FROM sqlite_schema",
+    ] {
+        assert_valid(SQLITE_SCHEMA, SqlDialect::SQLite, sql);
+    }
+}
+
+const MYSQL_SHOP: &str = r#"
+    CREATE TABLE customers (id INT PRIMARY KEY, balance DECIMAL(10,2), created_at DATETIME);
+    CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total DECIMAL(10,2), placed_at DATETIME);
+"#;
+
+#[test]
+fn mysql_multi_table_update_and_delete() {
+    for sql in [
+        "UPDATE orders o JOIN customers c ON c.id = o.customer_id SET c.balance = c.balance - o.total WHERE o.id = 1",
+        "DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.id = 1",
+        "DELETE FROM o USING orders o JOIN customers c ON c.id = o.customer_id WHERE c.id = 1",
+    ] {
+        assert_valid(MYSQL_SHOP, SqlDialect::MySQL, sql);
+    }
+    let diagnostics = analyze(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "UPDATE orders o JOIN customers c ON c.id = o.customer_id SET c.balanse = 0",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn mysql_keywords_and_variables_are_not_columns() {
+    for sql in [
+        "SELECT TIMESTAMPDIFF(DAY, placed_at, NOW()) FROM orders",
+        "SELECT id FROM orders WHERE customer_id = @uid",
+        "SELECT DATE_ADD(placed_at, INTERVAL 1 DAY) FROM orders",
+    ] {
+        assert_valid(MYSQL_SHOP, SqlDialect::MySQL, sql);
+    }
+}
+
+#[test]
+fn insert_into_view_is_allowed() {
+    let schema = format!("{PG_SCHEMA} CREATE VIEW active_users AS SELECT id, name FROM users;");
+    assert_valid(
+        &schema,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO active_users (name) VALUES ('a')",
+    );
+}
+
+#[test]
+fn ambiguity_message_and_suggestions_are_deterministic() {
+    let first = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users, orders",
+    );
+    for _ in 0..20 {
+        let again = analyze(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            "SELECT id FROM users, orders",
+        );
+        assert_eq!(first[0].message, again[0].message);
+        assert_eq!(first[0].help, again[0].help);
+    }
+    assert_eq!(
+        first[0].message,
+        "Column 'id' is ambiguous (found in tables: users, orders)"
+    );
+}
+
+#[test]
+fn suggestions_require_real_similarity() {
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, "SELECT zz FROM users");
+    assert_eq!(diagnostics[0].help, None, "{diagnostics:#?}");
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, "SELECT emial FROM users");
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("Did you mean 'email'?")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Missed errors: RETURNING, ON CONFLICT, other clauses
+// ---------------------------------------------------------------------------
+
+fn assert_single(schema: &str, dialect: SqlDialect, sql: &str, kind: DiagnosticKind) {
+    let diagnostics = analyze(schema, dialect, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![kind],
+        "for `{sql}`: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn returning_columns_are_checked() {
+    for sql in [
+        "INSERT INTO users (name) VALUES ('a') RETURNING nope",
+        "UPDATE users SET name = 'x' WHERE id = 1 RETURNING nope",
+        "DELETE FROM orders WHERE id = 1 RETURNING nope",
+        "INSERT INTO orders AS o (user_id, total) VALUES (1, 2) RETURNING o.nope",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnNotFound,
+        );
+    }
+    for sql in [
+        "INSERT INTO users (name) VALUES ('a') RETURNING id, users.name, *",
+        "UPDATE orders o SET total = 0 FROM users u WHERE u.id = o.user_id RETURNING o.id, u.name",
+        "DELETE FROM orders WHERE id = 1 RETURNING id, total * 2 AS doubled",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn on_conflict_and_on_duplicate_key_are_checked() {
+    for sql in [
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (nope) DO NOTHING",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET nope = 1",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.nope",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = 'b' WHERE users.nope > 1",
+    ] {
+        assert_single(PG_SCHEMA, SqlDialect::PostgreSQL, sql, DiagnosticKind::ColumnNotFound);
+    }
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (1, 1, 2) ON CONFLICT (id) DO UPDATE SET total = 'lots'",
+        DiagnosticKind::TypeMismatch,
+    );
+    assert_valid(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (1, 1, 2) ON CONFLICT (id) DO UPDATE SET total = orders.total + EXCLUDED.total WHERE orders.user_id = 1",
+    );
+    assert_single(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "INSERT INTO customers (id, balance) VALUES (1, 2) ON DUPLICATE KEY UPDATE balanse = VALUES(balance)",
+        DiagnosticKind::ColumnNotFound,
+    );
+    assert_valid(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "INSERT INTO customers (id, balance) VALUES (1, 2) ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)",
+    );
+    assert_single(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = excluded.nme",
+        DiagnosticKind::ColumnNotFound,
+    );
+}
+
+#[test]
+fn other_clauses_are_resolved() {
+    for sql in [
+        "SELECT DISTINCT ON (nope) id FROM users",
+        "SELECT id, row_number() OVER w FROM users WINDOW w AS (PARTITION BY nope)",
+        "SELECT array_agg(id ORDER BY nope) FROM users",
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY nope) FROM orders",
+        "SELECT id FROM users LIMIT (SELECT count(nope) FROM orders)",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnNotFound,
+        );
+    }
+}
+
+#[test]
+fn insert_select_column_count_is_checked() {
+    for sql in [
+        "INSERT INTO orders (user_id, total) SELECT id FROM users",
+        "INSERT INTO orders (user_id) SELECT id, 1 FROM users",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnCountMismatch,
+        );
+    }
+    for sql in [
+        "INSERT INTO orders (user_id, total) SELECT id, 0 FROM users",
+        "INSERT INTO orders (user_id, total) SELECT * FROM (SELECT id, 0 FROM users) t",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn insert_values_expressions_are_type_checked() {
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (user_id, total) VALUES (1, 1 + 'x')",
+        DiagnosticKind::TypeMismatch,
+    );
+}
+
+#[test]
+fn using_column_must_exist_on_both_sides() {
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT 1 FROM users JOIN orders USING (email)",
+        DiagnosticKind::ColumnNotFound,
+    );
+}
+
+#[test]
+fn enum_literals_are_checked_against_enum_values() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users WHERE status = 'actve'",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("Did you mean 'active'?")
+    );
+    for sql in [
+        "UPDATE users SET status = 'deleted' WHERE id = 1",
+        "INSERT INTO users (name, status) VALUES ('a', 'pending')",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::TypeMismatch,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spans for literals and parse errors
+// ---------------------------------------------------------------------------
+
+#[test]
+fn literal_type_mismatches_have_locations() {
+    let sql = "SELECT 1;\nUPDATE orders SET placed_on = 5 WHERE id = 1;";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "placed_on");
+
+    let sql = "INSERT INTO orders (user_id, total)\nVALUES (1, 'free');";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "total");
+
+    let sql = "SELECT id FROM users WHERE 'abc' = id";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(span_text(sql, &diagnostics[0]), "id");
+}
+
+#[test]
+fn parse_error_has_location_and_does_not_hide_other_statements() {
+    let sql = "SELECT naem FROM users;\nSELECT id,\n  FROM users WHERE;\nSELECT emial FROM users;";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ParseError,
+            DiagnosticKind::ColumnNotFound
+        ],
+        "{diagnostics:#?}"
+    );
+    let parse_error = &diagnostics[1];
+    let span = parse_error.span.expect("parse error should have a span");
+    assert_eq!(span.line, 3, "{parse_error:#?}");
+    assert!(
+        !parse_error.message.contains("sql parser error")
+            && !parse_error.message.contains("at Line:"),
+        "message should be clean: {}",
+        parse_error.message
+    );
+    // spans of later statements are still absolute
+    assert_eq!(diagnostics[2].span.unwrap().line, 4);
+}
+
+#[test]
+fn parse_error_at_end_of_input_points_at_the_end() {
+    let sql = "SELECT id FROM users WHERE";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ParseError]);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!(span.line, 1);
+    assert!(span.column >= 21, "{span:?}");
+}
+
+#[test]
+fn parse_errors_can_be_suppressed_inline() {
+    let sql = "SELECT id FROM users WHERE; -- sqlsift:disable E1000";
+    assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+}
+
+#[test]
+fn null_into_auto_generated_integer_key() {
+    // MySQL AUTO_INCREMENT / SQLite rowid alias generate the key from NULL
+    assert_valid(
+        "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT);",
+        SqlDialect::MySQL,
+        "INSERT INTO t (id, name) VALUES (NULL, 'a')",
+    );
+    assert_valid(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "INSERT INTO users (id, name) VALUES (NULL, 'a')",
+    );
+    // PostgreSQL rejects NULL for serial / identity columns
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (NULL, 1, 2)",
+        DiagnosticKind::PotentialNullViolation,
+    );
 }
