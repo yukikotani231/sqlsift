@@ -10,7 +10,6 @@
 //! a thin shim around them.
 
 use serde::Serialize;
-use sqlparser::parser::Parser;
 use sqlsift_core::schema::SchemaBuilder;
 use sqlsift_core::{Analyzer, Diagnostic, DiagnosticKind, Severity, SqlDialect};
 use wasm_bindgen::prelude::*;
@@ -96,30 +95,6 @@ pub fn check_report(schema_sql: &str, query_sql: &str, dialect: &str) -> Report 
 
     if let Err(diags) = builder.parse(schema_sql) {
         diagnostics.extend(diags.iter().map(|d| convert(d, Source::Schema)));
-    }
-
-    // SchemaBuilder silently skips statements it cannot parse (resilient
-    // parsing). In a playground that is confusing, so surface the first
-    // syntax error as a warning pointing at its location.
-    if let Err(e) = Parser::parse_sql(dialect.parser_dialect().as_ref(), schema_sql) {
-        let raw = e.to_string();
-        let message = raw.strip_prefix("sql parser error: ").unwrap_or(&raw);
-        let (line, column) = parse_error_location(message).unzip();
-        schema_warnings += 1;
-        diagnostics.push(JsDiagnostic {
-            code: DiagnosticKind::ParseError.code(),
-            name: DiagnosticKind::ParseError.name(),
-            severity: Severity::Warning,
-            message: format!("Schema statement skipped: {message}"),
-            help: Some(
-                "sqlsift skips DDL it cannot parse and keeps the rest of the schema".to_string(),
-            ),
-            source: Source::Schema,
-            line,
-            column,
-            end_line: line,
-            end_column: column.map(|c| c + 1),
-        });
     }
 
     let (catalog, schema_diags) = builder.build();

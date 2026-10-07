@@ -13,7 +13,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sqlsift-core.workspace = true
-sqlparser.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Must match the wasm-bindgen CLI version used by scripts/build-playground.sh
