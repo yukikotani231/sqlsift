@@ -639,3 +639,164 @@ fn suggestions_require_real_similarity() {
         Some("Did you mean 'email'?")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Missed errors: RETURNING, ON CONFLICT, other clauses
+// ---------------------------------------------------------------------------
+
+fn assert_single(schema: &str, dialect: SqlDialect, sql: &str, kind: DiagnosticKind) {
+    let diagnostics = analyze(schema, dialect, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![kind],
+        "for `{sql}`: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn returning_columns_are_checked() {
+    for sql in [
+        "INSERT INTO users (name) VALUES ('a') RETURNING nope",
+        "UPDATE users SET name = 'x' WHERE id = 1 RETURNING nope",
+        "DELETE FROM orders WHERE id = 1 RETURNING nope",
+        "INSERT INTO orders AS o (user_id, total) VALUES (1, 2) RETURNING o.nope",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnNotFound,
+        );
+    }
+    for sql in [
+        "INSERT INTO users (name) VALUES ('a') RETURNING id, users.name, *",
+        "UPDATE orders o SET total = 0 FROM users u WHERE u.id = o.user_id RETURNING o.id, u.name",
+        "DELETE FROM orders WHERE id = 1 RETURNING id, total * 2 AS doubled",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn on_conflict_and_on_duplicate_key_are_checked() {
+    for sql in [
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (nope) DO NOTHING",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET nope = 1",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.nope",
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = 'b' WHERE users.nope > 1",
+    ] {
+        assert_single(PG_SCHEMA, SqlDialect::PostgreSQL, sql, DiagnosticKind::ColumnNotFound);
+    }
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (1, 1, 2) ON CONFLICT (id) DO UPDATE SET total = 'lots'",
+        DiagnosticKind::TypeMismatch,
+    );
+    assert_valid(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (id, user_id, total) VALUES (1, 1, 2) ON CONFLICT (id) DO UPDATE SET total = orders.total + EXCLUDED.total WHERE orders.user_id = 1",
+    );
+    assert_single(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "INSERT INTO customers (id, balance) VALUES (1, 2) ON DUPLICATE KEY UPDATE balanse = VALUES(balance)",
+        DiagnosticKind::ColumnNotFound,
+    );
+    assert_valid(
+        MYSQL_SHOP,
+        SqlDialect::MySQL,
+        "INSERT INTO customers (id, balance) VALUES (1, 2) ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)",
+    );
+    assert_single(
+        SQLITE_SCHEMA,
+        SqlDialect::SQLite,
+        "INSERT INTO users (id, name) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET name = excluded.nme",
+        DiagnosticKind::ColumnNotFound,
+    );
+}
+
+#[test]
+fn other_clauses_are_resolved() {
+    for sql in [
+        "SELECT DISTINCT ON (nope) id FROM users",
+        "SELECT id, row_number() OVER w FROM users WINDOW w AS (PARTITION BY nope)",
+        "SELECT array_agg(id ORDER BY nope) FROM users",
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY nope) FROM orders",
+        "SELECT id FROM users LIMIT (SELECT count(nope) FROM orders)",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnNotFound,
+        );
+    }
+}
+
+#[test]
+fn insert_select_column_count_is_checked() {
+    for sql in [
+        "INSERT INTO orders (user_id, total) SELECT id FROM users",
+        "INSERT INTO orders (user_id) SELECT id, 1 FROM users",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::ColumnCountMismatch,
+        );
+    }
+    for sql in [
+        "INSERT INTO orders (user_id, total) SELECT id, 0 FROM users",
+        "INSERT INTO orders (user_id, total) SELECT * FROM (SELECT id, 0 FROM users) t",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn insert_values_expressions_are_type_checked() {
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (user_id, total) VALUES (1, 1 + 'x')",
+        DiagnosticKind::TypeMismatch,
+    );
+}
+
+#[test]
+fn using_column_must_exist_on_both_sides() {
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT 1 FROM users JOIN orders USING (email)",
+        DiagnosticKind::ColumnNotFound,
+    );
+}
+
+#[test]
+fn enum_literals_are_checked_against_enum_values() {
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users WHERE status = 'actve'",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("Did you mean 'active'?")
+    );
+    for sql in [
+        "UPDATE users SET status = 'deleted' WHERE id = 1",
+        "INSERT INTO users (name, status) VALUES ('a', 'pending')",
+    ] {
+        assert_single(
+            PG_SCHEMA,
+            SqlDialect::PostgreSQL,
+            sql,
+            DiagnosticKind::TypeMismatch,
+        );
+    }
+}

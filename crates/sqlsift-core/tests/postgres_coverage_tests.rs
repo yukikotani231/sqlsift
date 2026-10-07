@@ -885,7 +885,7 @@ fn valid_scoping_and_ordering() {
             "SELECT public.users.id FROM public.users",
             "SELECT users.id FROM public.users",
             "SELECT * FROM billing.invoices JOIN orders ON orders.id = invoices.order_id",
-            "SELECT o.id FROM orders o JOIN order_items USING (order_id)",
+            "SELECT oi.product_id FROM order_items oi JOIN order_items oi2 USING (order_id)",
         ],
     );
 }

@@ -5,6 +5,9 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, Delete, Expr, GroupByExpr, Ident, Insert, Query, Select,
     SelectItem, SetExpr, Statement, Subscript, TableFactor, TableWithJoins, Values,
 };
+use sqlparser::ast::{
+    ConflictTarget, Distinct, NamedWindowDefinition, NamedWindowExpr, OnConflictAction, OnInsert,
+};
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::SqlDialect;
@@ -99,9 +102,11 @@ impl<'a> NameResolver<'a> {
                 assignments,
                 from,
                 selection,
+                returning,
                 ..
             } => {
                 self.resolve_update(table, assignments, from.as_ref(), selection.as_ref());
+                self.resolve_returning(returning.as_deref());
             }
             Statement::Delete(delete) => {
                 self.resolve_delete(delete);
@@ -217,9 +222,140 @@ impl<'a> NameResolver<'a> {
                     }
                 }
             } else {
-                // INSERT ... SELECT - resolve the subquery
-                self.resolve_set_expr(&source.body);
+                // INSERT ... SELECT - resolve the subquery in its own scope
+                let saved_tables = std::mem::take(&mut self.tables);
+                self.resolve_query(source);
+                self.tables = saved_tables;
+
+                let expected_count = if specified_columns.is_empty() {
+                    table_def.columns.len()
+                } else {
+                    specified_columns.len()
+                };
+                let selected = self.infer_cte_columns(&source.body);
+                if !selected.is_empty() && selected.len() != expected_count {
+                    let mut diag = Diagnostic::error(
+                        DiagnosticKind::ColumnCountMismatch,
+                        format!(
+                            "INSERT ... SELECT returns {} column(s) but {} column(s) were specified",
+                            selected.len(),
+                            expected_count
+                        ),
+                    )
+                    .with_help(format!(
+                        "Select {} column(s) to match the column list",
+                        expected_count
+                    ));
+                    diag.span = insert_span;
+                    self.diagnostics.push(diag);
+                }
             }
+        }
+
+        // ON CONFLICT / ON DUPLICATE KEY UPDATE and RETURNING see the target table
+        let key = insert
+            .table_alias
+            .as_ref()
+            .map_or_else(|| table_name.name.clone(), |a| a.value.clone());
+        let target = TableRef {
+            table: table_name.clone(),
+            alias: insert.table_alias.as_ref().map(|a| a.value.clone()),
+            view_columns: None,
+            derived_columns: None,
+        };
+        self.tables.insert(key, target.clone());
+        if let Some(on) = &insert.on {
+            // MySQL row alias: INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE c = new.c
+            if let Some(row_alias) = insert
+                .insert_alias
+                .as_ref()
+                .and_then(|a| a.row_alias.0.last())
+            {
+                self.tables.insert(row_alias.value.clone(), target.clone());
+            }
+            self.resolve_on_insert(on, table_def, &table_name, target);
+            // EXCLUDED / the row alias are only visible in the ON clause
+            self.tables.shift_remove("excluded");
+            if let Some(row_alias) = insert
+                .insert_alias
+                .as_ref()
+                .and_then(|a| a.row_alias.0.last())
+            {
+                self.tables.shift_remove(&row_alias.value);
+            }
+        }
+        self.resolve_returning(insert.returning.as_deref());
+    }
+
+    /// Resolve `ON CONFLICT ...` / `ON DUPLICATE KEY UPDATE ...` of an INSERT
+    fn resolve_on_insert(
+        &mut self,
+        on: &OnInsert,
+        table_def: &TableDef,
+        table_name: &QualifiedName,
+        target: TableRef,
+    ) {
+        let assignments = match on {
+            OnInsert::DuplicateKeyUpdate(assignments) => assignments,
+            OnInsert::OnConflict(on_conflict) => {
+                if let Some(ConflictTarget::Columns(columns)) = &on_conflict.conflict_target {
+                    for col in columns {
+                        self.check_target_column(table_def, table_name, col);
+                    }
+                }
+                match &on_conflict.action {
+                    OnConflictAction::DoNothing => return,
+                    OnConflictAction::DoUpdate(update) => {
+                        // EXCLUDED is the row proposed for insertion
+                        self.tables.insert("excluded".to_string(), target);
+                        if let Some(selection) = &update.selection {
+                            self.resolve_expr(selection);
+                        }
+                        &update.assignments
+                    }
+                }
+            }
+            _ => return,
+        };
+        for assignment in assignments {
+            if let AssignmentTarget::ColumnName(name) = &assignment.target {
+                if let Some(col) = name.0.last() {
+                    self.check_target_column(table_def, table_name, col);
+                }
+            }
+            self.resolve_expr(&assignment.value);
+        }
+    }
+
+    /// Report a column of the target table that doesn't exist
+    fn check_target_column(
+        &mut self,
+        table_def: &TableDef,
+        table_name: &QualifiedName,
+        col: &Ident,
+    ) {
+        if table_def.column_exists(&col.value) {
+            return;
+        }
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::ColumnNotFound,
+            format!("Column '{}' not found in table '{}'", col.value, table_name),
+        )
+        .with_span(Span::from_sqlparser(&col.span));
+        if let Some(suggestion) = find_similar_column(table_def, &col.value) {
+            diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+        }
+        self.diagnostics.push(diag);
+    }
+
+    /// Resolve a RETURNING list against the statement's tables
+    fn resolve_returning(&mut self, returning: Option<&[SelectItem]>) {
+        let Some(items) = returning else {
+            return;
+        };
+        let span = Span::with_location(0, 0, 0);
+        for item in items {
+            self.resolve_select_item(item, &span);
         }
     }
 
@@ -331,6 +467,8 @@ impl<'a> NameResolver<'a> {
         if let Some(where_expr) = &delete.selection {
             self.resolve_expr(where_expr);
         }
+
+        self.resolve_returning(delete.returning.as_deref());
     }
 
     /// Resolve names in a query
@@ -393,6 +531,14 @@ impl<'a> NameResolver<'a> {
 
         // Resolve the main query body
         self.resolve_set_expr(&query.body);
+
+        // LIMIT / OFFSET expressions (e.g. scalar subqueries)
+        if let Some(limit) = &query.limit {
+            self.resolve_expr(limit);
+        }
+        if let Some(offset) = &query.offset {
+            self.resolve_expr(&offset.value);
+        }
 
         // Resolve ORDER BY clause (with SELECT aliases in scope)
         if let Some(order_by) = &query.order_by {
@@ -556,6 +702,25 @@ impl<'a> NameResolver<'a> {
             self.resolve_table_with_joins(table_with_joins);
         }
 
+        // DISTINCT ON (...) expressions
+        if let Some(Distinct::On(exprs)) = &select.distinct {
+            for expr in exprs {
+                self.resolve_expr(expr);
+            }
+        }
+
+        // Named windows: WINDOW w AS (PARTITION BY ... ORDER BY ...)
+        for NamedWindowDefinition(_, window) in &select.named_window {
+            if let NamedWindowExpr::WindowSpec(spec) = window {
+                for e in &spec.partition_by {
+                    self.resolve_expr(e);
+                }
+                for ob in &spec.order_by {
+                    self.resolve_expr(&ob.expr);
+                }
+            }
+        }
+
         // Then resolve SELECT items
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
@@ -619,11 +784,19 @@ impl<'a> NameResolver<'a> {
                 JoinConstraint::Using(columns) => {
                     // USING columns exist in both sides by definition and are merged
                     // into a single unqualified column, so only check they exist
+                    let right_key = relation_key(relation);
                     for col in columns {
-                        let exists = self.tables.values().any(|t| {
-                            self.has_unknown_columns(t) || self.table_ref_has_column(t, &col.value)
-                        });
-                        if !exists {
+                        let has = |resolver: &Self, t: &TableRef| {
+                            resolver.has_unknown_columns(t)
+                                || resolver.table_ref_has_column(t, &col.value)
+                        };
+                        let (right, left): (Vec<_>, Vec<_>) = self
+                            .tables
+                            .iter()
+                            .partition(|(k, _)| right_key.as_deref() == Some(k.as_str()));
+                        let in_right = right.is_empty() || right.iter().any(|(_, t)| has(self, t));
+                        let in_left = left.iter().any(|(_, t)| has(self, t));
+                        if !(in_right && in_left) {
                             self.diagnostics.push(
                                 Diagnostic::error(
                                     DiagnosticKind::ColumnNotFound,
@@ -905,6 +1078,20 @@ impl<'a> NameResolver<'a> {
             }
             Expr::Function(func) => {
                 self.resolve_function_args_list(&func.args);
+                // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
+                if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
+                    for clause in &list.clauses {
+                        if let sqlparser::ast::FunctionArgumentClause::OrderBy(order_by) = clause {
+                            for ob in order_by {
+                                self.resolve_expr(&ob.expr);
+                            }
+                        }
+                    }
+                }
+                // WITHIN GROUP (ORDER BY ...)
+                for ob in &func.within_group {
+                    self.resolve_expr(&ob.expr);
+                }
                 // Resolve FILTER (WHERE ...) clause
                 if let Some(filter) = &func.filter {
                     self.resolve_expr(filter);
@@ -1427,6 +1614,18 @@ impl<'a> NameResolver<'a> {
     }
 }
 
+/// Scope key (alias or table name) a FROM relation is registered under
+fn relation_key(factor: &TableFactor) -> Option<String> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => alias
+            .as_ref()
+            .map(|a| a.name.value.clone())
+            .or_else(|| name.0.last().map(|i| i.value.clone())),
+        TableFactor::Derived { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
+        _ => None,
+    }
+}
+
 /// Output column names of a SELECT list usable as aliases in ORDER BY / GROUP BY
 fn projection_aliases(projection: &[SelectItem]) -> Vec<String> {
     projection
@@ -1517,7 +1716,10 @@ fn find_similar_column(table: &TableDef, name: &str) -> Option<String> {
 }
 
 /// Find the candidate most similar to `name` (for "did you mean" suggestions)
-fn find_similar_name(candidates: impl IntoIterator<Item = String>, name: &str) -> Option<String> {
+pub(super) fn find_similar_name(
+    candidates: impl IntoIterator<Item = String>,
+    name: &str,
+) -> Option<String> {
     let name_lower = name.to_lowercase();
     let mut best_match: Option<(usize, String)> = None;
 

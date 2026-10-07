@@ -92,6 +92,53 @@ impl<'a> TypeResolver<'a> {
         self
     }
 
+    /// Report a string literal that is not a value of the enum type on the other side.
+    /// Returns true if a diagnostic was emitted.
+    fn report_enum_literal(
+        &mut self,
+        left: &ExpressionType,
+        right: &ExpressionType,
+        span: Option<Span>,
+    ) -> bool {
+        let (enum_name, literal) = match (left, right) {
+            (ExpressionType::Known(SqlType::Custom(name)), ExpressionType::StringLiteral(lit))
+            | (ExpressionType::StringLiteral(lit), ExpressionType::Known(SqlType::Custom(name))) => {
+                (name, lit)
+            }
+            _ => return false,
+        };
+        let Some(enum_def) = self.catalog.get_enum(enum_name) else {
+            return false;
+        };
+        if enum_def.values.is_empty() || enum_def.values.iter().any(|v| v == literal) {
+            return false;
+        }
+        let help = super::resolver::find_similar_name(enum_def.values.iter().cloned(), literal)
+            .map(|v| format!("Did you mean '{}'?", v))
+            .unwrap_or_else(|| {
+                format!(
+                    "Valid values: {}",
+                    enum_def
+                        .values
+                        .iter()
+                        .map(|v| format!("'{}'", v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::TypeMismatch,
+            format!(
+                "Invalid value '{}' for enum type '{}'",
+                literal, enum_def.name
+            ),
+        )
+        .with_help(help);
+        diag.span = span;
+        self.diagnostics.push(diag);
+        true
+    }
+
     /// Check whether two expression types conflict, i.e. neither can be implicitly
     /// converted to the other. Returns the display names of both sides on conflict.
     fn type_conflict(
@@ -184,6 +231,22 @@ impl<'a> TypeResolver<'a> {
             insert.columns.iter().map(|c| c.value.clone()).collect()
         };
 
+        // ON CONFLICT DO UPDATE / ON DUPLICATE KEY UPDATE assignments
+        match &insert.on {
+            Some(sqlparser::ast::OnInsert::DuplicateKeyUpdate(assignments)) => {
+                self.check_assignments(table_def, assignments);
+            }
+            Some(sqlparser::ast::OnInsert::OnConflict(on_conflict)) => {
+                if let sqlparser::ast::OnConflictAction::DoUpdate(update) = &on_conflict.action {
+                    self.check_assignments(table_def, &update.assignments);
+                    if let Some(selection) = &update.selection {
+                        self.check_expr_recursive(selection);
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // INSERT ... SELECT: the source query has its own scope
         if let Some(source) = &insert.source {
             if !matches!(source.body.as_ref(), SetExpr::Values(_)) {
@@ -234,8 +297,14 @@ impl<'a> TypeResolver<'a> {
                             continue;
                         }
 
+                        self.check_expr_recursive(value_expr);
                         let value_type = self.infer_expr_type(value_expr);
                         let column_type = ExpressionType::Known(col_def.data_type.clone());
+                        let column_span =
+                            insert.columns.get(i).map(|c| Span::from_sqlparser(&c.span));
+                        if self.report_enum_literal(&column_type, &value_type, column_span) {
+                            continue;
+                        }
                         if let Some((expected, actual)) =
                             self.type_conflict(&column_type, &value_type)
                         {
@@ -274,7 +343,15 @@ impl<'a> TypeResolver<'a> {
             Some(def) => def,
             None => return, // Table not found - already reported by NameResolver
         };
+        self.check_assignments(table_def, assignments);
+    }
 
+    /// Check `SET col = value` assignments against the target table's column types
+    fn check_assignments(
+        &mut self,
+        table_def: &crate::schema::TableDef,
+        assignments: &[sqlparser::ast::Assignment],
+    ) {
         for assignment in assignments {
             let col_name = match &assignment.target {
                 AssignmentTarget::ColumnName(name) => match name.0.last() {
@@ -316,6 +393,15 @@ impl<'a> TypeResolver<'a> {
 
             let value_type = self.infer_expr_type(&assignment.value);
             let column_type = ExpressionType::Known(col_def.data_type.clone());
+            let target_span = match &assignment.target {
+                AssignmentTarget::ColumnName(name) => {
+                    name.0.last().map(|i| Span::from_sqlparser(&i.span))
+                }
+                AssignmentTarget::Tuple(_) => None,
+            };
+            if self.report_enum_literal(&column_type, &value_type, target_span) {
+                continue;
+            }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                 let span = Span::from_sqlparser(&assignment.value.span());
                 self.diagnostics.push(
@@ -764,6 +850,10 @@ impl<'a> TypeResolver<'a> {
         let right_type = self.infer_expr_type(right);
 
         if self.is_comparison_operator(op) {
+            let span = Some(Span::from_sqlparser(&left.span()));
+            if self.report_enum_literal(&left_type, &right_type, span) {
+                return;
+            }
             if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
                 let span = Span::from_sqlparser(&left.span());
                 self.diagnostics.push(
