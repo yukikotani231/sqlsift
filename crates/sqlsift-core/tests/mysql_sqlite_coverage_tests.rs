@@ -617,7 +617,7 @@ fn mysql_invalid_table_not_found() {
             "INSERT INTO order_item (order_id) VALUES (1)",
             TableNotFound,
             "order_item",
-            Some("Check that the table exists"),
+            Some("Did you mean 'order_items'?"),
             Some((1, 13)),
         ),
         bad(
@@ -1200,7 +1200,7 @@ fn sqlite_invalid_table_and_column_not_found() {
             "INSERT INTO tag (name) VALUES ('x')",
             TableNotFound,
             "tag",
-            Some("Check that the table exists"),
+            Some("Did you mean 'tags'?"),
             Some((1, 13)),
         ),
         bad("DELETE FROM post", TableNotFound, "post", None, None),
@@ -1863,7 +1863,7 @@ fn sqlite_invalid_more_contexts() {
             None,
         ),
         bad(
-            "INSERT INTO authors (name, is_active) VALUES ('x', 'yes')",
+            "INSERT INTO authors (name, is_active) VALUES ('x', 'maybe')",
             TypeMismatch,
             "is_active",
             None,

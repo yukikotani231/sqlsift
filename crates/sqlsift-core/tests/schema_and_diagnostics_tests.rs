@@ -1640,8 +1640,10 @@ fn e0001_message_help_and_span() {
     assert_eq!(d.code(), "E0001");
     assert_eq!(d.severity, Severity::Error);
     assert_eq!(d.message, "Table 'userz' not found");
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'users'?"));
+    let diags = analyze(&c, "SELECT 1 FROM zzzzzz");
     assert_eq!(
-        d.help.as_deref(),
+        diags[0].help.as_deref(),
         Some("Check that the table exists in your schema definition")
     );
     assert_eq!(loc(d), (1, 15, 5));
@@ -1910,7 +1912,7 @@ fn e0003_insert_and_update_messages() {
 #[test]
 fn e0003_uses_column_type_from_alter_add_column() {
     let c = catalog("CREATE TABLE t (id int); ALTER TABLE t ADD COLUMN flag boolean;");
-    let d = single(&c, "SELECT id FROM t WHERE flag = 'yes' AND id = 1");
+    let d = single(&c, "SELECT id FROM t WHERE flag = 'maybe' AND id = 1");
     assert_eq!(d.message, "Type mismatch: cannot compare boolean with text");
     assert_eq!(loc(&d), (1, 24, 4));
 }
