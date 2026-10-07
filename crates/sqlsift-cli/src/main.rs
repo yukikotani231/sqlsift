@@ -116,10 +116,12 @@ fn run(args: Args) -> Result<bool> {
                 None | Some("human") => OutputFormat::Human,
                 Some("json") => OutputFormat::Json,
                 Some("sarif") => OutputFormat::Sarif,
-                Some(other) => miette::bail!(
-                    "Invalid format '{}'. Supported formats: human, json, sarif.",
-                    other
-                ),
+                Some(other) => {
+                    return Err(miette::miette!(
+                        "Invalid format '{}'. Supported formats: human, json, sarif.",
+                        other
+                    ))
+                }
             };
 
             // Get schema files from config or CLI (glob patterns are expanded)

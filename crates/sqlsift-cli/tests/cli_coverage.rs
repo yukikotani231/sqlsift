@@ -117,8 +117,16 @@ impl Run {
     }
 
     fn assert_stderr_contains(&self, needle: &str) -> &Self {
+        // miette wraps long messages (e.g. long temp paths on macOS) and draws a
+        // `│` gutter, so compare with whitespace and gutter characters normalized
+        let normalize = |s: &str| {
+            s.replace('│', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         assert!(
-            self.stderr.contains(needle),
+            self.stderr.contains(needle) || normalize(&self.stderr).contains(&normalize(needle)),
             "expected stderr to contain {needle:?}\n--- stderr ---\n{}",
             self.stderr
         );
