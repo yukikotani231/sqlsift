@@ -5,3 +5,6 @@
 node_modules
 editors/vscode/out
 editors/vscode/*.vsix
+
+# Playground build output (scripts/build-playground.sh)
+/site/pkg
