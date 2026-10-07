@@ -78,7 +78,7 @@ UPDATE orders SET total_cents = 'ten dollars' WHERE id = 1;
   },
   {
     id: 'insert',
-    name: 'INSERT column count',
+    name: 'INSERT / UPDATE checks',
     dialect: 'postgresql',
     schema: SHOP_SCHEMA,
     query: `-- Two columns, one value
@@ -86,6 +86,16 @@ INSERT INTO users (email, name) VALUES ('ada@example.com');
 
 -- Two columns, three values
 INSERT INTO orders (user_id, total_cents) VALUES (1, 1999, 500);
+
+-- NULL into a NOT NULL column
+UPDATE users SET name = NULL WHERE id = 1;
+
+-- String literals are coerced like in PostgreSQL: these are fine...
+INSERT INTO orders (user_id, status, total_cents, placed_at)
+VALUES (1, 'paid', '1999', '2026-01-01 12:00');
+
+-- ...but this one can never be an integer
+UPDATE orders SET total_cents = 'free' WHERE id = 1;
 
 -- This one is fine
 INSERT INTO order_items (order_id, sku, quantity, unit_cents)
