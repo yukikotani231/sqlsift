@@ -27,9 +27,10 @@ use sqlparser::ast::{
 };
 use std::collections::HashMap;
 
+use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{Catalog, QualifiedName};
-use crate::types::{SqlType, TypeCompatibility};
+use crate::types::{ArithmeticOp, SqlType, TypeCompatibility};
 
 use super::resolver::NameResolver;
 
@@ -38,6 +39,9 @@ use super::resolver::NameResolver;
 enum ExpressionType {
     /// Type is known (successfully inferred)
     Known(SqlType),
+    /// Quoted string literal: untyped until it meets another operand
+    /// (e.g. `'2024-01-01'` compared with a DATE column is a DATE)
+    StringLiteral(String),
     /// Type is unknown (e.g., subquery, complex expression)
     Unknown,
 }
@@ -60,6 +64,8 @@ pub struct TypeResolver<'a> {
     tables: HashMap<String, TableRef>,
     /// Collected diagnostics
     diagnostics: Vec<Diagnostic>,
+    /// SQL dialect (affects dialect-specific coercions such as MySQL booleans)
+    dialect: SqlDialect,
 }
 
 impl<'a> TypeResolver<'a> {
@@ -69,6 +75,40 @@ impl<'a> TypeResolver<'a> {
             catalog,
             tables: HashMap::new(),
             diagnostics: Vec::new(),
+            dialect: SqlDialect::default(),
+        }
+    }
+
+    /// Set the SQL dialect
+    pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    /// Check whether two expression types conflict, i.e. neither can be implicitly
+    /// converted to the other. Returns the display names of both sides on conflict.
+    fn type_conflict(
+        &self,
+        left: &ExpressionType,
+        right: &ExpressionType,
+    ) -> Option<(String, String)> {
+        match (left, right) {
+            (ExpressionType::Known(lt), ExpressionType::Known(rt)) => {
+                if self.dialect != SqlDialect::PostgreSQL && is_integer_boolean_pair(lt, rt) {
+                    // MySQL BOOLEAN is TINYINT(1); SQLite stores booleans as integers
+                    return None;
+                }
+                let compatible = lt.is_compatible_with(rt) != TypeCompatibility::ExplicitCast
+                    || rt.is_compatible_with(lt) != TypeCompatibility::ExplicitCast;
+                (!compatible).then(|| (lt.display_name(), rt.display_name()))
+            }
+            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => (!t
+                .accepts_string_literal(lit))
+            .then(|| (t.display_name(), SqlType::Text.display_name())),
+            (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => (!t
+                .accepts_string_literal(lit))
+            .then(|| (SqlType::Text.display_name(), t.display_name())),
+            _ => None,
         }
     }
 
@@ -147,7 +187,16 @@ impl<'a> TypeResolver<'a> {
                         };
 
                         if !col_def.nullable && matches!(value_expr, Expr::Value(Value::Null)) {
-                            let span = Span::from_sqlparser(&value_expr.span());
+                            // NULL literals carry no source location: point at the
+                            // target column, or the table name without a column list
+                            let span = Span::from_sqlparser(
+                                &insert
+                                    .columns
+                                    .get(i)
+                                    .map(|c| c.span)
+                                    .or_else(|| insert.table_name.0.last().map(|t| t.span))
+                                    .unwrap_or_else(|| value_expr.span()),
+                            );
                             self.diagnostics.push(
                                 Diagnostic::error(
                                     DiagnosticKind::PotentialNullViolation,
@@ -165,29 +214,24 @@ impl<'a> TypeResolver<'a> {
                         }
 
                         let value_type = self.infer_expr_type(value_expr);
-                        if let ExpressionType::Known(vt) = value_type {
-                            let compat = vt.is_compatible_with(&col_def.data_type);
-                            let compat_rev = col_def.data_type.is_compatible_with(&vt);
-                            if compat == TypeCompatibility::ExplicitCast
-                                && compat_rev == TypeCompatibility::ExplicitCast
-                            {
-                                let span = Span::from_sqlparser(&value_expr.span());
-                                self.diagnostics.push(
-                                    Diagnostic::error(
-                                        DiagnosticKind::TypeMismatch,
-                                        format!(
-                                            "Type mismatch: column '{}' expects {}, but got {}",
-                                            col_name,
-                                            col_def.data_type.display_name(),
-                                            vt.display_name()
-                                        ),
-                                    )
-                                    .with_span(span)
-                                    .with_help(
-                                        "Value type is not compatible with the column type. Consider using explicit CAST.",
+                        let column_type = ExpressionType::Known(col_def.data_type.clone());
+                        if let Some((expected, actual)) =
+                            self.type_conflict(&column_type, &value_type)
+                        {
+                            let span = Span::from_sqlparser(&value_expr.span());
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    DiagnosticKind::TypeMismatch,
+                                    format!(
+                                        "Type mismatch: column '{}' expects {}, but got {}",
+                                        col_name, expected, actual
                                     ),
-                                );
-                            }
+                                )
+                                .with_span(span)
+                                .with_help(
+                                    "Value type is not compatible with the column type. Consider using explicit CAST.",
+                                ),
+                            );
                         }
                     }
                 }
@@ -225,7 +269,14 @@ impl<'a> TypeResolver<'a> {
             };
 
             if !col_def.nullable && matches!(&assignment.value, Expr::Value(Value::Null)) {
-                let span = Span::from_sqlparser(&assignment.value.span());
+                // NULL literals carry no source location: point at the target column
+                let span = match &assignment.target {
+                    AssignmentTarget::ColumnName(name) => {
+                        name.0.last().map(|ident| Span::from_sqlparser(&ident.span))
+                    }
+                    AssignmentTarget::Tuple(_) => None,
+                }
+                .unwrap_or_else(|| Span::from_sqlparser(&assignment.value.span()));
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticKind::PotentialNullViolation,
@@ -243,29 +294,22 @@ impl<'a> TypeResolver<'a> {
             }
 
             let value_type = self.infer_expr_type(&assignment.value);
-            if let ExpressionType::Known(vt) = value_type {
-                let compat = vt.is_compatible_with(&col_def.data_type);
-                let compat_rev = col_def.data_type.is_compatible_with(&vt);
-                if compat == TypeCompatibility::ExplicitCast
-                    && compat_rev == TypeCompatibility::ExplicitCast
-                {
-                    let span = Span::from_sqlparser(&assignment.value.span());
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            DiagnosticKind::TypeMismatch,
-                            format!(
-                                "Type mismatch: column '{}' expects {}, but got {}",
-                                col_name,
-                                col_def.data_type.display_name(),
-                                vt.display_name()
-                            ),
-                        )
-                        .with_span(span)
-                        .with_help(
-                            "Value type is not compatible with the column type. Consider using explicit CAST.",
+            let column_type = ExpressionType::Known(col_def.data_type.clone());
+            if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
+                let span = Span::from_sqlparser(&assignment.value.span());
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::TypeMismatch,
+                        format!(
+                            "Type mismatch: column '{}' expects {}, but got {}",
+                            col_name, expected, actual
                         ),
-                    );
-                }
+                    )
+                    .with_span(span)
+                    .with_help(
+                        "Value type is not compatible with the column type. Consider using explicit CAST.",
+                    ),
+                );
             }
         }
     }
@@ -316,28 +360,16 @@ impl<'a> TypeResolver<'a> {
             return;
         }
 
-        for (idx, (left_ty, right_ty)) in left_types
-            .into_iter()
-            .zip(right_types.into_iter())
-            .enumerate()
-        {
-            let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_ty, right_ty) else {
-                continue;
-            };
-
-            let compat_lr = lt.is_compatible_with(&rt);
-            let compat_rl = rt.is_compatible_with(&lt);
-            if compat_lr == TypeCompatibility::ExplicitCast
-                && compat_rl == TypeCompatibility::ExplicitCast
-            {
+        for (idx, (left_ty, right_ty)) in left_types.into_iter().zip(right_types).enumerate() {
+            if let Some((lt, rt)) = self.type_conflict(&left_ty, &right_ty) {
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
                         format!(
                             "Set operation type mismatch at column {}: {} vs {}",
                             idx + 1,
-                            lt.display_name(),
-                            rt.display_name()
+                            lt,
+                            rt
                         ),
                     )
                     .with_span(Span::from_sqlparser(&right.span()))
@@ -442,33 +474,21 @@ impl<'a> TypeResolver<'a> {
                     let left_type = self.infer_expr_type(left);
                     let right_type = self.infer_expr_type(right);
 
-                    if let (ExpressionType::Known(lt), ExpressionType::Known(rt)) =
-                        (left_type, right_type)
-                    {
-                        // Check compatibility in both directions (comparison is symmetric)
-                        let compat_lr = lt.is_compatible_with(&rt);
-                        let compat_rl = rt.is_compatible_with(&lt);
-
-                        // If either direction allows implicit cast, the comparison is valid
-                        if compat_lr == TypeCompatibility::ExplicitCast
-                            && compat_rl == TypeCompatibility::ExplicitCast
-                        {
-                            let span = Span::from_sqlparser(&left.span());
-                            self.diagnostics.push(
-                                Diagnostic::error(
-                                    DiagnosticKind::JoinTypeMismatch,
-                                    format!(
-                                        "JOIN condition type mismatch: {} vs {}",
-                                        lt.display_name(),
-                                        rt.display_name()
-                                    ),
-                                )
-                                .with_span(span)
-                                .with_help(
-                                    "JOIN condition should compare compatible types. Consider using explicit CAST.",
+                    if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
+                        let span = Span::from_sqlparser(&left.span());
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::JoinTypeMismatch,
+                                format!(
+                                    "JOIN condition type mismatch: {} vs {}",
+                                    lt, rt
                                 ),
-                            );
-                        }
+                            )
+                            .with_span(span)
+                            .with_help(
+                                "JOIN condition should compare compatible types. Consider using explicit CAST.",
+                            ),
+                        );
                     }
                     // Recursively check subexpressions
                     self.check_join_on_expr(left);
@@ -560,99 +580,53 @@ impl<'a> TypeResolver<'a> {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
 
-        // Only check if both types are known
-        if let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_type, right_type) {
-            match op {
-                // Comparison operators
-                BinaryOperator::Eq
-                | BinaryOperator::NotEq
-                | BinaryOperator::Lt
-                | BinaryOperator::LtEq
-                | BinaryOperator::Gt
-                | BinaryOperator::GtEq => {
-                    // Check compatibility in both directions (comparison is symmetric)
-                    let compat_lr = lt.is_compatible_with(&rt);
-                    let compat_rl = rt.is_compatible_with(&lt);
+        if self.is_comparison_operator(op) {
+            if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
+                let span = Span::from_sqlparser(&left.span());
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::TypeMismatch,
+                        format!("Type mismatch: cannot compare {} with {}", lt, rt),
+                    )
+                    .with_span(span)
+                    .with_help(
+                        "Types are not implicitly compatible. Consider using explicit CAST.",
+                    ),
+                );
+            }
+            return;
+        }
 
-                    // If either direction allows implicit cast, the comparison is valid
-                    if compat_lr == TypeCompatibility::ExplicitCast
-                        && compat_rl == TypeCompatibility::ExplicitCast
-                    {
-                        // Types are not implicitly compatible in either direction
-                        let span = Span::from_sqlparser(&left.span());
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::TypeMismatch,
-                                format!(
-                                    "Type mismatch: cannot compare {} with {}",
-                                    lt.display_name(),
-                                    rt.display_name()
-                                ),
-                            )
-                            .with_span(span)
-                            .with_help("Types are not implicitly compatible. Consider using explicit CAST."),
-                        );
-                    }
-                }
-                // Arithmetic operators
-                BinaryOperator::Plus
-                | BinaryOperator::Minus
-                | BinaryOperator::Multiply
-                | BinaryOperator::Divide
-                | BinaryOperator::Modulo => {
-                    // Check if both types are numeric
-                    if !self.is_numeric_type(&lt) {
-                        let span = Span::from_sqlparser(&left.span());
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::TypeMismatch,
-                                format!(
-                                    "Arithmetic operation requires numeric types, but got {}",
-                                    lt.display_name()
-                                ),
-                            )
-                            .with_span(span),
-                        );
-                    }
-                    if !self.is_numeric_type(&rt) {
-                        let span = Span::from_sqlparser(&right.span());
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::TypeMismatch,
-                                format!(
-                                    "Arithmetic operation requires numeric types, but got {}",
-                                    rt.display_name()
-                                ),
-                            )
-                            .with_span(span),
-                        );
-                    }
-                }
-                // String concatenation operator
-                BinaryOperator::StringConcat => {
-                    // PostgreSQL || operator - typically used with strings
-                    // For now, we allow any type (many types can be cast to string)
-                }
-                _ => {
-                    // Other operators (AND, OR, bitwise, etc.) - skip for now
-                }
+        // Arithmetic operators: only check when both types are known
+        let (Some(arith_op), ExpressionType::Known(lt), ExpressionType::Known(rt)) =
+            (arithmetic_op(op), &left_type, &right_type)
+        else {
+            return;
+        };
+        if SqlType::temporal_arithmetic_result(lt, arith_op, rt).is_some() {
+            return;
+        }
+        // An interval or date/time operand with a numeric one is fine only in the
+        // combinations allowed above; otherwise report each non-numeric side
+        for (ty, expr) in [(lt, left), (rt, right)] {
+            if !self.is_numeric_type(ty) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::TypeMismatch,
+                        format!(
+                            "Arithmetic operation requires numeric types, but got {}",
+                            ty.display_name()
+                        ),
+                    )
+                    .with_span(Span::from_sqlparser(&expr.span())),
+                );
             }
         }
     }
 
     /// Check if a type is numeric
     fn is_numeric_type(&self, sql_type: &SqlType) -> bool {
-        matches!(
-            sql_type,
-            SqlType::TinyInt
-                | SqlType::SmallInt
-                | SqlType::MediumInt
-                | SqlType::Integer
-                | SqlType::BigInt
-                | SqlType::Real
-                | SqlType::DoublePrecision
-                | SqlType::Decimal { .. }
-        )
+        sql_type.is_numeric()
     }
 
     /// Consume the resolver and return collected diagnostics
@@ -691,6 +665,12 @@ impl<'a> TypeResolver<'a> {
                 }
             }
             Expr::Function(func) => self.infer_function_return_type(func),
+            Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
+            // Typed literals such as DATE '2024-01-01'
+            Expr::TypedString { data_type, .. } => match SqlType::from_ast(data_type) {
+                SqlType::Unknown => ExpressionType::Unknown,
+                sql_type => ExpressionType::Known(sql_type),
+            },
             // TODO: Add support for more expression types:
             // - Expr::Case => Infer from THEN/ELSE branches (medium, 1-1.5 hours, ROI 20%)
             // - Expr::Subquery => Infer from SELECT projection (complex, 4-6 hours, ROI 15%)
@@ -792,7 +772,7 @@ impl<'a> TypeResolver<'a> {
     ) -> ExpressionType {
         match self.infer_first_arg_type(func) {
             ExpressionType::Known(t) => ExpressionType::Known(t),
-            ExpressionType::Unknown => ExpressionType::Unknown,
+            _ => ExpressionType::Unknown,
         }
     }
 
@@ -820,7 +800,9 @@ impl<'a> TypeResolver<'a> {
                             // In reality, type promotion rules are more complex
                             ExpressionType::Known(lt)
                         } else {
-                            ExpressionType::Unknown
+                            arithmetic_op(op)
+                                .and_then(|op| SqlType::temporal_arithmetic_result(&lt, op, &rt))
+                                .map_or(ExpressionType::Unknown, ExpressionType::Known)
                         }
                     }
                     // Comparison operators return boolean
@@ -849,8 +831,8 @@ impl<'a> TypeResolver<'a> {
                 // Future: distinguish between integer and decimal based on presence of '.'
                 ExpressionType::Known(SqlType::Integer)
             }
-            Value::SingleQuotedString(_) | Value::DoubleQuotedString(_) => {
-                ExpressionType::Known(SqlType::Text)
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                ExpressionType::StringLiteral(s.clone())
             }
             Value::Boolean(_) => ExpressionType::Known(SqlType::Boolean),
             Value::Null => {
@@ -898,7 +880,7 @@ impl<'a> TypeResolver<'a> {
     /// Infer type from a qualified column identifier (table.column)
     fn infer_column_type_qualified(&self, table_name: &str, col_name: &str) -> ExpressionType {
         // Look up table in scope
-        if let Some(table_ref) = self.tables.get(table_name) {
+        if let Some(table_ref) = super::resolver::lookup_ignore_case(&self.tables, table_name) {
             // Check if this is a derived table or view
             if table_ref.derived_columns.is_some() || table_ref.view_columns.is_some() {
                 // We can't infer types for derived tables or views yet
@@ -927,6 +909,23 @@ fn object_name_to_qualified(name: &sqlparser::ast::ObjectName) -> QualifiedName 
     }
 }
 
+/// Map an arithmetic binary operator to [`ArithmeticOp`]
+fn arithmetic_op(op: &BinaryOperator) -> Option<ArithmeticOp> {
+    match op {
+        BinaryOperator::Plus => Some(ArithmeticOp::Add),
+        BinaryOperator::Minus => Some(ArithmeticOp::Subtract),
+        BinaryOperator::Multiply => Some(ArithmeticOp::Multiply),
+        BinaryOperator::Divide => Some(ArithmeticOp::Divide),
+        BinaryOperator::Modulo => Some(ArithmeticOp::Modulo),
+        _ => None,
+    }
+}
+
+/// Whether one side is BOOLEAN and the other an integer type
+fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
+    (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,7 +946,7 @@ mod tests {
         let resolver = TypeResolver::new(&catalog);
         let value = Value::SingleQuotedString("hello".to_string());
         let result = resolver.infer_literal_type(&value);
-        assert_eq!(result, ExpressionType::Known(SqlType::Text));
+        assert_eq!(result, ExpressionType::StringLiteral("hello".to_string()));
     }
 
     #[test]

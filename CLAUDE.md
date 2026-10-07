@@ -170,6 +170,9 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - UPDATE SET type checking (`UPDATE users SET id = 'text'` → E0003)
 - CAST expression type inference (`CAST(x AS INTEGER)`)
 - Function return type inference (e.g., COUNT, SUM, AVG, UPPER, LENGTH, COALESCE)
+- String literals are untyped (`ExpressionType::StringLiteral`) and coerce to the other operand's type; only numeric/boolean targets are validated (`SqlType::accepts_string_literal`)
+- Date/time arithmetic (`SqlType::temporal_arithmetic_result`)
+- Dialect-aware coercions (MySQL/SQLite booleans are integers)
 
 **Not Yet Implemented (TODO):**
 - CASE expression type consistency (THEN/ELSE must have compatible types)
@@ -222,7 +225,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0001**: Table not found
 - **E0002**: Column not found
 - **E0003**: Type mismatch (comparisons, arithmetic, INSERT VALUES, UPDATE SET)
-- **E0004**: Potential NULL violation (reserved, not yet implemented)
+- **E0004**: Potential NOT NULL violation (explicit NULL assigned to a NOT NULL column)
 - **E0005**: Column count mismatch in INSERT
 - **E0006**: Ambiguous column reference
 - **E0007**: JOIN type mismatch (JOIN condition type incompatibility)
