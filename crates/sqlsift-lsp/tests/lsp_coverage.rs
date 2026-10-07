@@ -762,3 +762,73 @@ fn percent_encoded_root_uri_with_spaces() {
     lsp.open(&uri, "SELECT nme FROM users;");
     assert_eq!(codes(&lsp.diagnostics_for(&uri)), vec!["E0002"]);
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for previously-found LSP bugs
+// ---------------------------------------------------------------------------
+
+/// Wait for a warning-level window/showMessage or window/logMessage containing `needle`.
+fn wait_for_warning(lsp: &mut Lsp, needle: &str) -> String {
+    let needle = needle.to_string();
+    let msg = lsp.wait_for(|m| {
+        (m["method"] == "window/showMessage" || m["method"] == "window/logMessage")
+            && m["params"]["type"] == 2
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains(&needle))
+    });
+    msg["params"]["message"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn invalid_toml_is_reported_to_the_user() {
+    let t = TempDir::new("bad-toml-warn");
+    t.write("sqlsift.toml", "schema = [\n");
+    let mut lsp = Lsp::spawn();
+    lsp.initialize(Some(&t.root_uri()));
+    let msg = wait_for_warning(&mut lsp, "sqlsift.toml");
+    assert!(msg.contains("Failed to parse"), "{msg}");
+}
+
+#[test]
+fn invalid_dialect_in_config_is_reported() {
+    let t = workspace("bad-dialect", "dialect = \"oracle\"\n");
+    let mut lsp = Lsp::spawn();
+    lsp.initialize(Some(&t.root_uri()));
+    let msg = wait_for_warning(&mut lsp, "oracle");
+    assert!(msg.contains("Unknown dialect"), "{msg}");
+}
+
+#[test]
+fn relative_schema_paths_resolve_against_config_dir() {
+    let t = TempDir::new("cfg-rel-parent");
+    t.write("db/schema.sql", USERS_SCHEMA);
+    t.write("sqlsift.toml", "schema = [\"db/schema.sql\"]\n");
+    fs::create_dir_all(t.path().join("sub/project")).unwrap();
+    let mut lsp = Lsp::spawn();
+    let msg = lsp.start(Some(&file_uri(&t.path().join("sub/project"))));
+    assert!(msg.contains("(1 schema file(s) loaded)"), "{msg}");
+    let uri = t.uri("sub/project/q.sql");
+    lsp.open(&uri, "SELECT id FROM users;");
+    assert!(lsp.diagnostics_for(&uri).is_empty());
+}
+
+#[test]
+fn ranges_use_utf16_code_units() {
+    let t = workspace("utf16", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    // U+1F600 is 2 UTF-16 code units; 'é' is 1.
+    lsp.open(&uri, "SELECT '\u{1F600}é', nme FROM users;");
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 0, "character": 14})
+    );
+    assert_eq!(
+        diags[0]["range"]["end"],
+        json!({"line": 0, "character": 17})
+    );
+}

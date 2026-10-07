@@ -25,7 +25,7 @@ impl Backend {
     async fn publish_diagnostics_for(&self, uri: Url, text: &str) {
         let state = self.state.read().await;
         let diagnostics = state.analyze_document(text);
-        let lsp_diagnostics = to_lsp_diagnostics(&diagnostics, &state.disabled_rules);
+        let lsp_diagnostics = to_lsp_diagnostics(&diagnostics, &state.disabled_rules, text);
         self.client
             .publish_diagnostics(uri, lsp_diagnostics, None)
             .await;
@@ -88,6 +88,13 @@ impl LanguageServer for Backend {
             let mut state = self.state.write().await;
             state.rebuild_catalog()
         };
+
+        let config_warnings = std::mem::take(&mut self.state.write().await.config_warnings);
+        for warning in config_warnings {
+            self.client
+                .show_message(MessageType::WARNING, warning)
+                .await;
+        }
 
         let schema_count = self.state.read().await.schema_files.len();
         self.client
