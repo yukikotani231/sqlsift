@@ -204,7 +204,8 @@ fn print_sarif(files: &[&FileDiagnostics]) {
 
             let mut physical = serde_json::json!({
                 "artifactLocation": {
-                    "uri": f.file
+                    // SARIF URIs use `/` separators, also for Windows paths
+                    "uri": f.file.replace('\\', "/")
                 }
             });
 

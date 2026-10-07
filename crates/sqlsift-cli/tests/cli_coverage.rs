@@ -118,9 +118,11 @@ impl Run {
 
     fn assert_stderr_contains(&self, needle: &str) -> &Self {
         // miette wraps long messages (e.g. long temp paths on macOS) and draws a
-        // `│` gutter, so compare with whitespace and gutter characters normalized
+        // `│` gutter, and Windows paths use `\`, so compare with whitespace,
+        // gutter characters and path separators normalized
         let normalize = |s: &str| {
             s.replace('│', " ")
+                .replace('\\', "/")
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
