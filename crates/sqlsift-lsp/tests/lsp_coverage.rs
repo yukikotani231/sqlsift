@@ -40,6 +40,11 @@ impl TempDir {
         ));
         fs::create_dir_all(&path).expect("failed to create temp dir");
         let path = path.canonicalize().expect("canonicalize temp dir");
+        // Windows canonical paths carry a `\\?\` prefix that file URIs can't express
+        let path = match path.to_string_lossy().strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => path,
+        };
         Self { path }
     }
 
@@ -72,7 +77,10 @@ impl Drop for TempDir {
 }
 
 fn file_uri(p: &Path) -> String {
-    format!("file://{}", p.display())
+    // Proper file URIs on every platform (`file:///C:/...` on Windows)
+    tower_lsp::lsp_types::Url::from_file_path(p)
+        .expect("absolute path")
+        .to_string()
 }
 
 /// A running language server with a background reader thread.
