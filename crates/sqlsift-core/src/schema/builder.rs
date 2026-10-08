@@ -1244,6 +1244,7 @@ fn build_column(
                 }) =>
             {
                 col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
+                col.auto_increment = true;
             }
             _ => {}
         }

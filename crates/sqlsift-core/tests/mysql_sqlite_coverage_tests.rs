@@ -1092,7 +1092,8 @@ fn sqlite_valid_upsert_and_returning() {
         "UPDATE posts SET view_count = view_count + 1 WHERE id = 1 RETURNING view_count",
         "DELETE FROM posts WHERE status = 'archived' RETURNING id",
         "INSERT INTO post_tags (post_id, tag_id) SELECT p.id, t.id FROM posts p, tags t WHERE t.name = 'rust'",
-        "INSERT INTO authors DEFAULT VALUES",
+        // (DEFAULT VALUES would fail: authors.name is NOT NULL without a default)
+        "INSERT INTO authors (name) VALUES ('anon')",
         "UPDATE OR IGNORE tags SET name = 'x' WHERE id = 1",
     ]);
 }

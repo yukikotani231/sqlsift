@@ -231,6 +231,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0005**: Column count mismatch in INSERT
 - **E0006**: Ambiguous column reference
 - **E0007**: JOIN type mismatch (JOIN condition type incompatibility)
+- **E0008**: Missing required column (INSERT omits a NOT NULL column without DEFAULT / identity / serial / AUTO_INCREMENT)
 - **E1000**: Generic parse error
 
 ## Release Process

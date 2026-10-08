@@ -361,6 +361,9 @@ pub struct ColumnDef {
     pub default: Option<DefaultValue>,
     pub is_primary_key: bool,
     pub identity: Option<IdentityKind>,
+    /// MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT: a value is generated when omitted
+    #[serde(default)]
+    pub auto_increment: bool,
 }
 
 impl ColumnDef {
@@ -372,6 +375,7 @@ impl ColumnDef {
             default: None,
             is_primary_key: false,
             identity: None,
+            auto_increment: false,
         }
     }
 

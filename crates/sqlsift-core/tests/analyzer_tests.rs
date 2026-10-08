@@ -198,7 +198,8 @@ fn test_insert_column_not_found() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
 
-    let diagnostics = analyzer.analyze("INSERT INTO users (id, username) VALUES (1, 'test')");
+    let diagnostics =
+        analyzer.analyze("INSERT INTO users (id, name, username) VALUES (1, 'a', 'test')");
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
     assert!(diagnostics[0].message.contains("username"));
@@ -1646,7 +1647,7 @@ fn test_insert_type_mismatch() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // id is INTEGER (SERIAL), inserting a string should be a type mismatch
-    let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES ('text')");
+    let diagnostics = analyzer.analyze("INSERT INTO users (id, name) VALUES ('text', 'a')");
     assert_eq!(
         diagnostics.len(),
         1,
@@ -1663,7 +1664,7 @@ fn test_insert_type_compatible() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // id is INTEGER, inserting a number should be fine
-    let diagnostics = analyzer.analyze("INSERT INTO users (id) VALUES (42)");
+    let diagnostics = analyzer.analyze("INSERT INTO users (id, name) VALUES (42, 'a')");
     assert!(
         diagnostics.is_empty(),
         "Compatible INSERT should have no errors: {:?}",
@@ -1693,7 +1694,7 @@ fn test_insert_null_nullable_compatible() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // email is nullable in setup_catalog()
-    let diagnostics = analyzer.analyze("INSERT INTO users (email) VALUES (NULL)");
+    let diagnostics = analyzer.analyze("INSERT INTO users (name, email) VALUES ('a', NULL)");
     assert!(
         diagnostics.is_empty(),
         "NULL INSERT into nullable column should have no errors: {:?}",
