@@ -454,7 +454,12 @@ pub enum IdentityKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewDef {
     pub name: QualifiedName,
+    /// Column names (empty if they couldn't be determined)
     pub columns: Vec<String>,
+    /// Column types inferred from the view's query, parallel to `columns`
+    /// (`SqlType::Unknown` where the type couldn't be inferred)
+    #[serde(default)]
+    pub column_types: Vec<SqlType>,
     pub materialized: bool,
 }
 
