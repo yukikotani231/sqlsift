@@ -1,0 +1,21 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "sqlsift",
+      "pattern": [
+        {
+          "regexp": "^(error|warning)\\[(E\\d{4})\\]: (.+)$",
+          "severity": 1,
+          "code": 2,
+          "message": 3
+        },
+        {
+          "regexp": "^\\s+--> (.+):(\\d+):(\\d+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    }
+  ]
+}

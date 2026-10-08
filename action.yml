@@ -1,0 +1,109 @@
+name: "sqlsift"
+description: "Check raw SQL queries against your schema — missing tables, typo'd columns, type mismatches. No database required."
+author: "yukikotani231"
+branding:
+  icon: "database"
+  color: "green"
+
+inputs:
+  files:
+    description: "Query files to check (space-separated paths or glob patterns, e.g. `queries/**/*.sql`). Optional when `files` is set in sqlsift.toml."
+    required: false
+    default: ""
+  schema:
+    description: "Schema files (space-separated paths or glob patterns). Optional when configured in sqlsift.toml."
+    required: false
+    default: ""
+  schema-dir:
+    description: "Directory of schema/migration files, applied in filename order."
+    required: false
+    default: ""
+  dialect:
+    description: "SQL dialect: postgresql, mysql or sqlite."
+    required: false
+    default: ""
+  config:
+    description: "Path to sqlsift.toml (auto-discovered when omitted)."
+    required: false
+    default: ""
+  disable:
+    description: "Rules to disable (space-separated, e.g. `E0006 E0008`)."
+    required: false
+    default: ""
+  sarif-file:
+    description: "Also write a SARIF report to this path (for github/codeql-action/upload-sarif)."
+    required: false
+    default: ""
+  fail-on-error:
+    description: "Fail the step when sqlsift reports errors."
+    required: false
+    default: "true"
+  version:
+    description: "sqlsift-cli version to run from npm."
+    required: false
+    default: "latest"
+  cli-path:
+    description: "Use an existing sqlsift binary instead of installing from npm (advanced)."
+    required: false
+    default: ""
+
+outputs:
+  exit-code:
+    description: "sqlsift exit code: 0 = no errors, 1 = errors found, 2 = usage/configuration error."
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: check
+      shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_SCHEMA: ${{ inputs.schema }}
+        INPUT_SCHEMA_DIR: ${{ inputs.schema-dir }}
+        INPUT_DIALECT: ${{ inputs.dialect }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_DISABLE: ${{ inputs.disable }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_CLI_PATH: ${{ inputs.cli-path }}
+        MATCHER: ${{ github.action_path }}/.github/sqlsift-problem-matcher.json
+      run: |
+        set -o pipefail
+
+        if [[ -n "$INPUT_CLI_PATH" ]]; then
+          cli=("$INPUT_CLI_PATH")
+        else
+          cli=(npx --yes "sqlsift-cli@${INPUT_VERSION}")
+        fi
+
+        # Inputs are passed through the environment and split into words here, so
+        # they are never interpreted as shell code. Globs are expanded by sqlsift.
+        args=(check)
+        read -ra patterns <<< "$INPUT_SCHEMA"
+        for p in "${patterns[@]}"; do args+=(--schema "$p"); done
+        [[ -n "$INPUT_SCHEMA_DIR" ]] && args+=(--schema-dir "$INPUT_SCHEMA_DIR")
+        [[ -n "$INPUT_DIALECT" ]] && args+=(--dialect "$INPUT_DIALECT")
+        [[ -n "$INPUT_CONFIG" ]] && args+=(--config "$INPUT_CONFIG")
+        read -ra rules <<< "$INPUT_DISABLE"
+        for r in "${rules[@]}"; do args+=(--disable "$r"); done
+        read -ra files <<< "$INPUT_FILES"
+
+        # Inline annotations on the pull request diff
+        echo "::add-matcher::${MATCHER}"
+        set +e
+        NO_COLOR=1 "${cli[@]}" "${args[@]}" --max-errors 0 "${files[@]}" 2>&1
+        code=$?
+        set -e
+        echo "::remove-matcher owner=sqlsift::"
+
+        if [[ -n "$INPUT_SARIF_FILE" ]]; then
+          # (diagnostics were already printed above)
+          "${cli[@]}" "${args[@]}" --max-errors 0 --format sarif "${files[@]}" > "$INPUT_SARIF_FILE" 2>/dev/null || true
+        fi
+
+        echo "exit-code=${code}" >> "$GITHUB_OUTPUT"
+        if [[ "$code" -ne 0 && ( "$INPUT_FAIL_ON_ERROR" == "true" || "$code" -ne 1 ) ]]; then
+          exit "$code"
+        fi
