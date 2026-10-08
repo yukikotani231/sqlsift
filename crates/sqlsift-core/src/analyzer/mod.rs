@@ -14,6 +14,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::Catalog;
 
@@ -115,8 +116,14 @@ impl<'a> Analyzer<'a> {
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
 
+        // psql meta-commands and variables (the rewrite keeps every location)
+        let source = match self.dialect {
+            SqlDialect::PostgreSQL => psql::preprocess(sql),
+            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(sql),
+        };
+
         // Parse the SQL
-        let statements = self.parse_statements(sql);
+        let statements = self.parse_statements(&source.text);
 
         // Analyze each statement
         for (stmt, origin) in &statements {
@@ -141,11 +148,17 @@ impl<'a> Analyzer<'a> {
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
             .filter(|d| {
-                if let Some(span) = &d.span {
-                    !directives.is_suppressed(d.kind, span.line)
-                } else {
-                    true
-                }
+                let Some(span) = &d.span else {
+                    return true;
+                };
+                // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
+                let substituted = matches!(
+                    d.kind,
+                    DiagnosticKind::TableNotFound
+                        | DiagnosticKind::ColumnNotFound
+                        | DiagnosticKind::AmbiguousColumn
+                ) && source.is_substituted(span.line, span.column);
+                !substituted && !directives.is_suppressed(d.kind, span.line)
             })
             .collect();
         self.rules.apply(diagnostics)

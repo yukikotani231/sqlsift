@@ -343,6 +343,7 @@ SELECT bad_col FROM missing_table;
 - DISTINCT ON, UNION / INTERSECT / EXCEPT
 - ORDER BY with SELECT alias support
 - Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
 
 ### DDL
 
