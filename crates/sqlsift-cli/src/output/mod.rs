@@ -54,6 +54,7 @@ impl OutputFormatter {
             }
             OutputFormat::Json => print_json(&files),
             OutputFormat::Sarif => print_sarif(&files),
+            OutputFormat::Github => print_github(&files),
         }
     }
 
@@ -233,6 +234,66 @@ fn print_sarif(files: &[&FileDiagnostics]) {
     println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
 }
 
+/// GitHub Actions workflow commands on stdout, one per diagnostic, e.g.
+/// `::error file=q.sql,line=1,col=8,endLine=1,endColumn=11,title=E0002 column-not-found::...`.
+/// The runner turns them into annotations on the pull request diff.
+fn print_github(files: &[&FileDiagnostics]) {
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for f in files {
+        for d in &f.diagnostics {
+            let _ = writeln!(out, "{}", github_command(&f.file, &f.source, d));
+        }
+    }
+    let _ = out.flush();
+}
+
+/// The workflow command for one diagnostic
+fn github_command(file: &str, source: &str, d: &Diagnostic) -> String {
+    let command = match d.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "notice",
+    };
+    // Annotation paths use `/` separators, also for Windows paths
+    let mut properties = vec![("file", file.replace('\\', "/"))];
+    if let (Some(span), Some((line, col))) = (&d.span, location(d, source)) {
+        properties.push(("line", line.to_string()));
+        properties.push(("col", col.to_string()));
+        properties.push(("endLine", line.to_string()));
+        properties.push(("endColumn", (col + span.length).to_string()));
+    }
+    properties.push(("title", format!("{} {}", d.code(), d.kind.name())));
+    let properties: Vec<String> = properties
+        .iter()
+        .map(|(key, value)| format!("{key}={}", escape_github_property(value)))
+        .collect();
+
+    let mut message = d.message.clone();
+    if let Some(help) = &d.help {
+        message.push_str("\nhelp: ");
+        message.push_str(help);
+    }
+    format!(
+        "::{command} {}::{}",
+        properties.join(","),
+        escape_github_data(&message)
+    )
+}
+
+/// Escape the message of a workflow command
+fn escape_github_data(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// Escape a property value of a workflow command
+fn escape_github_property(text: &str) -> String {
+    escape_github_data(text)
+        .replace(':', "%3A")
+        .replace(',', "%2C")
+}
+
 fn sarif_rule(kind: DiagnosticKind, description: &str) -> serde_json::Value {
     serde_json::json!({
         "id": kind.code(),
@@ -260,4 +321,28 @@ fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     }
 
     (line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_data_escapes_percent_and_newlines() {
+        assert_eq!(escape_github_data("50% a\r\nb: c,d"), "50%25 a%0D%0Ab: c,d");
+    }
+
+    #[test]
+    fn github_property_also_escapes_colon_and_comma() {
+        assert_eq!(escape_github_property("a,b:c%\n"), "a%2Cb%3Ac%25%0A");
+    }
+
+    #[test]
+    fn github_command_without_span_has_no_location() {
+        let d = Diagnostic::warning(DiagnosticKind::ParseError, "Skipped: x");
+        assert_eq!(
+            github_command("dir\\q.sql", "", &d),
+            "::warning file=dir/q.sql,title=E1000 parse-error::Skipped: x"
+        );
+    }
 }

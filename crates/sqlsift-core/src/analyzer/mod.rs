@@ -116,7 +116,8 @@ impl<'a> Analyzer<'a> {
         let directives = InlineDirectives::parse(sql);
 
         // Parse the SQL
-        let statements = self.parse_statements(sql);
+        let lines = LineIndex::new(sql);
+        let statements = self.parse_statements(sql, &lines);
 
         // Analyze each statement
         for (stmt, origin) in &statements {
@@ -136,6 +137,14 @@ impl<'a> Analyzer<'a> {
         // Report diagnostics in source order (parse errors are found before analysis)
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
+
+        // Spans are built from line/column locations: add their byte offsets
+        for diagnostic in &mut self.diagnostics {
+            let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+            for span in diagnostic.span.iter_mut().chain(labels) {
+                lines.fill_offset(span);
+            }
+        }
 
         // Filter out diagnostics suppressed by inline directives, then apply rule levels
         let diagnostics = std::mem::take(&mut self.diagnostics)
@@ -157,18 +166,17 @@ impl<'a> Analyzer<'a> {
     /// a syntax error is reported where it occurs and doesn't hide diagnostics in the
     /// other statements. Only the statement's own text is parsed (keeping this linear
     /// in the input size); its locations are shifted by its [`Origin`] afterwards.
-    fn parse_statements(&mut self, sql: &str) -> Vec<(Statement, Origin)> {
+    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> Vec<(Statement, Origin)> {
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => return statements.into_iter().map(|s| (s, Origin::START)).collect(),
             Err(error) => error,
         };
 
-        let lines = LineIndex::new(sql);
-        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, &lines) else {
+        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, lines) else {
             // Tokenizer error: nothing can be parsed reliably
             self.diagnostics
-                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), &lines));
+                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), lines));
             return Vec::new();
         };
 
@@ -180,7 +188,7 @@ impl<'a> Analyzer<'a> {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
                 Err(error) => self
                     .diagnostics
-                    .push(parse_error_diagnostic(&error, sql, range, &lines)),
+                    .push(parse_error_diagnostic(&error, sql, range, lines)),
             }
         }
         statements
@@ -232,6 +240,13 @@ impl<'a> LineIndex<'a> {
             .char_indices()
             .nth(column.saturating_sub(1) as usize)
             .map_or(self.sql.len(), |(i, _)| line_start + i)
+    }
+
+    /// Set the byte offset of a span that has a line/column location
+    fn fill_offset(&self, span: &mut Span) {
+        if span.line > 0 {
+            span.offset = self.byte_offset(span.line as u64, span.column as u64);
+        }
     }
 
     /// 1-indexed line / character column of a byte offset
