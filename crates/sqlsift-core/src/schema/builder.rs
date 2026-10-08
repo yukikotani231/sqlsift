@@ -38,8 +38,12 @@ impl SchemaBuilder {
         }
     }
 
-    /// Parse SQL schema definitions and build the catalog
+    /// Parse SQL schema definitions and build the catalog.
+    ///
+    /// dbmate `-- migrate:down` sections are ignored (see
+    /// [`strip_down_migrations`](crate::schema::strip_down_migrations)).
     pub fn parse(&mut self, sql: &str) -> Result<(), Vec<Diagnostic>> {
+        let sql = &*crate::schema::strip_down_migrations(sql);
         let dialect = self.dialect.parser_dialect();
 
         // Try parsing the entire SQL first (fast path)

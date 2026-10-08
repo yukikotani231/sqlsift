@@ -100,7 +100,8 @@ sqlsift check --schema schema.sql queries/*.sql
 # Use multiple schema files
 sqlsift check -s users.sql -s orders.sql queries/*.sql
 
-# Use a migrations directory (all *.sql files, recursively, in filename order)
+# Use a migrations directory (all *.sql files, recursively, in filename order;
+# rollback files such as *.down.sql are skipped)
 sqlsift check --schema-dir ./migrations queries/*.sql
 
 # Other dialects
@@ -158,6 +159,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+
+Only the "up" direction of migrations is applied: `--schema-dir` skips rollback files (`*.down.sql` from sqlx / golang-migrate, Flyway undo files `U<version>__*.sql`), and in any schema file everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored. Files passed explicitly with `--schema` are always loaded.
 
 ## Editor Integration
 
