@@ -296,9 +296,10 @@ SELECT bad_col FROM missing_table;
 - ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
 - ✅ String literals coerce to the column type like in the database (`created_at > '2024-01-01'`, `status = 'active'`, `id = '42'`), while impossible values are still reported (`id = 'abc'`)
 - ✅ Date/time arithmetic (`now() - interval '7 days'`, `placed_on + 7`, `ts1 - ts2`)
+- ✅ CASE expression branch consistency (`THEN total ELSE 'cheap'`) and result type
+- ✅ Enum values for PostgreSQL enum types and MySQL inline `ENUM(...)` (`status = 'opne'` → "Did you mean 'open'?")
 
 **Not Yet Detected:**
-- ⏳ CASE expression type consistency
 - ⏳ Subquery/CTE column type inference
 
 </details>
@@ -372,9 +373,9 @@ Options:
 - [x] SQLite dialect support
 - [x] Type inference for expressions (WHERE, JOIN, arithmetic, INSERT/UPDATE)
 - [x] LSP server for editor integration (VS Code extension)
+- [x] CASE expression type consistency checking
 
 #### Planned
-- [ ] CASE expression type consistency checking
 - [ ] Subquery/CTE column type inference
 - [ ] Custom rule plugins
 

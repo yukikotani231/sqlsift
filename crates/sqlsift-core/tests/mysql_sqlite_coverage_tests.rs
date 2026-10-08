@@ -326,7 +326,11 @@ fn mysql_schema_column_types() {
         ("customers", "id", SqlType::Integer),
         ("customers", "email", SqlType::Varchar { length: Some(255) }),
         ("customers", "is_verified", SqlType::TinyInt),
-        ("customers", "status", SqlType::Custom("ENUM".into())),
+        (
+            "customers",
+            "status",
+            SqlType::Enum(vec!["active".into(), "suspended".into(), "deleted".into()]),
+        ),
         (
             "customers",
             "balance",

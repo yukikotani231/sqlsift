@@ -174,9 +174,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - String literals are untyped (`ExpressionType::StringLiteral`) and coerce to the other operand's type; only numeric/boolean targets are validated (`SqlType::accepts_string_literal`)
 - Date/time arithmetic (`SqlType::temporal_arithmetic_result`)
 - Dialect-aware coercions (MySQL/SQLite booleans are integers)
+- CASE expression branch consistency and result type (`check_case_branches`, `infer_case_type`)
+- Enum literal values for named enums and MySQL inline `ENUM(...)` (`SqlType::Enum`, `report_enum_literal`)
 
 **Not Yet Implemented (TODO):**
-- CASE expression type consistency (THEN/ELSE must have compatible types)
 - Subquery/CTE column type inference
 - VIEW column type inference from SELECT projection
 

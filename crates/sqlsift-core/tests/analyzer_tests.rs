@@ -1004,10 +1004,10 @@ fn test_mysql_schema_parsing() {
 
     // ENUM column
     let status_col = table.get_column("status").unwrap();
-    assert!(
-        matches!(&status_col.data_type, SqlType::Custom(name) if name == "ENUM"),
-        "ENUM column should be Custom(\"ENUM\"): {:?}",
-        status_col.data_type
+    assert_eq!(
+        status_col.data_type,
+        SqlType::Enum(vec!["active".into(), "inactive".into(), "banned".into()]),
+        "ENUM column should keep its values"
     );
 
     // MEDIUMINT column
