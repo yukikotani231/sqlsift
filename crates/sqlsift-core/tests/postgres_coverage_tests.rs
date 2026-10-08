@@ -759,7 +759,7 @@ fn valid_inserts() {
         &[
             "INSERT INTO categories (name) VALUES ('a')",
             "INSERT INTO categories (name, parent_id) VALUES ('a', NULL), ('b', 1), ('c', 2)",
-            "INSERT INTO categories DEFAULT VALUES",
+            "INSERT INTO categories (name, parent_id) VALUES ('x', DEFAULT)",
             "INSERT INTO orders (user_id, total) VALUES (1, 9.99)",
             "INSERT INTO orders (user_id, total, status) VALUES (1, 9.99, 'paid'::order_status)",
             "INSERT INTO order_items (order_id, product_id, quantity, unit_price) SELECT 1, id, 1, price FROM products WHERE id = 3",
