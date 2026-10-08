@@ -256,6 +256,7 @@ The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for al
 | E0005 | column-count-mismatch | INSERT column count doesn't match values | ✅ Implemented |
 | E0006 | ambiguous-column | Column reference is ambiguous across tables | ✅ Implemented |
 | E0007 | join-type-mismatch | JOIN condition compares incompatible types | ✅ Implemented |
+| E0008 | missing-required-column | INSERT omits a NOT NULL column that has no default | ✅ Implemented |
 
 ### Inline Suppression
 

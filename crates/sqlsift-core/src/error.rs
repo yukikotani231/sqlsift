@@ -152,6 +152,8 @@ pub enum DiagnosticKind {
     AmbiguousColumn,
     /// E0007: JOIN type mismatch
     JoinTypeMismatch,
+    /// E0008: INSERT omits a NOT NULL column that has no default
+    MissingRequiredColumn,
     /// Parse error
     ParseError,
 }
@@ -166,6 +168,7 @@ impl DiagnosticKind {
             DiagnosticKind::ColumnCountMismatch => "E0005",
             DiagnosticKind::AmbiguousColumn => "E0006",
             DiagnosticKind::JoinTypeMismatch => "E0007",
+            DiagnosticKind::MissingRequiredColumn => "E0008",
             DiagnosticKind::ParseError => "E1000",
         }
     }
@@ -179,6 +182,7 @@ impl DiagnosticKind {
             DiagnosticKind::ColumnCountMismatch => "column-count-mismatch",
             DiagnosticKind::AmbiguousColumn => "ambiguous-column",
             DiagnosticKind::JoinTypeMismatch => "join-type-mismatch",
+            DiagnosticKind::MissingRequiredColumn => "missing-required-column",
             DiagnosticKind::ParseError => "parse-error",
         }
     }
