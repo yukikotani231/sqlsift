@@ -85,6 +85,18 @@ impl<'a> Resolver<'a> {
                 self.scope.pop();
                 columns
             }
+            // The queries of CREATE TABLE ... AS and CREATE VIEW (the relations they
+            // define are applied to the file's catalog by the analyzer)
+            Statement::CreateTable(create) => {
+                if let Some(query) = &create.query {
+                    self.query(query, false);
+                }
+                None
+            }
+            Statement::CreateView { query, .. } => {
+                self.query(query, false);
+                None
+            }
             _ => None,
         }
     }

@@ -21,6 +21,10 @@ pub struct SchemaBuilder {
     catalog: Catalog,
     diagnostics: Vec<Diagnostic>,
     dialect: SqlDialect,
+    /// Applying the statements of a query file: a `CREATE TABLE ... AS` whose columns
+    /// can't be inferred defines a relation with unknown columns (so references to
+    /// them aren't reported) instead of warning
+    query_file: bool,
 }
 
 impl SchemaBuilder {
@@ -35,7 +39,40 @@ impl SchemaBuilder {
             catalog,
             diagnostics: Vec::new(),
             dialect,
+            query_file: false,
         }
+    }
+
+    /// Continue building from an existing catalog: applies the DDL statements of a
+    /// query file to a file-local copy of the schema
+    pub(crate) fn from_catalog(catalog: Catalog, dialect: SqlDialect) -> Self {
+        Self {
+            catalog,
+            diagnostics: Vec::new(),
+            dialect,
+            query_file: true,
+        }
+    }
+
+    /// Apply one parsed statement to the catalog (statements that don't define or
+    /// change the schema are ignored)
+    pub(crate) fn apply_statement(&mut self, stmt: &Statement) {
+        self.process_statement(stmt);
+    }
+
+    /// Whether `stmt` is a statement [`SchemaBuilder`] applies to the catalog
+    pub(crate) fn changes_schema(stmt: &Statement) -> bool {
+        matches!(
+            stmt,
+            Statement::CreateTable(_)
+                | Statement::CreateType { .. }
+                | Statement::CreateView { .. }
+                | Statement::AlterTable { .. }
+                | Statement::Drop {
+                    object_type: ObjectType::Table | ObjectType::View | ObjectType::Type,
+                    ..
+                }
+        )
     }
 
     /// Parse SQL schema definitions and build the catalog
@@ -633,6 +670,17 @@ impl SchemaBuilder {
                                 .or_insert_with(|| ColumnDef::new(col_name, data_type));
                         }
                     }
+                    None if self.query_file => {
+                        // A view without columns is one whose columns are unknown
+                        self.catalog.drop_table(&name);
+                        self.catalog.add_view(ViewDef {
+                            name,
+                            columns: Vec::new(),
+                            column_types: Vec::new(),
+                            materialized: false,
+                        });
+                        return;
+                    }
                     None => self.diagnostics.push(Diagnostic::warning(
                         DiagnosticKind::ParseError,
                         format!(
@@ -886,6 +934,10 @@ impl SchemaBuilder {
     fn process_drop_table(&mut self, name: &ObjectName) {
         let table_name = self.catalog.qualified_name(name);
         self.catalog.drop_table(&table_name);
+        if self.query_file {
+            // A `CREATE TABLE ... AS` with unknown columns is defined as a view
+            self.catalog.drop_view(&table_name);
+        }
     }
 
     /// Process CREATE TYPE statement
@@ -966,7 +1018,6 @@ impl SchemaBuilder {
     }
 
     /// Get a reference to the current catalog
-    #[allow(dead_code)]
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }

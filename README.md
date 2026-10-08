@@ -353,6 +353,7 @@ SELECT bad_col FROM missing_table;
 - `CHECK` constraints (column-level and table-level)
 - `GENERATED AS IDENTITY` columns (ALWAYS / BY DEFAULT)
 - Resilient parsing — unsupported DDL (functions, triggers, domains, etc.) is gracefully skipped
+- DDL inside a query file (`CREATE [TEMP] TABLE`, `CREATE TABLE ... AS SELECT`, `CREATE VIEW`, `ALTER TABLE`, `DROP`) applies to the later statements of that file only
 
 ### Dialects
 
