@@ -213,7 +213,8 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ GENERATED AS IDENTITY columns
 - ✅ Resilient parsing (gracefully skips unsupported DDL)
 - ✅ Configuration file (sqlsift.toml)
-- ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable`), `sqlsift rules` lists the registry
+- ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
+- ✅ Ignoring query files (`ignore` in sqlsift.toml, `--ignore`; `sqlsift_core::ignore`), honored by the CLI and LSP
 - ✅ Multiple output formats (human, JSON, SARIF)
 - ✅ Type inference for expressions (WHERE, JOIN, INSERT VALUES, UPDATE SET, binary operators, nested expressions)
   - Detects type mismatches in comparisons (E0003)

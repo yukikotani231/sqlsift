@@ -137,15 +137,12 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline directives, then apply rule levels
+        // Filter out diagnostics suppressed by inline or file directives, then apply rule levels
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
-            .filter(|d| {
-                if let Some(span) = &d.span {
-                    !directives.is_suppressed(d.kind, span.line)
-                } else {
-                    true
-                }
+            .filter(|d| match &d.span {
+                Some(span) => !directives.is_suppressed(d.kind, span.line),
+                None => !directives.is_suppressed_in_file(d.kind),
             })
             .collect();
         self.rules.apply(diagnostics)

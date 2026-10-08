@@ -2066,3 +2066,166 @@ fn config_invalid_format_exits_two() {
         .assert_stderr_contains("Invalid format 'xml'")
         .assert_stderr_contains("human, json, sarif");
 }
+
+// ---------------------------------------------------------------------------
+// Ignoring files (`ignore`, `--ignore`) and `-- sqlsift:disable-file`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_ignore_skips_matching_files_from_config_files() {
+    let t = with_users_schema("ignore-cfg");
+    t.write("sql/a.sql", "SELECT id FROM users;\n");
+    t.write("sql/archive/old.sql", "SELECT nme FROM users;\n");
+    t.write("sql/archive/2020/older.sql", "SELECT nme FROM users;\n");
+    t.write("sql/users.generated.sql", "SELECT nme FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"sql/**/*.sql\"]\n\
+         ignore = [\"sql/archive/**\", \"**/*.generated.sql\"]\n",
+    );
+    t.run(&["check"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn config_ignore_applies_to_positional_arguments() {
+    let t = with_users_schema("ignore-positional");
+    t.write("ok.sql", "SELECT id FROM users;\n");
+    t.write("gen/bad.sql", "SELECT nme FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"gen\"]\n",
+    );
+    t.run(&["check", "ok.sql", "./gen/bad.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    t.run(&["check", "gen/*.sql", "ok.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("nme");
+}
+
+#[test]
+fn config_ignore_is_relative_to_config_dir() {
+    let t = TempDir::new("ignore-rel");
+    t.write("proj/schema.sql", USERS_SCHEMA);
+    t.write("proj/gen/bad.sql", "SELECT nme FROM users;\n");
+    t.write("proj/ok.sql", "SELECT id FROM users;\n");
+    t.write(
+        "proj/sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"**/*.sql\"]\nignore = [\"gen/**\", \"schema.sql\"]\n",
+    );
+    // Discovered from a subdirectory
+    t.run_in(&t.path().join("proj/gen"), &["check"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    // Given with --config from outside the project
+    t.run(&["check", "--config", "proj/sqlsift.toml"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn cli_ignore_flag_is_repeatable_and_adds_to_config() {
+    let t = with_users_schema("ignore-cli");
+    t.write("a.sql", "SELECT nme FROM users;\n");
+    t.write("b.sql", "SELECT nme FROM users;\n");
+    t.write("c.sql", "SELECT nme FROM users;\n");
+    t.write("ok.sql", "SELECT id FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"a.sql\"]\n",
+    );
+    let files = ["a.sql", "b.sql", "c.sql", "ok.sql"];
+    let mut args = vec!["check", "--ignore", "b.sql", "--ignore", "c.sql"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    // Without the flags only the config's pattern applies
+    let mut args = vec!["check"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(1)
+        .assert_stderr_contains("Found 2 error(s), 0 warning(s) in 3 file(s)");
+    // Glob syntax in the flag
+    let mut args = vec!["check", "--ignore", "[bc].sql"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn all_files_ignored_is_not_an_error() {
+    let t = with_users_schema("ignore-all");
+    t.write("gen/bad.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--ignore",
+        "gen/**",
+        "gen/bad.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("No files to check (1 ignored)");
+}
+
+#[test]
+fn invalid_ignore_pattern_exits_two() {
+    let t = with_users_schema("ignore-invalid");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "--ignore", "[x.sql", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("invalid ignore pattern '[x.sql'");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"[x.sql\"]\n",
+    );
+    t.run(&["check", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("invalid ignore pattern '[x.sql'");
+}
+
+#[test]
+fn ignore_is_a_known_config_key() {
+    let t = with_users_schema("ignore-known");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.write("sqlsift.toml", "schema = [\"schema.sql\"]\nignore = []\n");
+    t.run(&["check", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("unknown key");
+}
+
+#[test]
+fn disable_file_directive_suppresses_rules_for_the_whole_file() {
+    let t = with_users_schema("disable-file");
+    t.write(
+        "q.sql",
+        "SELECT nme FROM users;\n-- sqlsift:disable-file column-not-found\nSELECT other FROM users;\nSELECT id FROM nope;\n",
+    );
+    t.write("other.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "q.sql", "other.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Found 2 error(s)")
+        .assert_stderr_contains("q.sql:4:16")
+        .assert_stderr_contains("other.sql:1:8")
+        .assert_stderr_lacks("q.sql:1:8");
+}
+
+#[test]
+fn disable_file_directive_suppresses_parse_errors_and_everything() {
+    let t = with_users_schema("disable-file-all");
+    t.write(
+        "q.sql",
+        "-- sqlsift:disable-file\nSELECT nme FROM users;\nSELEC broken;\n",
+    );
+    t.write(
+        "p.sql",
+        "-- sqlsift:disable-file E1000\nSELECT id FROM users;\nSELEC broken;\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "q.sql", "p.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("All 2 file(s) passed validation");
+}

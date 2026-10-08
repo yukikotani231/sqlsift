@@ -6,6 +6,7 @@
 pub mod analyzer;
 pub mod dialect;
 pub mod error;
+pub mod ignore;
 pub mod rules;
 pub mod schema;
 pub mod types;

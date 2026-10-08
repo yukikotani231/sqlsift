@@ -129,6 +129,7 @@ Then just run `sqlsift check queries/**/*.sql`.
 schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
 # schema_dir = "db/migrations"    # all .sql files under this directory, in filename order
 files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
+ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
 dialect = "postgresql"            # postgresql, mysql or sqlite
 format = "human"                  # human, json or sarif
 disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
@@ -141,7 +142,7 @@ ambiguous-column = "off"          # ...or by name
 correctness = "error"
 ```
 
-Relative paths in the file are resolved against the directory containing `sqlsift.toml`. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
+Relative paths in the file are resolved against the directory containing `sqlsift.toml`. `ignore` patterns apply to the files from `files` and to files given on the command line (and the editor shows no diagnostics for them); `*` and `?` match within a directory, `**` matches any number of directories, and a pattern that matches a directory skips everything below it. `--ignore <PATTERN>` (repeatable, relative to the current directory) adds to the file's `ignore` list. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
 
 Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported, `2` for usage or configuration errors (missing files, invalid config, etc.).
 
@@ -303,6 +304,17 @@ SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, column-not-found
 SELECT bad_col FROM missing_table;
 ```
 
+Suppress rules for a whole file with `sqlsift:disable-file` (rules by code or name, comma-separated; all rules when none are listed, including parse errors `E1000`):
+
+```sql
+-- sqlsift:disable-file E0006, missing-required-column
+
+-- or turn off every rule for this file
+-- sqlsift:disable-file
+```
+
+A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it. It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file. To skip files entirely without editing them, use `ignore` in `sqlsift.toml` or `--ignore` (see the configuration file reference).
+
 <details>
 <summary><b>Type inference coverage (E0003, E0007)</b></summary>
 
@@ -376,6 +388,7 @@ Arguments:
 Options:
   -s, --schema <FILE>       Schema definition file (can be specified multiple times)
       --schema-dir <DIR>    Directory containing schema files
+      --ignore <PATTERN>    Skip query files matching a glob pattern (can be specified multiple times)
   -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
   -A, --allow <RULE>        Turn a rule or category off (alias: --disable)
   -W, --warn <RULE>         Report a rule or category as warnings

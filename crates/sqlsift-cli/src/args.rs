@@ -21,6 +21,8 @@ pub struct Args {
     pub quiet: bool,
 }
 
+// Parsed once per run, so the size difference between variants doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Command {
     /// Check SQL files against schema definitions
@@ -35,6 +37,10 @@ pub enum Command {
         /// Directory containing schema files
         #[arg(long = "schema-dir", value_name = "DIR")]
         schema_dir: Option<PathBuf>,
+
+        /// Skip query files matching a glob pattern (repeatable, e.g. `--ignore 'sql/archive/**'`)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
 
         /// Path to configuration file (default: sqlsift.toml in current or parent directory)
         #[arg(short, long = "config", value_name = "FILE")]

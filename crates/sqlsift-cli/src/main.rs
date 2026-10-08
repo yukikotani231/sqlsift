@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
+use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::SchemaBuilder;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
@@ -158,6 +159,7 @@ fn run(args: Args) -> Result<bool> {
             files,
             schema,
             schema_dir,
+            ignore,
             config: config_path,
             allow,
             warn,
@@ -176,7 +178,8 @@ fn run(args: Args) -> Result<bool> {
             };
 
             // Merge CLI args with config (CLI takes precedence)
-            let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &dialect);
+            let config =
+                config.merge_with_args(&schema, &schema_dir, &files, &ignore, &format, &dialect);
             tracing::info!(
                 schema_count = config.schema.len(),
                 query_pattern_count = config.files.len(),
@@ -276,6 +279,27 @@ fn run(args: Args) -> Result<bool> {
 
             if query_files.is_empty() {
                 miette::bail!("No query files specified. Use positional arguments or configure in sqlsift.toml");
+            }
+
+            // Skip ignored files (`ignore` in sqlsift.toml and `--ignore`); patterns
+            // from the config file were already made relative to the current directory
+            let ignore_patterns = IgnorePatterns::new(Path::new(""), &config.ignore)
+                .map_err(|e| miette::miette!(e))?;
+            let found = query_files.len();
+            query_files.retain(|path| {
+                let ignored = ignore_patterns.is_ignored(path);
+                if ignored {
+                    tracing::debug!(file = %path.display(), "Ignoring file");
+                }
+                !ignored
+            });
+            let ignored_count = found - query_files.len();
+            if query_files.is_empty() {
+                if !quiet {
+                    eprintln!("No files to check ({ignored_count} ignored)");
+                }
+                formatter.print(&[]);
+                return Ok(false);
             }
 
             // Analyze the query files in parallel; results are then collected in file

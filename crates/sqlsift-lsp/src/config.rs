@@ -13,6 +13,11 @@ pub struct Config {
     #[serde(default)]
     pub files: Vec<String>,
 
+    /// Glob patterns (relative to the config file's directory) of files that
+    /// get no diagnostics
+    #[serde(default)]
+    pub ignore: Vec<String>,
+
     #[serde(default)]
     pub dialect: Option<String>,
 

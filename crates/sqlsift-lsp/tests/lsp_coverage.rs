@@ -514,6 +514,35 @@ fn inline_suppression_is_honored() {
     assert_eq!(diags[0]["range"]["start"]["line"], 2);
 }
 
+#[test]
+fn disable_file_directive_is_honored() {
+    let t = workspace("disable-file", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(
+        &uri,
+        "SELECT nme FROM users;\n-- sqlsift:disable-file E0002\nSELECT id FROM nope;\nSELEC broken;\n",
+    );
+    assert_eq!(codes(&lsp.diagnostics_for(&uri)), vec!["E0001", "E1000"]);
+}
+
+#[test]
+fn config_ignored_files_get_no_diagnostics() {
+    let t = workspace("ignore", "ignore = [\"gen/**\", \"**/*.generated.sql\"]\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let ignored = t.uri("gen/q.sql");
+    lsp.open(&ignored, "SELECT nme FROM users;");
+    assert!(lsp.diagnostics_for(&ignored).is_empty());
+    let generated = t.uri("sub/x.generated.sql");
+    lsp.open(&generated, "SELECT nme FROM users;");
+    assert!(lsp.diagnostics_for(&generated).is_empty());
+    let checked = t.uri("q.sql");
+    lsp.open(&checked, "SELECT nme FROM users;");
+    assert_eq!(codes(&lsp.diagnostics_for(&checked)), vec!["E0002"]);
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
