@@ -39,6 +39,10 @@ const RULES: &[(DiagnosticKind, &str)] = &[
         DiagnosticKind::JoinTypeMismatch,
         "JOIN condition compares incompatible types",
     ),
+    (
+        DiagnosticKind::MissingRequiredColumn,
+        "INSERT omits a NOT NULL column without a default",
+    ),
     (DiagnosticKind::ParseError, "SQL could not be parsed"),
 ];
 

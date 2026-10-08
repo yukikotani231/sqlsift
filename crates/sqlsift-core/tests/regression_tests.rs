@@ -887,3 +887,90 @@ fn null_into_auto_generated_integer_key() {
         DiagnosticKind::PotentialNullViolation,
     );
 }
+
+// ---------------------------------------------------------------------------
+// E0008: INSERT omits a NOT NULL column without a default
+// ---------------------------------------------------------------------------
+
+#[test]
+fn insert_missing_required_column_is_reported() {
+    let sql = "INSERT INTO orders (user_id) VALUES (1)";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![DiagnosticKind::MissingRequiredColumn]
+    );
+    assert_eq!(diagnostics[0].code(), "E0008");
+    assert!(
+        diagnostics[0].message.contains("'total'"),
+        "{diagnostics:#?}"
+    );
+    assert_eq!(span_text(sql, &diagnostics[0]), "orders");
+
+    // several missing columns are reported together
+    let diagnostics = analyze(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (placed_on) SELECT current_date",
+    );
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![DiagnosticKind::MissingRequiredColumn]
+    );
+    assert!(
+        diagnostics[0].message.contains("'user_id'") && diagnostics[0].message.contains("'total'"),
+        "{diagnostics:#?}"
+    );
+
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO users DEFAULT VALUES",
+        DiagnosticKind::MissingRequiredColumn,
+    );
+}
+
+#[test]
+fn columns_with_generated_values_are_not_required() {
+    // serial / identity / DEFAULT / nullable columns may be omitted
+    for sql in [
+        "INSERT INTO orders (user_id, total) VALUES (1, 2)",
+        "INSERT INTO users (name) VALUES ('a')",
+        "INSERT INTO orders (user_id, total) SELECT id, 0 FROM users",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+    assert_valid(
+        "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, n INT NOT NULL DEFAULT 0, label TEXT);",
+        SqlDialect::PostgreSQL,
+        "INSERT INTO t (label) VALUES ('x')",
+    );
+    // MySQL AUTO_INCREMENT
+    assert_valid(
+        "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(10) NOT NULL, PRIMARY KEY (id));",
+        SqlDialect::MySQL,
+        "INSERT INTO t (name) VALUES ('a')",
+    );
+    // SQLite rowid alias
+    assert_valid(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        SqlDialect::SQLite,
+        "INSERT INTO t (name) VALUES ('a')",
+    );
+    // ... but a composite integer key is not generated
+    assert_single(
+        "CREATE TABLE t (a INTEGER NOT NULL, b INTEGER NOT NULL, PRIMARY KEY (a, b));",
+        SqlDialect::SQLite,
+        "INSERT INTO t (a) VALUES (1)",
+        DiagnosticKind::MissingRequiredColumn,
+    );
+}
+
+#[test]
+fn missing_required_column_can_be_disabled_inline() {
+    assert_valid(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "INSERT INTO orders (user_id) VALUES (1); -- sqlsift:disable E0008",
+    );
+}

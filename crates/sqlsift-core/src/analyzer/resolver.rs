@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
-use crate::schema::{Catalog, QualifiedName, TableDef};
+use crate::schema::{Catalog, ColumnDef, QualifiedName, TableDef};
 
 /// Resolved table reference in a query
 #[derive(Debug, Clone)]
@@ -186,6 +186,67 @@ impl<'a> NameResolver<'a> {
             .0
             .last()
             .map(|id| Span::from_sqlparser(&id.span));
+
+        // NOT NULL columns without a default must be given a value. Only checked
+        // with an explicit column list (or DEFAULT VALUES); without one, every
+        // column is positional and E0005 covers missing values.
+        // Skipped when the column list or VALUES arity is already wrong: the missing
+        // column is then usually the one that was misspelled or miscounted.
+        let default_values = insert.source.is_none() && insert.columns.is_empty();
+        let columns_valid = insert
+            .columns
+            .iter()
+            .all(|c| table_def.column_exists(&c.value));
+        let arity_valid = match insert.source.as_deref().map(|q| q.body.as_ref()) {
+            Some(SetExpr::Values(Values { rows, .. })) => {
+                rows.iter().all(|row| row.len() == insert.columns.len())
+            }
+            Some(body) => {
+                let selected = self.infer_cte_columns(body);
+                selected.is_empty() || selected.len() == insert.columns.len()
+            }
+            None => true,
+        };
+        if (!insert.columns.is_empty() || default_values) && columns_valid && arity_valid {
+            let missing: Vec<&str> = table_def
+                .columns
+                .values()
+                .filter(|col| {
+                    !insert
+                        .columns
+                        .iter()
+                        .any(|c| c.value.eq_ignore_ascii_case(&col.name))
+                        && !self.column_has_implicit_value(table_def, col)
+                })
+                .map(|col| col.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                let list = missing
+                    .iter()
+                    .map(|c| format!("'{}'", c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::MissingRequiredColumn,
+                    format!(
+                        "INSERT into '{}' is missing required column{} {}",
+                        table_name,
+                        if missing.len() == 1 { "" } else { "s" },
+                        list
+                    ),
+                )
+                .with_help(format!(
+                    "{} NOT NULL without a default. Provide a value, or add a DEFAULT to the schema",
+                    if missing.len() == 1 {
+                        format!("{} is", list)
+                    } else {
+                        format!("{} are", list)
+                    }
+                ));
+                diag.span = insert_span;
+                self.diagnostics.push(diag);
+            }
+        }
         if let Some(source) = &insert.source {
             if let SetExpr::Values(Values { rows, .. }) = source.body.as_ref() {
                 let expected_count = if specified_columns.is_empty() {
@@ -1571,6 +1632,19 @@ impl<'a> NameResolver<'a> {
                 .find(|(k, _)| self.catalog.names_match(k, name))
                 .map(|(_, v)| v)
         })
+    }
+
+    /// Whether the database supplies a value for `col` when an INSERT omits it
+    fn column_has_implicit_value(&self, table: &TableDef, col: &ColumnDef) -> bool {
+        if col.nullable || col.default.is_some() || col.identity.is_some() || col.auto_increment {
+            return true;
+        }
+        // SQLite: a single-column INTEGER PRIMARY KEY is an alias for the rowid
+        self.dialect == SqlDialect::SQLite
+            && col.data_type.is_integer()
+            && table.primary_key.as_ref().map_or(col.is_primary_key, |pk| {
+                pk.columns.len() == 1 && pk.columns[0].eq_ignore_ascii_case(&col.name)
+            })
     }
 
     /// Whether a table reference has an unknown column list (a missing table, a table
