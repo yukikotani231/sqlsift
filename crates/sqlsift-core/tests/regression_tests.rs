@@ -974,3 +974,50 @@ fn missing_required_column_can_be_disabled_inline() {
         "INSERT INTO orders (user_id) VALUES (1); -- sqlsift:disable E0008",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Statement-by-statement parsing after a syntax error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spans_stay_absolute_for_statements_on_the_same_line_as_a_syntax_error() {
+    let sql = "SELECT naem FROM users; SELECT FROM WHERE; SELECT emial FROM users;\nSELECT nme FROM users;";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ParseError,
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ColumnNotFound
+        ],
+        "{diagnostics:#?}"
+    );
+    assert_eq!(span_text(sql, &diagnostics[0]), "naem");
+    let parse_error = diagnostics[1].span.unwrap();
+    // same location as when the whole input is parsed at once
+    assert_eq!(
+        (parse_error.line, parse_error.column),
+        (1, 37),
+        "{diagnostics:#?}"
+    );
+    assert_eq!(span_text(sql, &diagnostics[2]), "emial");
+    assert_eq!(span_text(sql, &diagnostics[3]), "nme");
+}
+
+#[test]
+fn large_input_with_a_syntax_error_is_analyzed_in_linear_time() {
+    // Re-parsing the whole input for every statement made this quadratic
+    let mut sql = String::new();
+    for i in 0..3000 {
+        sql.push_str(&format!("SELECT id, name FROM users WHERE id = {i};\n"));
+    }
+    sql.push_str("SELECT FROM WHERE;\n");
+    let catalog = catalog(PG_SCHEMA, SqlDialect::PostgreSQL);
+    let started = std::time::Instant::now();
+    let diagnostics = Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(&sql);
+    let elapsed = started.elapsed();
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ParseError]);
+    assert_eq!(diagnostics[0].span.unwrap().line, 3001);
+    assert!(elapsed.as_secs() < 20, "took {elapsed:?}");
+}
