@@ -47,11 +47,15 @@ schema = ["db/schema.sql"]
 # Or specify a directory (recursively finds *.sql)
 # schema_dir = "db/migrations"
 
-# SQL dialect: "postgresql" (default) or "mysql"
+# SQL dialect: "postgresql" (default), "mysql" or "sqlite"
 # dialect = "postgresql"
 
 # Disable specific rules
 # disable = ["E0001"]
+
+# Rule levels: "off", "warn" or "error" (by code or name)
+# [rules]
+# ambiguous-column = "warn"
 ```
 
 ## Extension Settings

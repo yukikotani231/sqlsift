@@ -16,6 +16,7 @@ sqlsift/
 │   │   ├── analyzer/      # Query validation and name resolution
 │   │   ├── types/         # SQL type system
 │   │   ├── dialect/       # SQL dialect abstraction
+│   │   ├── rules.rs       # Rule registry, categories and rule levels
 │   │   └── error.rs       # Diagnostic types
 │   │
 │   ├── sqlsift-cli/      # CLI binary
@@ -104,9 +105,10 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ### Adding a New Diagnostic Rule
 
-1. Add variant to `DiagnosticKind` in `error.rs`
-2. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
-3. Add test case in `analyzer/mod.rs`
+1. Add variant to `DiagnosticKind` in `error.rs` and its entry (code, name, category, summary) to `RULES` in `rules.rs`, in the same position (the registry is indexed by the variant)
+2. Pick the category by how sure the rule is: `correctness` (definitely wrong, default error), `suspicious` (likely wrong, default warn), `pedantic` / `style` / `restriction` (opt-in)
+3. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
+4. Add test cases (`crates/sqlsift-core/tests/`) and the rule to the README rule table
 
 ### Adding SQL Type Support
 
@@ -211,7 +213,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ GENERATED AS IDENTITY columns
 - ✅ Resilient parsing (gracefully skips unsupported DDL)
 - ✅ Configuration file (sqlsift.toml)
-- ✅ Rule disabling (--disable flag)
+- ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable`), `sqlsift rules` lists the registry
 - ✅ Multiple output formats (human, JSON, SARIF)
 - ✅ Type inference for expressions (WHERE, JOIN, INSERT VALUES, UPDATE SET, binary operators, nested expressions)
   - Detects type mismatches in comparisons (E0003)

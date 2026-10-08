@@ -1,21 +1,15 @@
-use std::collections::HashSet;
-
 use tower_lsp::lsp_types::{self, NumberOrString, Position, Range};
 
 use sqlsift_core::{Diagnostic, Severity, Span};
 
-/// Convert sqlsift diagnostics to LSP diagnostics, filtering disabled rules.
+/// Convert sqlsift diagnostics to LSP diagnostics. (Rule levels are applied by the
+/// analyzer: diagnostics of rules that are off never get here.)
 ///
 /// `text` is the analyzed document, used to convert character columns into
 /// the UTF-16 code unit offsets that LSP positions use.
-pub fn to_lsp_diagnostics(
-    diagnostics: &[Diagnostic],
-    disabled_rules: &HashSet<String>,
-    text: &str,
-) -> Vec<lsp_types::Diagnostic> {
+pub fn to_lsp_diagnostics(diagnostics: &[Diagnostic], text: &str) -> Vec<lsp_types::Diagnostic> {
     diagnostics
         .iter()
-        .filter(|d| !disabled_rules.contains(d.code()))
         .map(|d| to_lsp_diagnostic(d, text))
         .collect()
 }
@@ -140,25 +134,5 @@ mod tests {
         let diag = Diagnostic::error(DiagnosticKind::TableNotFound, "Table 'foo' not found");
         let msg = format_message(&diag);
         assert_eq!(msg, "Table 'foo' not found");
-    }
-
-    #[test]
-    fn test_disabled_rules_filtering() {
-        let diagnostics = vec![
-            Diagnostic::error(DiagnosticKind::TableNotFound, "Table 'a'"),
-            Diagnostic::error(DiagnosticKind::ColumnNotFound, "Column 'b'"),
-            Diagnostic::error(DiagnosticKind::TypeMismatch, "Type mismatch"),
-        ];
-        let disabled: HashSet<String> = ["E0001".to_string()].into();
-        let result = to_lsp_diagnostics(&diagnostics, &disabled, "");
-        assert_eq!(result.len(), 2);
-        assert_eq!(
-            result[0].code,
-            Some(NumberOrString::String("E0002".to_string()))
-        );
-        assert_eq!(
-            result[1].code,
-            Some(NumberOrString::String("E0003".to_string()))
-        );
     }
 }

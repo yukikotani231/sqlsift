@@ -1,17 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
 
 use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
-use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
+use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
 use crate::config::Config;
 
 pub struct ServerState {
     pub catalog: Catalog,
     pub dialect: SqlDialect,
-    pub disabled_rules: HashSet<String>,
+    /// Rule levels from sqlsift.toml
+    pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
     pub workspace_root: Option<PathBuf>,
@@ -24,7 +25,7 @@ impl ServerState {
         Self {
             catalog: Catalog::default(),
             dialect: SqlDialect::default(),
-            disabled_rules: HashSet::new(),
+            rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             schema_files: Vec::new(),
             workspace_root: None,
@@ -57,8 +58,14 @@ impl ServerState {
             }
         }
 
-        // Set disabled rules
-        self.disabled_rules = config.disable.iter().cloned().collect();
+        // Rule levels (`disable`, `[rules]`, `[categories]`)
+        let (rules, problems) = config.rule_config();
+        self.rules = rules;
+        self.config_warnings.extend(
+            problems
+                .into_iter()
+                .map(|p| format!("{}: {}", config_path.display(), p)),
+        );
 
         // Resolve schema files relative to the directory containing sqlsift.toml
         let config_dir = config_path.parent().unwrap_or(workspace_root);
@@ -97,7 +104,8 @@ impl ServerState {
 
     /// Analyze a SQL document and return diagnostics
     pub fn analyze_document(&self, text: &str) -> Vec<Diagnostic> {
-        let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect);
+        let mut analyzer =
+            Analyzer::with_dialect(&self.catalog, self.dialect).with_rules(self.rules.clone());
         analyzer.analyze(text)
     }
 
@@ -325,7 +333,12 @@ mod tests {
         let state = ServerState::new();
         assert!(state.open_documents.is_empty());
         assert!(state.schema_files.is_empty());
-        assert!(state.disabled_rules.is_empty());
+        assert_eq!(
+            state
+                .rules
+                .level(sqlsift_core::DiagnosticKind::ColumnNotFound),
+            sqlsift_core::RuleLevel::Error
+        );
         assert!(state.workspace_root.is_none());
     }
 

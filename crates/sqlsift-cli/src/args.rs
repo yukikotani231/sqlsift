@@ -40,9 +40,22 @@ pub enum Command {
         #[arg(short, long = "config", value_name = "FILE")]
         config: Option<PathBuf>,
 
-        /// Disable specific rules (e.g., E0001, E0002)
-        #[arg(long = "disable", value_name = "RULE")]
-        disable: Vec<String>,
+        /// Turn rules or rule categories off (e.g. `-A E0006`, `-A ambiguous-column`)
+        #[arg(
+            short = 'A',
+            long = "allow",
+            visible_alias = "disable",
+            value_name = "RULE"
+        )]
+        allow: Vec<String>,
+
+        /// Report rules or rule categories as warnings, which don't fail the check
+        #[arg(short = 'W', long = "warn", value_name = "RULE")]
+        warn: Vec<String>,
+
+        /// Report rules or rule categories as errors (e.g. `-D suspicious`)
+        #[arg(short = 'D', long = "deny", value_name = "RULE")]
+        deny: Vec<String>,
 
         /// SQL dialect: postgresql, mysql, sqlite [default: postgresql]
         #[arg(short, long)]
@@ -56,6 +69,9 @@ pub enum Command {
         #[arg(long, default_value = "100")]
         max_errors: usize,
     },
+
+    /// List all rules with their category and default level
+    Rules,
 
     /// Display schema information
     Schema {

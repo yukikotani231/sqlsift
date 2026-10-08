@@ -135,8 +135,8 @@ impl Diagnostic {
     }
 }
 
-/// Types of diagnostics
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Types of diagnostics (one per rule; see [`crate::rules::RULES`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiagnosticKind {
     /// E0001: Table not found
     TableNotFound,
@@ -159,31 +159,13 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
+    /// Rule code (e.g. `E0002`)
     pub fn code(&self) -> &'static str {
-        match self {
-            DiagnosticKind::TableNotFound => "E0001",
-            DiagnosticKind::ColumnNotFound => "E0002",
-            DiagnosticKind::TypeMismatch => "E0003",
-            DiagnosticKind::PotentialNullViolation => "E0004",
-            DiagnosticKind::ColumnCountMismatch => "E0005",
-            DiagnosticKind::AmbiguousColumn => "E0006",
-            DiagnosticKind::JoinTypeMismatch => "E0007",
-            DiagnosticKind::MissingRequiredColumn => "E0008",
-            DiagnosticKind::ParseError => "E1000",
-        }
+        self.rule().code
     }
 
+    /// Rule name (e.g. `column-not-found`)
     pub fn name(&self) -> &'static str {
-        match self {
-            DiagnosticKind::TableNotFound => "table-not-found",
-            DiagnosticKind::ColumnNotFound => "column-not-found",
-            DiagnosticKind::TypeMismatch => "type-mismatch",
-            DiagnosticKind::PotentialNullViolation => "potential-null-violation",
-            DiagnosticKind::ColumnCountMismatch => "column-count-mismatch",
-            DiagnosticKind::AmbiguousColumn => "ambiguous-column",
-            DiagnosticKind::JoinTypeMismatch => "join-type-mismatch",
-            DiagnosticKind::MissingRequiredColumn => "missing-required-column",
-            DiagnosticKind::ParseError => "parse-error",
-        }
+        self.rule().name
     }
 }

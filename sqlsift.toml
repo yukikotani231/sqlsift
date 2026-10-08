@@ -22,5 +22,16 @@ schema = [
 # Output format: "human", "json", or "sarif"
 # format = "human"
 
-# Disable specific error codes
-# disable = ["E0001", "E0002"]
+# Disable specific rules (codes or names)
+# disable = ["E0001", "column-not-found"]
+
+# Rule levels: "off", "warn" (reported, doesn't fail the check) or "error".
+# List rules with `sqlsift rules`.
+# [rules]
+# E0006 = "warn"
+# missing-required-column = "off"
+
+# Levels of whole categories: correctness (default error), suspicious (warn),
+# pedantic, style, restriction (off). A rule's own level wins.
+# [categories]
+# correctness = "error"

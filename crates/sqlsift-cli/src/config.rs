@@ -2,7 +2,10 @@
 
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use sqlsift_core::rules::{find_category, find_rule, RuleConfig, RuleLevel};
 
 /// Keys recognized in `sqlsift.toml`
 const KNOWN_KEYS: &[&str] = &[
@@ -12,6 +15,8 @@ const KNOWN_KEYS: &[&str] = &[
     "format",
     "disable",
     "schema_dir",
+    "rules",
+    "categories",
 ];
 
 /// Configuration for sqlsift
@@ -36,6 +41,14 @@ pub struct Config {
     /// Rules to disable (e.g., ["E0001", "E0002"])
     #[serde(default)]
     pub disable: Vec<String>,
+
+    /// Rule levels by rule code or name (e.g. `E0006 = "warn"`, `column-not-found = "off"`)
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
+
+    /// Levels of whole rule categories (e.g. `suspicious = "error"`)
+    #[serde(default)]
+    pub categories: BTreeMap<String, String>,
 
     /// Schema directory
     pub schema_dir: Option<String>,
@@ -100,7 +113,6 @@ impl Config {
         schema_dir: &Option<PathBuf>,
         files: &[PathBuf],
         format: &Option<crate::args::OutputFormat>,
-        disable: &[String],
         dialect: &Option<String>,
     ) -> Self {
         // CLI args override config file
@@ -120,16 +132,73 @@ impl Config {
             self.format = Some(format!("{:?}", fmt).to_lowercase());
         }
 
-        if !disable.is_empty() {
-            self.disable = disable.to_vec();
-        }
-
         if dialect.is_some() {
             self.dialect = dialect.clone();
         }
 
         self
     }
+}
+
+/// Rule levels set on the command line (`-A`, `-W`, `-D`)
+#[derive(Debug, Default)]
+pub struct RuleFlags<'a> {
+    pub allow: &'a [String],
+    pub warn: &'a [String],
+    pub deny: &'a [String],
+}
+
+impl Config {
+    /// Rule levels from the config file, overridden by command line flags.
+    /// A rule's own level always takes precedence over its category's.
+    pub fn rule_config(&self, flags: &RuleFlags) -> Result<RuleConfig> {
+        let mut rules = RuleConfig::default();
+        let mut set = |id: &str, level: RuleLevel, origin: &str| {
+            rules
+                .configure(id, level)
+                .map_err(|e| miette::miette!("{}: {}", origin, e))
+        };
+
+        for (name, level) in &self.categories {
+            if find_category(name).is_none() {
+                miette::bail!(
+                    "[categories]: unknown category '{}' (expected one of: {})",
+                    name,
+                    sqlsift_core::RuleCategory::ALL.map(|c| c.name()).join(", ")
+                );
+            }
+            set(name, parse_level(level, "[categories]")?, "[categories]")?;
+        }
+        for (id, level) in &self.rules {
+            if find_rule(id).is_none() {
+                miette::bail!(
+                    "[rules]: unknown rule '{}' (run `sqlsift rules` to list rules)",
+                    id
+                );
+            }
+            set(id, parse_level(level, "[rules]")?, "[rules]")?;
+        }
+        for id in &self.disable {
+            set(id, RuleLevel::Off, "disable")?;
+        }
+        for (ids, level, flag) in [
+            (flags.allow, RuleLevel::Off, "--allow"),
+            (flags.warn, RuleLevel::Warn, "--warn"),
+            (flags.deny, RuleLevel::Error, "--deny"),
+        ] {
+            for id in ids {
+                set(id, level, flag)?;
+            }
+        }
+        Ok(rules)
+    }
+}
+
+/// Parse a rule level from the config file
+fn parse_level(level: &str, origin: &str) -> Result<RuleLevel> {
+    level
+        .parse()
+        .map_err(|e: String| miette::miette!("{}: {}", origin, e))
 }
 
 /// Directory that relative paths in a config file are resolved against.

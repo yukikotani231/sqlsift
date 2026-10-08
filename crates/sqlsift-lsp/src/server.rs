@@ -25,7 +25,7 @@ impl Backend {
     async fn publish_diagnostics_for(&self, uri: Url, text: &str) {
         let state = self.state.read().await;
         let diagnostics = state.analyze_document(text);
-        let lsp_diagnostics = to_lsp_diagnostics(&diagnostics, &state.disabled_rules, text);
+        let lsp_diagnostics = to_lsp_diagnostics(&diagnostics, text);
         self.client
             .publish_diagnostics(uri, lsp_diagnostics, None)
             .await;

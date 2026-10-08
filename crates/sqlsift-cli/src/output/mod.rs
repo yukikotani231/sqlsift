@@ -9,43 +9,6 @@ use crate::args::OutputFormat;
 /// Documentation anchor for diagnostic rules (used as SARIF `helpUri`)
 const RULES_HELP_URI: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#diagnostic-rules");
 
-/// Known rules with a short description, in SARIF `rules` order
-const RULES: &[(DiagnosticKind, &str)] = &[
-    (
-        DiagnosticKind::TableNotFound,
-        "Referenced table does not exist in schema",
-    ),
-    (
-        DiagnosticKind::ColumnNotFound,
-        "Referenced column does not exist in table",
-    ),
-    (
-        DiagnosticKind::TypeMismatch,
-        "Type incompatibility in expression",
-    ),
-    (
-        DiagnosticKind::PotentialNullViolation,
-        "Potential NOT NULL violation",
-    ),
-    (
-        DiagnosticKind::ColumnCountMismatch,
-        "INSERT column count doesn't match values",
-    ),
-    (
-        DiagnosticKind::AmbiguousColumn,
-        "Column reference is ambiguous across tables",
-    ),
-    (
-        DiagnosticKind::JoinTypeMismatch,
-        "JOIN condition compares incompatible types",
-    ),
-    (
-        DiagnosticKind::MissingRequiredColumn,
-        "INSERT omits a NOT NULL column without a default",
-    ),
-    (DiagnosticKind::ParseError, "SQL could not be parsed"),
-];
-
 /// Diagnostics produced for a single file
 pub struct FileDiagnostics {
     pub file: String,
@@ -206,21 +169,16 @@ fn print_json(files: &[&FileDiagnostics]) {
 
 /// SARIF 2.1.0 output with a single run containing results for all files
 fn print_sarif(files: &[&FileDiagnostics]) {
-    let mut rules: Vec<serde_json::Value> = RULES
+    let rules: Vec<serde_json::Value> = sqlsift_core::rules::RULES
         .iter()
-        .map(|(kind, description)| sarif_rule(*kind, description))
+        .map(|rule| sarif_rule(rule.kind, rule.summary))
         .collect();
 
     let mut results = Vec::new();
     for f in files {
         for d in &f.diagnostics {
-            let rule_index = match rules.iter().position(|r| r["id"] == d.code()) {
-                Some(i) => i,
-                None => {
-                    rules.push(sarif_rule(d.kind, d.kind.name()));
-                    rules.len() - 1
-                }
-            };
+            // The registry is indexed by diagnostic kind
+            let rule_index = d.kind as usize;
 
             let mut physical = serde_json::json!({
                 "artifactLocation": {

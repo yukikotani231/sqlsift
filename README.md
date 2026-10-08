@@ -113,7 +113,9 @@ To avoid repeating flags, add a `sqlsift.toml` to your project root (see [`sqlsi
 schema = ["db/schema.sql"]
 # schema_dir = "db/migrations"
 # dialect = "postgresql"
-# disable = ["E0006"]
+
+# [rules]
+# ambiguous-column = "warn"   # report, but don't fail the check
 ```
 
 Then just run `sqlsift check queries/**/*.sql`.
@@ -129,10 +131,17 @@ schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
 files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
 dialect = "postgresql"            # postgresql, mysql or sqlite
 format = "human"                  # human, json or sarif
-disable = ["E0006"]               # rules to disable
+disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
+
+[rules]                           # per-rule level: "off", "warn" or "error"
+E0008 = "warn"                    # by code...
+ambiguous-column = "off"          # ...or by name
+
+[categories]                      # level of every rule in a category
+correctness = "error"
 ```
 
-Relative paths in the file are resolved against the directory containing `sqlsift.toml`. Unknown keys produce a warning; invalid `dialect` or `format` values are errors.
+Relative paths in the file are resolved against the directory containing `sqlsift.toml`. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
 
 Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported, `2` for usage or configuration errors (missing files, invalid config, etc.).
 
@@ -247,16 +256,32 @@ The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for al
 
 ## Diagnostic Rules
 
-| Code | Name | Description | Status |
-|------|------|-------------|--------|
-| E0001 | table-not-found | Referenced table does not exist in schema | ✅ Implemented |
-| E0002 | column-not-found | Referenced column does not exist in table | ✅ Implemented |
-| E0003 | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic) | ✅ Implemented |
-| E0004 | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) | ✅ Implemented |
-| E0005 | column-count-mismatch | INSERT column count doesn't match values | ✅ Implemented |
-| E0006 | ambiguous-column | Column reference is ambiguous across tables | ✅ Implemented |
-| E0007 | join-type-mismatch | JOIN condition compares incompatible types | ✅ Implemented |
-| E0008 | missing-required-column | INSERT omits a NOT NULL column that has no default | ✅ Implemented |
+| Code | Name | Category | Description |
+|------|------|----------|-------------|
+| E0001 | table-not-found | correctness | Referenced table does not exist in schema |
+| E0002 | column-not-found | correctness | Referenced column does not exist in table |
+| E0003 | type-mismatch | correctness | Type incompatibility in expressions (comparisons, arithmetic) |
+| E0004 | potential-null-violation | correctness | Potential NOT NULL violation (explicit NULL assignment) |
+| E0005 | column-count-mismatch | correctness | INSERT column count doesn't match values |
+| E0006 | ambiguous-column | correctness | Column reference is ambiguous across tables |
+| E0007 | join-type-mismatch | correctness | JOIN condition compares incompatible types |
+| E0008 | missing-required-column | correctness | INSERT omits a NOT NULL column that has no default |
+
+`sqlsift rules` prints this list. Like [oxlint](https://oxc.rs/docs/guide/usage/linter.html), every rule belongs to a category that sets its default level:
+
+| Category | Default | Meaning |
+|----------|---------|---------|
+| `correctness` | error | The query fails or does something unintended |
+| `suspicious` | warn | The query is most likely wrong |
+| `pedantic` | off | Stricter checks that may have false positives |
+| `style` | off | Conventions and readability |
+| `restriction` | off | Bans on features some codebases don't want |
+
+Set the level of a rule or a whole category to `off`, `warn` or `error` with `[rules]` / `[categories]` in `sqlsift.toml`, or with `-A` (allow), `-W` (warn) and `-D` (deny) on the command line, using a rule's code or name or a category name. A rule's own level wins over its category's; command line flags win over the config file. Warnings are reported but don't fail `sqlsift check`.
+
+```bash
+sqlsift check -W ambiguous-column -A E0008 queries/*.sql
+```
 
 ### Inline Suppression
 
@@ -270,8 +295,8 @@ SELECT legacy_col FROM users;
 -- Suppress on the same line
 SELECT legacy_col FROM users; -- sqlsift:disable E0002
 
--- Suppress multiple rules
-SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, E0002
+-- Suppress multiple rules (codes or names)
+SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, column-not-found
 
 -- Suppress all rules on the next line
 -- sqlsift:disable
@@ -352,7 +377,9 @@ Options:
   -s, --schema <FILE>       Schema definition file (can be specified multiple times)
       --schema-dir <DIR>    Directory containing schema files
   -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
-      --disable <RULE>      Disable specific rules (e.g., E0001, E0002)
+  -A, --allow <RULE>        Turn a rule or category off (alias: --disable)
+  -W, --warn <RULE>         Report a rule or category as warnings
+  -D, --deny <RULE>         Report a rule or category as errors
   -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
   -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
@@ -373,6 +400,8 @@ Options:
 - [x] LSP server for editor integration (VS Code extension)
 - [x] CASE expression type consistency checking
 - [x] Subquery/CTE/VIEW column type inference
+
+- [x] Per-rule and per-category levels (`off` / `warn` / `error`)
 
 #### Planned
 - [ ] Custom rule plugins
