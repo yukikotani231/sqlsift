@@ -1,6 +1,6 @@
 //! Output formatting
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 use sqlsift_core::{Diagnostic, DiagnosticKind, Severity};
 
@@ -102,7 +102,22 @@ impl OutputFormatter {
         }
     }
 
+    /// Human-readable diagnostics on stderr. Written through one buffered, locked
+    /// handle (stderr is unbuffered), and the source is split into lines once.
     fn print_human(&self, file: &FileDiagnostics) {
+        let source = &file.source;
+        let lines: Vec<&str> = source.lines().collect();
+        let mut out = std::io::BufWriter::new(std::io::stderr().lock());
+        // Diagnostics are best-effort output: ignore write errors (e.g. a closed pipe)
+        let _ = self.write_human(&mut out, file, &lines);
+    }
+
+    fn write_human(
+        &self,
+        out: &mut impl Write,
+        file: &FileDiagnostics,
+        lines: &[&str],
+    ) -> std::io::Result<()> {
         let source = &file.source;
         for diag in &file.diagnostics {
             let severity_str = match diag.severity {
@@ -112,18 +127,18 @@ impl OutputFormatter {
             };
 
             // Print main message
-            eprintln!("{}[{}]: {}", severity_str, diag.code(), diag.message);
+            writeln!(out, "{}[{}]: {}", severity_str, diag.code(), diag.message)?;
 
             // Print file location if we have a span
             if let (Some(span), Some((line, col))) = (&diag.span, location(diag, source)) {
-                eprintln!("  --> {}:{}:{}", file.file, line, col);
+                writeln!(out, "  --> {}:{}:{}", file.file, line, col)?;
 
                 // Print source line with annotation
-                if let Some(source_line) = get_source_line(source, line) {
+                if let Some(source_line) = lines.get(line.saturating_sub(1)).copied() {
                     let width = line.to_string().len().max(3);
                     let gutter = " ".repeat(width);
-                    eprintln!("{gutter} |");
-                    eprintln!("{line:>width$} | {source_line}");
+                    writeln!(out, "{gutter} |")?;
+                    writeln!(out, "{line:>width$} | {source_line}")?;
 
                     // Print caret annotation
                     let padding = " ".repeat(col.saturating_sub(1));
@@ -132,7 +147,7 @@ impl OutputFormatter {
                             .min(source_line.len().saturating_sub(col) + 1)
                             .max(1),
                     );
-                    eprintln!("{gutter} | {padding}{underline}");
+                    writeln!(out, "{gutter} | {padding}{underline}")?;
                 }
             }
 
@@ -140,11 +155,12 @@ impl OutputFormatter {
             if let Some(help) = &diag.help {
                 let width =
                     location(diag, source).map_or(3, |(line, _)| line.to_string().len().max(3));
-                eprintln!("{} = help: {}", " ".repeat(width), help);
+                writeln!(out, "{} = help: {}", " ".repeat(width), help)?;
             }
 
-            eprintln!();
+            writeln!(out)?;
         }
+        out.flush()
     }
 }
 
@@ -286,9 +302,4 @@ fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
     }
 
     (line, col)
-}
-
-/// Get a specific line from source (1-indexed)
-fn get_source_line(source: &str, line: usize) -> Option<&str> {
-    source.lines().nth(line.saturating_sub(1))
 }

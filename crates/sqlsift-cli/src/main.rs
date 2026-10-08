@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::Result;
 use sqlsift_core::schema::SchemaBuilder;
-use sqlsift_core::{Analyzer, SqlDialect};
+use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
 use crate::config::Config;
@@ -53,6 +53,60 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .with_writer(std::io::stderr)
         .with_ansi(output::use_color())
         .init();
+}
+
+/// A query file's contents and its diagnostics
+type AnalyzedFile = Result<(String, Vec<Diagnostic>)>;
+
+/// Read and analyze each query file, in parallel across the available cores.
+/// Results are returned in the same order as `files`.
+fn analyze_files(
+    files: &[PathBuf],
+    catalog: &sqlsift_core::schema::Catalog,
+    dialect: SqlDialect,
+) -> Vec<AnalyzedFile> {
+    let analyze_one = |path: &PathBuf| -> AnalyzedFile {
+        tracing::debug!(file = %path.display(), "Analyzing SQL file");
+        let content = read_file(path)?;
+        let diagnostics = Analyzer::with_dialect(catalog, dialect).analyze(&content);
+        Ok((content, diagnostics))
+    };
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(files.len());
+    if workers <= 1 {
+        return files.iter().map(analyze_one).collect();
+    }
+
+    // Workers take the next unclaimed file until none are left
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<Option<AnalyzedFile>> = (0..files.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(path) = files.get(i) else {
+                            return done;
+                        };
+                        done.push((i, analyze_one(path)));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (i, result) in handle.join().expect("analysis thread panicked") {
+                results[i] = Some(result);
+            }
+        }
+    });
+    results
+        .into_iter()
+        .map(|r| r.expect("every file is analyzed"))
+        .collect()
 }
 
 /// Read a file, naming the path in the error message
@@ -194,12 +248,14 @@ fn run(args: Args) -> Result<bool> {
                 miette::bail!("No query files specified. Use positional arguments or configure in sqlsift.toml");
             }
 
-            // Analyze each query file
+            // Analyze the query files in parallel; results are then collected in file
+            // order, so output and --max-errors behave exactly as when run sequentially
+            let analyzed = analyze_files(&query_files, &catalog, dialect);
+
             let mut total_errors = 0;
             let mut total_warnings = 0;
             let mut files_checked = 0;
             let mut results = Vec::new();
-            let mut analyzer = Analyzer::with_dialect(&catalog, dialect);
             let max_errors = if max_errors == 0 {
                 usize::MAX
             } else {
@@ -211,15 +267,13 @@ fn run(args: Args) -> Result<bool> {
             let disabled_rules: std::collections::HashSet<String> =
                 config.disable.iter().cloned().collect();
 
-            for query_file in &query_files {
+            for (query_file, analyzed) in query_files.iter().zip(analyzed) {
                 if total_errors >= max_errors {
                     limit_reached = true;
                     break;
                 }
 
-                tracing::debug!(file = %query_file.display(), "Analyzing SQL file");
-                let content = read_file(query_file)?;
-                let diagnostics = analyzer.analyze(&content);
+                let (content, diagnostics) = analyzed?;
                 files_checked += 1;
 
                 // Filter out disabled rules
