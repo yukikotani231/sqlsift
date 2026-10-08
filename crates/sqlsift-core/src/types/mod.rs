@@ -56,6 +56,9 @@ pub enum SqlType {
     // Array
     Array(Box<SqlType>),
 
+    // Inline ENUM type with its allowed values (MySQL `ENUM('a', 'b')`)
+    Enum(Vec<String>),
+
     // Custom/User-defined type
     Custom(String),
 
@@ -148,7 +151,15 @@ impl SqlType {
             DataType::JSON => SqlType::Json,
             DataType::JSONB => SqlType::Jsonb,
 
-            DataType::Enum(..) => SqlType::Custom("ENUM".to_string()),
+            DataType::Enum(members, _) => SqlType::Enum(
+                members
+                    .iter()
+                    .map(|m| match m {
+                        sqlparser::ast::EnumMember::Name(name)
+                        | sqlparser::ast::EnumMember::NamedValue(name, _) => name.clone(),
+                    })
+                    .collect(),
+            ),
 
             DataType::Array(inner) => match inner {
                 sqlparser::ast::ArrayElemTypeDef::AngleBracket(dt) => {
@@ -226,10 +237,9 @@ impl SqlType {
             // String to UUID coercion (PostgreSQL implicit cast)
             (Char { .. } | Varchar { .. } | Text, Uuid) => TypeCompatibility::ImplicitCast,
 
-            // String to ENUM coercion (ENUM values are string literals)
-            (Char { .. } | Varchar { .. } | Text, Custom(name)) if name == "ENUM" => {
-                TypeCompatibility::ImplicitCast
-            }
+            // Inline ENUMs compare with strings (their values) and, in MySQL, with
+            // numbers (their index); literal values are checked separately
+            (Enum(_), _) | (_, Enum(_)) => TypeCompatibility::ImplicitCast,
 
             // Other user-defined types (domains, extension types such as citext, ...)
             // carry no information about their casts, so don't report them
@@ -374,6 +384,14 @@ impl SqlType {
             SqlType::Json => "json".to_string(),
             SqlType::Jsonb => "jsonb".to_string(),
             SqlType::Array(inner) => format!("{}[]", inner.display_name()),
+            SqlType::Enum(values) => format!(
+                "enum({})",
+                values
+                    .iter()
+                    .map(|v| format!("'{v}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             SqlType::Custom(name) => name.clone(),
             SqlType::Unknown => "unknown".to_string(),
         }

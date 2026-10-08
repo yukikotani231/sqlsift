@@ -1,0 +1,49 @@
+name: GitHub Action
+
+on:
+  push:
+    branches: [main]
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**"]
+  pull_request:
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**"]
+  workflow_dispatch:
+
+jobs:
+  test-action:
+    name: Test action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Build sqlsift
+        run: cargo build -p sqlsift-cli
+
+      - name: Valid queries pass
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema: tests/fixtures/schema.sql
+          files: tests/fixtures/valid_*.sql
+
+      - name: Invalid queries are reported
+        id: invalid
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema: tests/fixtures/schema.sql
+          files: tests/fixtures/invalid_query.sql
+          sarif-file: results.sarif
+          fail-on-error: "false"
+
+      - name: Check outputs
+        shell: bash
+        run: |
+          test "${{ steps.invalid.outputs.exit-code }}" = "1"
+          python3 -c "import json; d = json.load(open('results.sarif')); assert d['runs'][0]['results'], 'no SARIF results'"

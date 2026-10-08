@@ -100,26 +100,29 @@ impl<'a> TypeResolver<'a> {
         right: &ExpressionType,
         span: Option<Span>,
     ) -> bool {
-        let (enum_name, literal) = match (left, right) {
-            (ExpressionType::Known(SqlType::Custom(name)), ExpressionType::StringLiteral(lit))
-            | (ExpressionType::StringLiteral(lit), ExpressionType::Known(SqlType::Custom(name))) => {
-                (name, lit)
-            }
+        let (enum_type, literal) = match (left, right) {
+            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit))
+            | (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => (t, lit),
             _ => return false,
         };
-        let Some(enum_def) = self.catalog.get_enum(enum_name) else {
-            return false;
+        // Named enum type (CREATE TYPE ... AS ENUM) or inline ENUM(...) column type
+        let (type_name, values) = match enum_type {
+            SqlType::Custom(name) => match self.catalog.get_enum(name) {
+                Some(enum_def) => (enum_def.name.clone(), enum_def.values.clone()),
+                None => return false,
+            },
+            SqlType::Enum(values) => (enum_type.display_name(), values.clone()),
+            _ => return false,
         };
-        if enum_def.values.is_empty() || enum_def.values.iter().any(|v| v == literal) {
+        if values.is_empty() || values.iter().any(|v| v == literal) {
             return false;
         }
-        let help = super::resolver::find_similar_name(enum_def.values.iter().cloned(), literal)
+        let help = super::resolver::find_similar_name(values.iter().cloned(), literal)
             .map(|v| format!("Did you mean '{}'?", v))
             .unwrap_or_else(|| {
                 format!(
                     "Valid values: {}",
-                    enum_def
-                        .values
+                    values
                         .iter()
                         .map(|v| format!("'{}'", v))
                         .collect::<Vec<_>>()
@@ -128,10 +131,7 @@ impl<'a> TypeResolver<'a> {
             });
         let mut diag = Diagnostic::error(
             DiagnosticKind::TypeMismatch,
-            format!(
-                "Invalid value '{}' for enum type '{}'",
-                literal, enum_def.name
-            ),
+            format!("Invalid value '{}' for enum type '{}'", literal, type_name),
         )
         .with_help(help);
         diag.span = span;
@@ -841,6 +841,8 @@ impl<'a> TypeResolver<'a> {
                 results,
                 else_result,
             } => {
+                let branches: Vec<&Expr> = results.iter().chain(else_result.as_deref()).collect();
+                self.check_case_branches(&branches);
                 if let Some(op) = operand {
                     self.check_expr_recursive(op);
                 }
@@ -941,6 +943,53 @@ impl<'a> TypeResolver<'a> {
         }
     }
 
+    /// Result type of a CASE expression: the first branch with a known type, or text
+    /// when every branch is a string literal (as in PostgreSQL)
+    fn infer_case_type(&mut self, branches: &[&Expr]) -> ExpressionType {
+        let types: Vec<ExpressionType> = branches.iter().map(|b| self.infer_expr_type(b)).collect();
+        if let Some(known) = types.iter().find(|t| matches!(t, ExpressionType::Known(_))) {
+            return known.clone();
+        }
+        if !types.is_empty()
+            && types
+                .iter()
+                .all(|t| matches!(t, ExpressionType::StringLiteral(_)))
+        {
+            return ExpressionType::Known(SqlType::Text);
+        }
+        ExpressionType::Unknown
+    }
+
+    /// Report the first CASE branch whose type can't be reconciled with the others
+    fn check_case_branches(&mut self, branches: &[&Expr]) {
+        let typed: Vec<(&Expr, ExpressionType)> = branches
+            .iter()
+            .map(|b| (*b, self.infer_expr_type(b)))
+            .collect();
+        let Some((_, reference)) = typed
+            .iter()
+            .find(|(_, t)| matches!(t, ExpressionType::Known(_)))
+        else {
+            return;
+        };
+        for (expr, ty) in &typed {
+            if let Some((expected, actual)) = self.type_conflict(reference, ty) {
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::TypeMismatch,
+                    format!(
+                        "CASE branches have incompatible types: {} and {}",
+                        expected, actual
+                    ),
+                )
+                .with_help("All THEN/ELSE results of a CASE expression must have compatible types");
+                diag.span =
+                    located_span(expr).or_else(|| typed.iter().find_map(|(e, _)| located_span(e)));
+                self.diagnostics.push(diag);
+                return;
+            }
+        }
+    }
+
     /// Check if a type is numeric
     fn is_numeric_type(&self, sql_type: &SqlType) -> bool {
         sql_type.is_numeric()
@@ -983,6 +1032,14 @@ impl<'a> TypeResolver<'a> {
             }
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
+            Expr::Case {
+                results,
+                else_result,
+                ..
+            } => {
+                let branches: Vec<&Expr> = results.iter().chain(else_result.as_deref()).collect();
+                self.infer_case_type(&branches)
+            }
             // Typed literals such as DATE '2024-01-01'
             Expr::TypedString { data_type, .. } => match SqlType::from_ast(data_type) {
                 SqlType::Unknown => ExpressionType::Unknown,

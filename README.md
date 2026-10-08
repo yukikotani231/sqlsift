@@ -159,7 +159,7 @@ sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you ty
 
 ## CI Integration
 
-### GitHub Actions
+### GitHub Action
 
 ```yaml
 # .github/workflows/sqlsift.yml
@@ -170,17 +170,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx sqlsift-cli check --schema schema.sql queries/*.sql
+      - uses: yukikotani231/sqlsift@main  # or pin a release tag
+        with:
+          schema: db/schema.sql           # or schema-dir: db/migrations
+          files: queries/**/*.sql
 ```
+
+Errors are shown as annotations on the pull request diff. All inputs are optional when you have a `sqlsift.toml`:
+
+| Input | Description |
+|-------|-------------|
+| `files` | Query files (space-separated paths or globs) |
+| `schema` / `schema-dir` | Schema files, or a directory of migrations |
+| `dialect` | `postgresql`, `mysql` or `sqlite` |
+| `config` | Path to `sqlsift.toml` |
+| `disable` | Rules to disable, e.g. `E0006 E0008` |
+| `sarif-file` | Also write a SARIF report (see below) |
+| `fail-on-error` | Fail the step on errors (default `true`) |
+| `version` | `sqlsift-cli` version from npm (default `latest`) |
+
+The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration error).
+
+Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI.
 
 ### GitHub Code Scanning (SARIF)
 
-Show errors inline on pull requests and in the Security tab:
+Show errors in the Security tab and as code scanning alerts:
 
 ```yaml
-# .github/workflows/sqlsift.yml
-name: SQL Lint
-on: [push, pull_request]
 jobs:
   sqlsift:
     runs-on: ubuntu-latest
@@ -188,8 +205,12 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - run: npx sqlsift-cli check -s schema.sql -f sarif queries/*.sql > results.sarif
-        continue-on-error: true
+      - uses: yukikotani231/sqlsift@main
+        with:
+          schema: db/schema.sql
+          files: queries/**/*.sql
+          sarif-file: results.sarif
+          fail-on-error: "false"
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
@@ -275,9 +296,10 @@ SELECT bad_col FROM missing_table;
 - ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
 - ✅ String literals coerce to the column type like in the database (`created_at > '2024-01-01'`, `status = 'active'`, `id = '42'`), while impossible values are still reported (`id = 'abc'`)
 - ✅ Date/time arithmetic (`now() - interval '7 days'`, `placed_on + 7`, `ts1 - ts2`)
+- ✅ CASE expression branch consistency (`THEN total ELSE 'cheap'`) and result type
+- ✅ Enum values for PostgreSQL enum types and MySQL inline `ENUM(...)` (`status = 'opne'` → "Did you mean 'open'?")
 
 **Not Yet Detected:**
-- ⏳ CASE expression type consistency
 - ⏳ Subquery/CTE column type inference
 
 </details>
@@ -351,9 +373,9 @@ Options:
 - [x] SQLite dialect support
 - [x] Type inference for expressions (WHERE, JOIN, arithmetic, INSERT/UPDATE)
 - [x] LSP server for editor integration (VS Code extension)
+- [x] CASE expression type consistency checking
 
 #### Planned
-- [ ] CASE expression type consistency checking
 - [ ] Subquery/CTE column type inference
 - [ ] Custom rule plugins
 

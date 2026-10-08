@@ -889,6 +889,93 @@ fn null_into_auto_generated_integer_key() {
 }
 
 // ---------------------------------------------------------------------------
+// CASE branch types and MySQL inline ENUM values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn case_branches_with_incompatible_types_are_reported() {
+    for sql in [
+        "SELECT CASE WHEN total > 10 THEN total ELSE 'cheap' END FROM orders",
+        "SELECT CASE WHEN is_admin THEN 1 WHEN id > 5 THEN created_at END FROM users",
+        "SELECT id FROM users WHERE CASE WHEN is_admin THEN id ELSE name END = 1",
+    ] {
+        let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+        assert!(
+            kinds(&diagnostics).contains(&DiagnosticKind::TypeMismatch),
+            "for `{sql}`: {diagnostics:#?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("CASE")),
+            "for `{sql}`: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn case_branches_with_compatible_types_are_fine() {
+    for sql in [
+        "SELECT CASE WHEN total > 10 THEN 'big' ELSE 'small' END FROM orders",
+        "SELECT CASE WHEN total > 10 THEN total ELSE 0 END FROM orders",
+        "SELECT CASE WHEN total > 10 THEN total ELSE '0.5' END FROM orders",
+        "SELECT CASE status WHEN 'active' THEN 1 ELSE 0 END FROM users",
+        "SELECT CASE WHEN is_admin THEN created_at ELSE NULL END FROM users",
+        "SELECT CASE WHEN is_admin THEN name ELSE email END FROM users",
+        "SELECT id FROM users WHERE CASE WHEN is_admin THEN 1 ELSE 2 END = 1",
+    ] {
+        assert_valid(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    }
+}
+
+#[test]
+fn case_result_type_is_inferred() {
+    // CASE ... THEN integer: comparing the result with text is a mismatch
+    assert_single(
+        PG_SCHEMA,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM users WHERE CASE WHEN is_admin THEN 1 ELSE 2 END = 'x'",
+        DiagnosticKind::TypeMismatch,
+    );
+}
+
+const MYSQL_ENUM: &str = r#"
+    CREATE TABLE tickets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        status ENUM('open', 'closed', 'pending') NOT NULL DEFAULT 'open',
+        priority INT
+    );
+"#;
+
+#[test]
+fn mysql_inline_enum_values_are_checked() {
+    let diagnostics = analyze(
+        MYSQL_ENUM,
+        SqlDialect::MySQL,
+        "SELECT id FROM tickets WHERE status = 'opne'",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    assert_eq!(diagnostics[0].help.as_deref(), Some("Did you mean 'open'?"));
+    for sql in [
+        "INSERT INTO tickets (status) VALUES ('archived')",
+        "UPDATE tickets SET status = 'done' WHERE id = 1",
+    ] {
+        assert_single(
+            MYSQL_ENUM,
+            SqlDialect::MySQL,
+            sql,
+            DiagnosticKind::TypeMismatch,
+        );
+    }
+    for sql in [
+        "SELECT id FROM tickets WHERE status = 'pending'",
+        "INSERT INTO tickets (status) VALUES ('closed')",
+        "SELECT id FROM tickets WHERE status IN ('open', 'closed') ORDER BY status",
+        "SELECT id FROM tickets WHERE status = 1",
+    ] {
+        assert_valid(MYSQL_ENUM, SqlDialect::MySQL, sql);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // E0008: INSERT omits a NOT NULL column without a default
 // ---------------------------------------------------------------------------
 
