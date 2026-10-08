@@ -3,10 +3,13 @@
 [![CI](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/sqlsift-cli.svg)](https://www.npmjs.com/package/sqlsift-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Playground](https://img.shields.io/badge/try_it-playground-2ea44f.svg)](https://yukikotani231.github.io/sqlsift/)
 
 **Catch broken SQL before it reaches production — without a database.**
 
 sqlsift reads your schema (`CREATE TABLE`, migrations, `structure.sql`, …) and checks your raw SQL queries against it: missing tables, typo'd columns, type mismatches, wrong `INSERT` arity, ambiguous columns. It runs offline in milliseconds, so it fits in pre-commit hooks, CI, and your editor.
+
+**▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page.
 
 ```sql
 -- schema.sql
@@ -86,7 +89,7 @@ npx sqlsift-cli check --schema schema.sql queries/*.sql
 cargo install --git https://github.com/yukikotani231/sqlsift sqlsift-cli
 ```
 
-Prebuilt binaries are also available on the [Releases](https://github.com/yukikotani231/sqlsift/releases) page.
+Prebuilt binaries are also available on the [Releases](https://github.com/yukikotani231/sqlsift/releases) page, or try it without installing in the [Playground](https://yukikotani231.github.io/sqlsift/).
 
 ## Quick Start
 
