@@ -973,6 +973,9 @@ fn mysql_inline_enum_values_are_checked() {
     ] {
         assert_valid(MYSQL_ENUM, SqlDialect::MySQL, sql);
     }
+}
+
+// ---------------------------------------------------------------------------
 // E0008: INSERT omits a NOT NULL column without a default
 // ---------------------------------------------------------------------------
 
