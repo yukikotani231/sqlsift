@@ -1,101 +1,69 @@
-//! Name resolver - resolves table and column references
+//! Statement resolver - resolves table and column references and checks types
+//!
+//! A single walk over each statement: FROM clauses build the [`Scope`], names are
+//! resolved against it, and every query block reports its output columns with their
+//! types, so CTEs, subqueries and views carry column types into the queries that use
+//! them. The type checks themselves live in `type_check.rs`.
 
-use indexmap::IndexMap;
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Delete, Expr, GroupByExpr, Ident, Insert, Query, Select,
-    SelectItem, SetExpr, Statement, Subscript, TableFactor, TableWithJoins, Values,
+    Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, Expr, GroupByExpr, Ident,
+    Insert, JoinConstraint, JoinOperator, NamedWindowDefinition, NamedWindowExpr, OnConflictAction,
+    OnInsert, Query, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
+    TableWithJoins, Values,
 };
-use sqlparser::ast::{
-    ConflictTarget, Distinct, NamedWindowDefinition, NamedWindowExpr, OnConflictAction, OnInsert,
-};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{Catalog, ColumnDef, QualifiedName, TableDef};
 
-/// Resolved table reference in a query
-#[derive(Debug, Clone)]
-pub(super) struct TableRef {
-    /// The actual table definition
-    pub(super) table: QualifiedName,
-    /// Alias used in the query (if any)
-    ///
-    /// Note: Currently unused but reserved for future error message improvements
-    /// to show the user-specified alias in diagnostics instead of the table name.
-    #[allow(dead_code)]
-    pub(super) alias: Option<String>,
-    /// If this is a VIEW reference, the column names from the VIEW definition
-    pub(super) view_columns: Option<Vec<String>>,
-    /// If this is a derived table (subquery in FROM), the inferred column names
-    pub(super) derived_columns: Option<Vec<String>>,
-}
+use super::scope::{
+    lookup_ignore_case, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType, Relation,
+    RelationKind, Scope, UNNAMED_COLUMN,
+};
 
-/// CTE (Common Table Expression) definition
-#[derive(Debug, Clone)]
-pub(super) struct CteDefinition {
-    /// CTE name
-    ///
-    /// Note: Currently unused but may be useful for future diagnostic messages
-    /// to reference the CTE by its original name.
-    #[allow(dead_code)]
-    pub(super) name: String,
-    /// Column names inferred from the CTE query
-    pub(super) columns: Vec<String>,
-}
-
-/// Name resolver for SQL queries
-pub struct NameResolver<'a> {
-    catalog: &'a Catalog,
-    /// Current scope's table references (alias/name -> TableRef)
-    pub(super) tables: IndexMap<String, TableRef>,
-    /// Outer scope's table references (for correlated subqueries)
-    outer_tables: IndexMap<String, TableRef>,
-    /// CTEs available in current scope (name -> CteDefinition)
-    pub(super) ctes: HashMap<String, CteDefinition>,
-    /// SELECT aliases visible in ORDER BY (set before resolving ORDER BY)
-    select_aliases: Vec<String>,
-    /// Columns merged by `JOIN ... USING` / `NATURAL JOIN` in the current query
-    /// (lowercase); unqualified references to them are not ambiguous
-    using_columns: HashSet<String>,
+/// Resolves names and checks types in SQL statements
+pub(super) struct Resolver<'a> {
+    pub(super) catalog: &'a Catalog,
+    pub(super) dialect: SqlDialect,
+    /// Relations and CTEs visible at the current point of the walk
+    pub(super) scope: Scope,
     /// Collected diagnostics
-    diagnostics: Vec<Diagnostic>,
-    /// SQL dialect (system columns/tables, dialect keywords)
-    dialect: SqlDialect,
+    pub(super) diagnostics: Vec<Diagnostic>,
+    /// Output columns of subqueries in expressions, keyed by the query's address, so
+    /// type inference can use them without walking the subquery again
+    pub(super) subquery_columns: HashMap<usize, Option<Vec<Column>>>,
+    /// Number of unaliased derived tables seen (to give each a distinct scope key)
+    unaliased_subqueries: usize,
 }
 
-impl<'a> NameResolver<'a> {
-    /// Create a new name resolver for the given catalog
-    ///
-    /// The resolver will use the catalog to validate table and column references.
-    pub fn new(catalog: &'a Catalog) -> Self {
+impl<'a> Resolver<'a> {
+    pub(super) fn new(catalog: &'a Catalog, dialect: SqlDialect) -> Self {
         Self {
             catalog,
-            tables: IndexMap::new(),
-            outer_tables: IndexMap::new(),
-            select_aliases: Vec::new(),
-            using_columns: HashSet::new(),
-            ctes: HashMap::new(),
+            dialect,
+            scope: Scope::default(),
             diagnostics: Vec::new(),
-            dialect: SqlDialect::default(),
+            subquery_columns: HashMap::new(),
+            unaliased_subqueries: 0,
         }
     }
 
-    /// Set the SQL dialect
-    pub fn with_dialect(mut self, dialect: SqlDialect) -> Self {
-        self.dialect = dialect;
-        self
+    /// Consume the resolver and return collected diagnostics
+    pub(super) fn into_diagnostics(self) -> Vec<Diagnostic> {
+        self.diagnostics
     }
 
-    /// Resolve names in a statement
-    ///
-    /// Validates all table and column references in the statement against the catalog.
-    /// Diagnostics are collected internally and can be retrieved with `into_diagnostics()`.
-    pub fn resolve_statement(&mut self, stmt: &Statement) {
+    /// Resolve a statement. Returns its output columns (the result of a query, or
+    /// the RETURNING list of INSERT/UPDATE/DELETE) if they can be determined.
+    pub(super) fn statement(&mut self, stmt: &Statement) -> Option<Vec<Column>> {
         match stmt {
-            Statement::Query(query) => self.resolve_query(query),
+            Statement::Query(query) => self.query(query, false),
             Statement::Insert(insert) => {
-                self.resolve_insert(insert);
+                self.scope.push(false);
+                let columns = self.insert(insert);
+                self.scope.pop();
+                columns
             }
             Statement::Update {
                 table,
@@ -105,65 +73,71 @@ impl<'a> NameResolver<'a> {
                 returning,
                 ..
             } => {
-                self.resolve_update(table, assignments, from.as_ref(), selection.as_ref());
-                self.resolve_returning(returning.as_deref());
+                self.scope.push(false);
+                self.update(table, assignments, from.as_ref(), selection.as_ref());
+                let columns = self.returning(returning.as_deref());
+                self.scope.pop();
+                columns
             }
             Statement::Delete(delete) => {
-                self.resolve_delete(delete);
+                self.scope.push(false);
+                let columns = self.delete(delete);
+                self.scope.pop();
+                columns
             }
-            _ => {}
+            _ => None,
         }
     }
 
-    /// Resolve names in an INSERT statement
-    fn resolve_insert(&mut self, insert: &Insert) {
-        let table_name = self.catalog.qualified_name(&insert.table_name);
+    // ---------------------------------------------------------------------
+    // DML
+    // ---------------------------------------------------------------------
 
-        // Check if table exists
-        let table_def = if let Some(def) = self.catalog.get_table(&table_name) {
-            def
-        } else if let Some(view) = self.catalog.get_view(&table_name) {
-            // Simple views are insertable: check the column list against the view
-            if !view.columns.is_empty() {
-                for col_ident in &insert.columns {
-                    if !view
-                        .columns
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(&col_ident.value))
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::ColumnNotFound,
-                                format!(
-                                    "Column '{}' not found in view '{}'",
-                                    col_ident.value, table_name
-                                ),
-                            )
-                            .with_span(Span::from_sqlparser(&col_ident.span)),
-                        );
+    /// Resolve an INSERT statement in the current (statement) frame
+    fn insert(&mut self, insert: &Insert) -> Option<Vec<Column>> {
+        let table_name = self.catalog.qualified_name(&insert.table_name);
+        let table_span = insert
+            .table_name
+            .0
+            .last()
+            .map(|id| Span::from_sqlparser(&id.span));
+
+        let Some(table_def) = self.catalog.get_table(&table_name) else {
+            if let Some(view) = self.catalog.get_view(&table_name) {
+                // Simple views are insertable: check the column list against the view
+                if !view.columns.is_empty() {
+                    for col_ident in &insert.columns {
+                        if !view
+                            .columns
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(&col_ident.value))
+                        {
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    DiagnosticKind::ColumnNotFound,
+                                    format!(
+                                        "Column '{}' not found in view '{}'",
+                                        col_ident.value, table_name
+                                    ),
+                                )
+                                .with_span(Span::from_sqlparser(&col_ident.span)),
+                            );
+                        }
                     }
                 }
+                if let Some(source) = &insert.source {
+                    self.insert_source(source);
+                }
+            } else {
+                let diag = self.table_not_found(&table_name, table_span);
+                self.diagnostics.push(diag);
             }
-            if let Some(source) = &insert.source {
-                self.resolve_set_expr(&source.body);
-            }
-            return;
-        } else {
-            let table_span = insert
-                .table_name
-                .0
-                .last()
-                .map(|id| Span::from_sqlparser(&id.span));
-            let diag = self.table_not_found(&table_name, table_span);
-            self.diagnostics.push(diag);
-            return;
+            return None;
         };
 
         // Check if specified columns exist
-        let specified_columns: Vec<&Ident> = insert.columns.iter().collect();
-        for col_ident in &specified_columns {
+        for col_ident in &insert.columns {
             if !table_def.column_exists(&col_ident.value) {
-                let similar = find_similar_column(table_def, &col_ident.value);
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::ColumnNotFound,
                     format!(
@@ -172,189 +146,190 @@ impl<'a> NameResolver<'a> {
                     ),
                 )
                 .with_span(Span::from_sqlparser(&col_ident.span));
-                if let Some(suggestion) = similar {
+                if let Some(suggestion) = find_similar_column(table_def, &col_ident.value) {
                     diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
                 }
                 self.diagnostics.push(diag);
             }
         }
 
-        // Check column count vs value count
-        // (VALUES literals carry no source location, so point at the table name)
-        let insert_span = insert
-            .table_name
-            .0
-            .last()
-            .map(|id| Span::from_sqlparser(&id.span));
+        let expected_count = if insert.columns.is_empty() {
+            table_def.columns.len()
+        } else {
+            insert.columns.len()
+        };
+        let values = insert
+            .source
+            .as_deref()
+            .and_then(|q| match q.body.as_ref() {
+                SetExpr::Values(Values { rows, .. }) => Some(rows),
+                _ => None,
+            });
+
+        // INSERT ... SELECT: the source query has its own scope
+        let selected = match (&insert.source, values) {
+            (Some(source), None) => self.insert_source(source),
+            _ => None,
+        };
 
         // NOT NULL columns without a default must be given a value. Only checked
         // with an explicit column list (or DEFAULT VALUES); without one, every
         // column is positional and E0005 covers missing values.
         // Skipped when the column list or VALUES arity is already wrong: the missing
         // column is then usually the one that was misspelled or miscounted.
+        // (VALUES literals carry no source location, so point at the table name.)
         let default_values = insert.source.is_none() && insert.columns.is_empty();
         let columns_valid = insert
             .columns
             .iter()
             .all(|c| table_def.column_exists(&c.value));
-        let arity_valid = match insert.source.as_deref().map(|q| q.body.as_ref()) {
-            Some(SetExpr::Values(Values { rows, .. })) => {
-                rows.iter().all(|row| row.len() == insert.columns.len())
-            }
-            Some(body) => {
-                let selected = self.infer_cte_columns(body);
-                selected.is_empty() || selected.len() == insert.columns.len()
-            }
-            None => true,
+        let arity_valid = match (values, &selected) {
+            (Some(rows), _) => rows.iter().all(|row| row.len() == insert.columns.len()),
+            (None, Some(selected)) => selected.len() == insert.columns.len(),
+            (None, None) => true,
         };
         if (!insert.columns.is_empty() || default_values) && columns_valid && arity_valid {
-            let missing: Vec<&str> = table_def
-                .columns
-                .values()
-                .filter(|col| {
-                    !insert
-                        .columns
-                        .iter()
-                        .any(|c| c.value.eq_ignore_ascii_case(&col.name))
-                        && !self.column_has_implicit_value(table_def, col)
-                })
-                .map(|col| col.name.as_str())
-                .collect();
-            if !missing.is_empty() {
-                let list = missing
-                    .iter()
-                    .map(|c| format!("'{}'", c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut diag = Diagnostic::error(
-                    DiagnosticKind::MissingRequiredColumn,
-                    format!(
-                        "INSERT into '{}' is missing required column{} {}",
-                        table_name,
-                        if missing.len() == 1 { "" } else { "s" },
-                        list
-                    ),
-                )
-                .with_help(format!(
-                    "{} NOT NULL without a default. Provide a value, or add a DEFAULT to the schema",
-                    if missing.len() == 1 {
-                        format!("{} is", list)
-                    } else {
-                        format!("{} are", list)
-                    }
-                ));
-                diag.span = insert_span;
-                self.diagnostics.push(diag);
-            }
+            self.check_required_columns(insert, table_def, &table_name, table_span);
         }
-        if let Some(source) = &insert.source {
-            if let SetExpr::Values(Values { rows, .. }) = source.body.as_ref() {
-                let expected_count = if specified_columns.is_empty() {
-                    table_def.columns.len()
-                } else {
-                    specified_columns.len()
-                };
 
-                for row in rows {
-                    if row.len() != expected_count {
-                        let mut diag = Diagnostic::error(
-                                DiagnosticKind::ColumnCountMismatch,
-                                format!(
-                                    "INSERT has {} value(s) but {} column(s) were specified",
-                                    row.len(),
-                                    expected_count
-                                ),
-                            )
-                            .with_help(if specified_columns.is_empty() {
-                                format!(
-                                    "Table '{}' has {} columns. Specify columns explicitly or provide {} values",
-                                    table_name, expected_count, expected_count
-                                )
-                            } else {
-                                format!("Provide {} value(s) to match the column list", expected_count)
-                            });
-                        diag.span = insert_span;
-                        self.diagnostics.push(diag);
-                    }
-
-                    // Resolve expressions in values (for subqueries, etc.)
-                    for expr in row {
-                        self.resolve_expr(expr);
-                    }
-                }
-            } else {
-                // INSERT ... SELECT - resolve the subquery in its own scope
-                let saved_tables = std::mem::take(&mut self.tables);
-                self.resolve_query(source);
-                self.tables = saved_tables;
-
-                let expected_count = if specified_columns.is_empty() {
-                    table_def.columns.len()
-                } else {
-                    specified_columns.len()
-                };
-                let selected = self.infer_cte_columns(&source.body);
-                if !selected.is_empty() && selected.len() != expected_count {
+        if let Some(rows) = values {
+            for row in rows {
+                if row.len() != expected_count {
                     let mut diag = Diagnostic::error(
                         DiagnosticKind::ColumnCountMismatch,
                         format!(
-                            "INSERT ... SELECT returns {} column(s) but {} column(s) were specified",
-                            selected.len(),
+                            "INSERT has {} value(s) but {} column(s) were specified",
+                            row.len(),
                             expected_count
                         ),
                     )
-                    .with_help(format!(
-                        "Select {} column(s) to match the column list",
-                        expected_count
-                    ));
-                    diag.span = insert_span;
+                    .with_help(if insert.columns.is_empty() {
+                        format!(
+                            "Table '{}' has {} columns. Specify columns explicitly or provide {} values",
+                            table_name, expected_count, expected_count
+                        )
+                    } else {
+                        format!("Provide {} value(s) to match the column list", expected_count)
+                    });
+                    diag.span = table_span;
                     self.diagnostics.push(diag);
                 }
+                for expr in row {
+                    self.expr(expr);
+                }
+            }
+            self.check_insert_values(insert, table_def, rows);
+        } else if let Some(selected) = &selected {
+            if selected.len() != expected_count {
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::ColumnCountMismatch,
+                    format!(
+                        "INSERT ... SELECT returns {} column(s) but {} column(s) were specified",
+                        selected.len(),
+                        expected_count
+                    ),
+                )
+                .with_help(format!(
+                    "Select {} column(s) to match the column list",
+                    expected_count
+                ));
+                diag.span = table_span;
+                self.diagnostics.push(diag);
             }
         }
 
         // ON CONFLICT / ON DUPLICATE KEY UPDATE and RETURNING see the target table
+        let target = Relation::table(self.catalog, &table_name)?;
         let key = insert
             .table_alias
             .as_ref()
             .map_or_else(|| table_name.name.clone(), |a| a.value.clone());
-        let target = TableRef {
-            table: table_name.clone(),
-            alias: insert.table_alias.as_ref().map(|a| a.value.clone()),
-            view_columns: None,
-            derived_columns: None,
-        };
-        self.tables.insert(key, target.clone());
+        self.scope.current().relations.insert(key, target.clone());
         if let Some(on) = &insert.on {
             // MySQL row alias: INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE c = new.c
-            if let Some(row_alias) = insert
+            let row_alias = insert
                 .insert_alias
                 .as_ref()
                 .and_then(|a| a.row_alias.0.last())
-            {
-                self.tables.insert(row_alias.value.clone(), target.clone());
+                .map(|a| a.value.clone());
+            if let Some(row_alias) = &row_alias {
+                self.scope
+                    .current()
+                    .relations
+                    .insert(row_alias.clone(), target.clone());
             }
-            self.resolve_on_insert(on, table_def, &table_name, target);
+            self.on_insert(on, table_def, &table_name, target);
             // EXCLUDED / the row alias are only visible in the ON clause
-            self.tables.shift_remove("excluded");
-            if let Some(row_alias) = insert
-                .insert_alias
-                .as_ref()
-                .and_then(|a| a.row_alias.0.last())
-            {
-                self.tables.shift_remove(&row_alias.value);
+            let relations = &mut self.scope.current().relations;
+            relations.shift_remove("excluded");
+            if let Some(row_alias) = &row_alias {
+                relations.shift_remove(row_alias);
             }
         }
-        self.resolve_returning(insert.returning.as_deref());
+        self.returning(insert.returning.as_deref())
+    }
+
+    /// Resolve the source query of INSERT ... SELECT, which can't see the target table
+    fn insert_source(&mut self, source: &Query) -> Option<Vec<Column>> {
+        self.query(source, true)
+    }
+
+    /// Report NOT NULL columns without a default that an INSERT omits (E0008)
+    fn check_required_columns(
+        &mut self,
+        insert: &Insert,
+        table_def: &TableDef,
+        table_name: &QualifiedName,
+        span: Option<Span>,
+    ) {
+        let missing: Vec<&str> = table_def
+            .columns
+            .values()
+            .filter(|col| {
+                !insert
+                    .columns
+                    .iter()
+                    .any(|c| c.value.eq_ignore_ascii_case(&col.name))
+                    && !self.column_has_implicit_value(table_def, col)
+            })
+            .map(|col| col.name.as_str())
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let list = missing
+            .iter()
+            .map(|c| format!("'{}'", c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut diag = Diagnostic::error(
+            DiagnosticKind::MissingRequiredColumn,
+            format!(
+                "INSERT into '{}' is missing required column{} {}",
+                table_name,
+                if missing.len() == 1 { "" } else { "s" },
+                list
+            ),
+        )
+        .with_help(format!(
+            "{} NOT NULL without a default. Provide a value, or add a DEFAULT to the schema",
+            if missing.len() == 1 {
+                format!("{} is", list)
+            } else {
+                format!("{} are", list)
+            }
+        ));
+        diag.span = span;
+        self.diagnostics.push(diag);
     }
 
     /// Resolve `ON CONFLICT ...` / `ON DUPLICATE KEY UPDATE ...` of an INSERT
-    fn resolve_on_insert(
+    fn on_insert(
         &mut self,
         on: &OnInsert,
         table_def: &TableDef,
         table_name: &QualifiedName,
-        target: TableRef,
+        target: Relation,
     ) {
         let assignments = match on {
             OnInsert::DuplicateKeyUpdate(assignments) => assignments,
@@ -368,9 +343,12 @@ impl<'a> NameResolver<'a> {
                     OnConflictAction::DoNothing => return,
                     OnConflictAction::DoUpdate(update) => {
                         // EXCLUDED is the row proposed for insertion
-                        self.tables.insert("excluded".to_string(), target);
+                        self.scope
+                            .current()
+                            .relations
+                            .insert("excluded".to_string(), target);
                         if let Some(selection) = &update.selection {
-                            self.resolve_expr(selection);
+                            self.expr(selection);
                         }
                         &update.assignments
                     }
@@ -384,8 +362,9 @@ impl<'a> NameResolver<'a> {
                     self.check_target_column(table_def, table_name, col);
                 }
             }
-            self.resolve_expr(&assignment.value);
+            self.expr(&assignment.value);
         }
+        self.check_assignments(table_def, assignments);
     }
 
     /// Report a column of the target table that doesn't exist
@@ -410,363 +389,281 @@ impl<'a> NameResolver<'a> {
     }
 
     /// Resolve a RETURNING list against the statement's tables
-    fn resolve_returning(&mut self, returning: Option<&[SelectItem]>) {
-        let Some(items) = returning else {
-            return;
-        };
+    fn returning(&mut self, returning: Option<&[SelectItem]>) -> Option<Vec<Column>> {
+        let items = returning?;
         let span = Span::with_location(0, 0, 0);
         for item in items {
-            self.resolve_select_item(item, &span);
+            self.select_item(item, &span);
         }
+        self.projection_columns(items)
     }
 
-    /// Resolve names in an UPDATE statement
-    fn resolve_update(
+    /// Resolve an UPDATE statement in the current (statement) frame
+    fn update(
         &mut self,
         table: &TableWithJoins,
         assignments: &[Assignment],
         from: Option<&TableWithJoins>,
         selection: Option<&Expr>,
     ) {
-        // Resolve and register the table
-        self.resolve_table_with_joins(table);
-
-        // Resolve FROM clause (PostgreSQL: UPDATE ... FROM ...)
+        self.table_with_joins(table);
+        // PostgreSQL: UPDATE ... FROM ...
         if let Some(from_table) = from {
-            self.resolve_table_with_joins(from_table);
+            self.table_with_joins(from_table);
         }
 
-        // Get table definition for column validation
-        let table_name = self.table_factor_name(&table.relation);
+        let table_name = match &table.relation {
+            TableFactor::Table { name, .. } => Some(self.catalog.qualified_name(name)),
+            _ => None,
+        };
         let table_def = table_name.as_ref().and_then(|n| self.catalog.get_table(n));
 
-        // Resolve SET clause columns
         for assignment in assignments {
             match &assignment.target {
                 AssignmentTarget::ColumnName(col_name) if col_name.0.len() >= 2 => {
                     // `SET alias.col = ...` (MySQL multi-table UPDATE)
                     let n = col_name.0.len();
-                    self.resolve_column(Some(&col_name.0[n - 2]), &col_name.0[n - 1]);
+                    self.column(Some(&col_name.0[n - 2]), &col_name.0[n - 1]);
                 }
                 AssignmentTarget::ColumnName(col_name) if !table.joins.is_empty() => {
                     // Unqualified target in a multi-table UPDATE: any joined table
                     if let Some(col_ident) = col_name.0.last() {
-                        self.resolve_column(None, col_ident);
+                        self.column(None, col_ident);
                     }
                 }
                 AssignmentTarget::ColumnName(col_name) => {
-                    // Get the column identifier
-                    if let Some(col_ident) = col_name.0.last() {
-                        if let Some(def) = table_def {
-                            if !def.column_exists(&col_ident.value) {
-                                let similar = find_similar_column(def, &col_ident.value);
-                                let mut diag = Diagnostic::error(
-                                    DiagnosticKind::ColumnNotFound,
-                                    format!(
-                                        "Column '{}' not found in table '{}'",
-                                        col_ident.value,
-                                        table_name
-                                            .as_ref()
-                                            .map(|n| n.to_string())
-                                            .unwrap_or_default()
-                                    ),
-                                )
-                                .with_span(Span::from_sqlparser(&col_ident.span));
-                                if let Some(suggestion) = similar {
-                                    diag =
-                                        diag.with_help(format!("Did you mean '{}'?", suggestion));
-                                }
-                                self.diagnostics.push(diag);
-                            }
-                        }
+                    if let (Some(col_ident), Some(def), Some(name)) =
+                        (col_name.0.last(), table_def, &table_name)
+                    {
+                        self.check_target_column(def, name, col_ident);
                     }
                 }
                 AssignmentTarget::Tuple(_) => {
                     // Tuple assignment (col1, col2) = (val1, val2) - not commonly used
                 }
             }
-
-            // Resolve the value expression
-            self.resolve_expr(&assignment.value);
+            self.expr(&assignment.value);
         }
 
-        // Resolve WHERE clause
         if let Some(where_expr) = selection {
-            self.resolve_expr(where_expr);
+            self.expr(where_expr);
+        }
+
+        if let Some(def) = table_def {
+            self.check_assignments(def, assignments);
         }
     }
 
-    /// Resolve names in a DELETE statement
-    fn resolve_delete(&mut self, delete: &Delete) {
-        // Get the table from the FROM clause
+    /// Resolve a DELETE statement in the current (statement) frame
+    fn delete(&mut self, delete: &Delete) -> Option<Vec<Column>> {
         let tables = match &delete.from {
             sqlparser::ast::FromTable::WithFromKeyword(tables) => tables,
             sqlparser::ast::FromTable::WithoutKeyword(tables) => tables,
         };
 
-        // Resolve USING clause first (PostgreSQL / MySQL: DELETE ... USING ...)
+        // USING clause first (PostgreSQL / MySQL: DELETE ... USING ...)
         if let Some(using_tables) = &delete.using {
             for table in using_tables {
-                self.resolve_table_with_joins(table);
+                self.table_with_joins(table);
             }
         }
 
-        // Resolve and register tables from FROM clause. With MySQL's
-        // `DELETE FROM t1 USING t1 JOIN t2`, FROM names aliases of USING tables.
+        // With MySQL's `DELETE FROM t1 USING t1 JOIN t2`, FROM names aliases of USING tables
         for table in tables {
             let is_using_alias = delete.using.is_some()
                 && table.joins.is_empty()
                 && matches!(&table.relation, TableFactor::Table { name, alias: None, .. }
-                    if name.0.len() == 1
-                        && lookup_ignore_case(&self.tables, &name.0[0].value).is_some());
+                if name.0.len() == 1
+                    && self.scope.current_ref().is_some_and(|frame| {
+                        lookup_ignore_case(&frame.relations, &name.0[0].value).is_some()
+                    }));
             if !is_using_alias {
-                self.resolve_table_with_joins(table);
+                self.table_with_joins(table);
             }
         }
 
-        // Resolve WHERE clause
         if let Some(where_expr) = &delete.selection {
-            self.resolve_expr(where_expr);
+            self.expr(where_expr);
         }
 
-        self.resolve_returning(delete.returning.as_deref());
+        self.returning(delete.returning.as_deref())
     }
 
-    /// Resolve names in a query
-    fn resolve_query(&mut self, query: &Query) {
-        let saved_using = std::mem::take(&mut self.using_columns);
-        self.resolve_query_inner(query);
-        self.using_columns = saved_using;
+    // ---------------------------------------------------------------------
+    // Queries
+    // ---------------------------------------------------------------------
+
+    /// Resolve a query in a new query block. `hides_parent` is set for subqueries in
+    /// FROM, which can't see the FROM clause they appear in.
+    pub(super) fn query(&mut self, query: &Query, hides_parent: bool) -> Option<Vec<Column>> {
+        self.query_with(query, hides_parent, None)
     }
 
-    fn resolve_query_inner(&mut self, query: &Query) {
-        // Handle CTEs (WITH clause)
+    /// Resolve a query. `recursive_cte` names a recursive CTE (with its explicit
+    /// column list) whose columns are those of the anchor (left) branch of the body.
+    fn query_with(
+        &mut self,
+        query: &Query,
+        hides_parent: bool,
+        recursive_cte: Option<(&str, &[String])>,
+    ) -> Option<Vec<Column>> {
+        self.scope.push(hides_parent);
         if let Some(with) = &query.with {
-            let is_recursive = with.recursive;
-
             for cte in &with.cte_tables {
-                let cte_name = self.catalog.ident_name(&cte.alias.name);
+                self.define_cte(cte, with.recursive);
+            }
+        }
 
-                // For recursive CTEs, infer columns and register the CTE *before*
-                // resolving the body, so the recursive part can reference itself.
-                let columns = if !cte.alias.columns.is_empty() {
-                    cte.alias
-                        .columns
-                        .iter()
-                        .map(|c| c.name.value.clone())
-                        .collect()
-                } else {
-                    self.infer_cte_columns(&cte.query.body)
+        let columns = match query.body.as_ref() {
+            // ORDER BY / LIMIT see the FROM clause of a plain SELECT
+            SetExpr::Select(select) => self.select(select, Some(query)),
+            body => {
+                let columns = match (body, recursive_cte) {
+                    (SetExpr::SetOperation { left, right, .. }, Some((name, names))) => {
+                        let left_columns = self.set_expr(left);
+                        // The recursive term references the CTE with the anchor's columns
+                        self.scope.update_cte(
+                            name,
+                            Relation::rename_columns(left_columns.clone(), names),
+                        );
+                        let right_columns = self.set_expr(right);
+                        self.set_operation(left_columns, right_columns, right)
+                    }
+                    (body, _) => self.set_expr(body),
                 };
-
-                if is_recursive {
-                    // Pre-register the CTE so recursive references resolve
-                    self.ctes.insert(
-                        cte_name.clone(),
-                        CteDefinition {
-                            name: cte_name.clone(),
-                            columns: columns.clone(),
-                        },
-                    );
-                }
-
-                // Save current table scope
-                let saved_tables = self.tables.clone();
-
-                // Resolve the CTE query (to validate it) in isolated scope
-                self.resolve_set_expr(&cte.query.body);
-
-                // Restore table scope (CTEs shouldn't pollute outer scope with their internal tables)
-                self.tables = saved_tables;
-
-                // Register the CTE (or update if already pre-registered)
-                self.ctes.insert(
-                    cte_name.clone(),
-                    CteDefinition {
-                        name: cte_name,
-                        columns,
-                    },
+                // ORDER BY / LIMIT of a set operation see its output columns
+                self.scope.push(false);
+                self.scope.current().relations.insert(
+                    String::new(),
+                    Relation::new(RelationKind::Subquery, "", columns.clone()),
                 );
+                self.query_tail(query);
+                self.scope.pop();
+                columns
             }
-        }
-
-        // Resolve the main query body
-        self.resolve_set_expr(&query.body);
-
-        // LIMIT / OFFSET expressions (e.g. scalar subqueries)
-        if let Some(limit) = &query.limit {
-            self.resolve_expr(limit);
-        }
-        if let Some(offset) = &query.offset {
-            self.resolve_expr(&offset.value);
-        }
-
-        // Resolve ORDER BY clause (with SELECT aliases in scope)
-        if let Some(order_by) = &query.order_by {
-            // Collect SELECT aliases so ORDER BY can reference them
-            let saved_aliases = std::mem::take(&mut self.select_aliases);
-            self.select_aliases = match query.body.as_ref() {
-                // ORDER BY of a set operation refers to its output columns
-                SetExpr::SetOperation { .. } => self.infer_cte_columns(&query.body),
-                body => self.collect_select_aliases(body),
-            };
-            for ob in &order_by.exprs {
-                self.resolve_expr(&ob.expr);
-            }
-            self.select_aliases = saved_aliases;
-        }
-    }
-
-    /// Collect aliases from SELECT projection for use in ORDER BY resolution
-    fn collect_select_aliases(&self, set_expr: &SetExpr) -> Vec<String> {
-        match set_expr {
-            SetExpr::Select(select) => projection_aliases(&select.projection),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Infer column names from a SELECT body
-    ///
-    /// Returns an empty list when the columns can't be determined (e.g. `SELECT *`
-    /// over a table function), which callers treat as "any column".
-    fn infer_cte_columns(&self, set_expr: &SetExpr) -> Vec<String> {
-        // For UNION/INTERSECT/EXCEPT, infer from the left side
-        if let SetExpr::SetOperation { left, .. } = set_expr {
-            return self.infer_cte_columns(left);
-        }
-
-        let (select_items, from): (Option<&[SelectItem]>, &[TableWithJoins]) = match set_expr {
-            SetExpr::Select(select) => (Some(&select.projection), &select.from),
-            SetExpr::Query(query) => return self.infer_cte_columns(&query.body),
-            SetExpr::Insert(Statement::Insert(Insert { returning, .. })) => {
-                (returning.as_deref(), &[])
-            }
-            SetExpr::Update(Statement::Update { returning, .. }) => (returning.as_deref(), &[]),
-            _ => (None, &[]),
         };
 
-        let mut columns = Vec::new();
-        if let Some(items) = select_items {
-            for item in items {
-                match item {
-                    SelectItem::ExprWithAlias { alias, .. } => {
-                        columns.push(alias.value.clone());
-                    }
-                    SelectItem::UnnamedExpr(expr) => {
-                        columns.push(
-                            implicit_column_name(expr).unwrap_or_else(|| "?column?".to_string()),
-                        );
-                    }
-                    SelectItem::Wildcard(_) => {
-                        // Expand * from every relation in FROM
-                        let relations = self.columns_of_from_items(from);
-                        let Some(relations) = relations else {
-                            return Vec::new();
-                        };
-                        columns.extend(relations.into_iter().flat_map(|(_, cols)| cols));
-                    }
-                    SelectItem::QualifiedWildcard(name, _) => {
-                        // Expand t.* from the matching relation
-                        let qualifier = name.0.last().map(|i| i.value.as_str()).unwrap_or("");
-                        let relation = self.columns_of_from_items(from).and_then(|relations| {
-                            relations
-                                .into_iter()
-                                .find(|(n, _)| n.eq_ignore_ascii_case(qualifier))
-                        });
-                        let Some((_, cols)) = relation else {
-                            return Vec::new();
-                        };
-                        columns.extend(cols);
-                    }
-                }
-            }
-        }
-
+        self.scope.pop();
         columns
     }
 
-    /// Column names of each relation in a FROM clause, keyed by alias (or table name).
-    /// Returns `None` if any relation's columns can't be determined.
-    fn columns_of_from_items(&self, from: &[TableWithJoins]) -> Option<Vec<(String, Vec<String>)>> {
-        let mut relations = Vec::new();
-        for table in from {
-            for factor in
-                std::iter::once(&table.relation).chain(table.joins.iter().map(|j| &j.relation))
-            {
-                relations.push(self.relation_columns(factor)?);
-            }
+    /// Register a CTE of the current query
+    fn define_cte(&mut self, cte: &sqlparser::ast::Cte, recursive: bool) {
+        let name = self.catalog.ident_name(&cte.alias.name);
+        let names: Vec<String> = cte
+            .alias
+            .columns
+            .iter()
+            .map(|c| c.name.value.clone())
+            .collect();
+        if recursive {
+            // Registered before its body, so the recursive term can reference it
+            let columns = Relation::rename_columns(None, &names);
+            self.scope.current().ctes.push(Cte {
+                name: name.clone(),
+                columns,
+            });
+            let columns = self.query_with(&cte.query, false, Some((&name, &names)));
+            self.scope
+                .update_cte(&name, Relation::rename_columns(columns, &names));
+        } else {
+            let columns = self.query(&cte.query, false);
+            self.scope.current().ctes.push(Cte {
+                name,
+                columns: Relation::rename_columns(columns, &names),
+            });
         }
-        Some(relations)
     }
 
-    /// Column names of a single FROM relation, with its alias (or table name)
-    fn relation_columns(&self, factor: &TableFactor) -> Option<(String, Vec<String>)> {
-        match factor {
-            TableFactor::Table {
-                name,
-                alias,
-                args: None,
-                ..
-            } => {
-                let table_name = self.catalog.qualified_name(name);
-                let key = alias
-                    .as_ref()
-                    .map_or_else(|| table_name.name.clone(), |a| a.name.value.clone());
-                let columns = if let Some(cte) = self.cte(&table_name.name) {
-                    cte.columns.clone()
-                } else if let Some(table_def) = self.catalog.get_table(&table_name) {
-                    table_def.columns.keys().cloned().collect()
-                } else {
-                    self.catalog.get_view(&table_name)?.columns.clone()
-                };
-                (!columns.is_empty()).then_some((key, columns))
+    /// Resolve ORDER BY / LIMIT / OFFSET of a query in the current frame
+    fn query_tail(&mut self, query: &Query) {
+        if let Some(limit) = &query.limit {
+            self.expr(limit);
+        }
+        if let Some(offset) = &query.offset {
+            self.expr(&offset.value);
+        }
+        if let Some(order_by) = &query.order_by {
+            for ob in &order_by.exprs {
+                self.expr(&ob.expr);
             }
-            TableFactor::Derived {
-                subquery,
-                alias: Some(alias),
-                ..
-            } => {
-                let columns = if alias.columns.is_empty() {
-                    self.infer_cte_columns(&subquery.body)
-                } else {
-                    alias.columns.iter().map(|c| c.name.value.clone()).collect()
-                };
-                (!columns.is_empty()).then(|| (alias.name.value.clone(), columns))
+        }
+    }
+
+    /// Resolve a set expression (SELECT, UNION, VALUES, ...)
+    fn set_expr(&mut self, set_expr: &SetExpr) -> Option<Vec<Column>> {
+        match set_expr {
+            SetExpr::Select(select) => self.select(select, None),
+            SetExpr::Query(query) => self.query(query, false),
+            SetExpr::SetOperation { left, right, .. } => {
+                let left_columns = self.set_expr(left);
+                let right_columns = self.set_expr(right);
+                self.set_operation(left_columns, right_columns, right)
             }
+            SetExpr::Values(values) => self.values(values),
+            SetExpr::Insert(stmt) | SetExpr::Update(stmt) => self.statement(stmt),
             _ => None,
         }
     }
 
-    /// Resolve names in a set expression (SELECT, UNION, etc.)
-    fn resolve_set_expr(&mut self, set_expr: &SetExpr) {
-        match set_expr {
-            SetExpr::Select(select) => self.resolve_select(select),
-            SetExpr::Query(query) => self.resolve_query(query),
-            SetExpr::SetOperation { left, right, .. } => {
-                // Each branch has its own FROM scope
-                let saved_tables = self.tables.clone();
-                self.resolve_set_expr(left);
-                self.tables = saved_tables.clone();
-                self.resolve_set_expr(right);
-                self.tables = saved_tables;
+    /// Check the branches of a set operation and combine their output columns
+    fn set_operation(
+        &mut self,
+        left: Option<Vec<Column>>,
+        right: Option<Vec<Column>>,
+        right_expr: &SetExpr,
+    ) -> Option<Vec<Column>> {
+        let (Some(mut left), Some(right)) = (left, right) else {
+            return None;
+        };
+        self.check_set_operation(&left, &right, right_expr);
+        // Names come from the left branch; a type unknown on the left (e.g. NULL)
+        // comes from the right
+        if left.len() == right.len() {
+            for (l, r) in left.iter_mut().zip(right) {
+                if !matches!(l.ty, ExpressionType::Known(_))
+                    && matches!(r.ty, ExpressionType::Known(_))
+                {
+                    l.ty = r.ty;
+                }
             }
-            SetExpr::Insert(stmt) => self.resolve_statement(stmt),
-            SetExpr::Update(stmt) => self.resolve_statement(stmt),
-            _ => {}
         }
+        Some(left)
     }
 
-    /// Resolve names in a SELECT statement
-    fn resolve_select(&mut self, select: &Select) {
-        // First, resolve FROM clause to build table scope
+    /// Resolve a VALUES list used as a query; its columns are `column1`, `column2`, ...
+    fn values(&mut self, values: &Values) -> Option<Vec<Column>> {
+        for row in &values.rows {
+            for expr in row {
+                self.expr(expr);
+            }
+        }
+        let first = values.rows.first()?;
+        Some(
+            first
+                .iter()
+                .enumerate()
+                .map(|(i, expr)| {
+                    Column::new(format!("column{}", i + 1), self.infer_expr_type(expr))
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolve a SELECT in a new query block. With `query`, also resolves the query's
+    /// ORDER BY / LIMIT, which see the SELECT's FROM clause and output aliases.
+    fn select(&mut self, select: &Select, query: Option<&Query>) -> Option<Vec<Column>> {
+        self.scope.push(false);
+
+        // FROM first: it builds the scope for every other clause
         for table_with_joins in &select.from {
-            self.resolve_table_with_joins(table_with_joins);
+            self.table_with_joins(table_with_joins);
         }
 
         // DISTINCT ON (...) expressions
         if let Some(Distinct::On(exprs)) = &select.distinct {
             for expr in exprs {
-                self.resolve_expr(expr);
+                self.expr(expr);
             }
         }
 
@@ -774,297 +671,289 @@ impl<'a> NameResolver<'a> {
         for NamedWindowDefinition(_, window) in &select.named_window {
             if let NamedWindowExpr::WindowSpec(spec) = window {
                 for e in &spec.partition_by {
-                    self.resolve_expr(e);
+                    self.expr(e);
                 }
                 for ob in &spec.order_by {
-                    self.resolve_expr(&ob.expr);
+                    self.expr(&ob.expr);
                 }
             }
         }
 
-        // Then resolve SELECT items
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
-            self.resolve_select_item(item, &select_span);
+            self.select_item(item, &select_span);
         }
 
-        // Resolve WHERE clause
         if let Some(selection) = &select.selection {
-            self.resolve_expr(selection);
+            self.expr(selection);
         }
 
-        // Resolve GROUP BY (output column aliases are allowed, like in ORDER BY)
+        // GROUP BY can reference output column aliases, like ORDER BY
+        let aliases = projection_aliases(&select.projection);
         if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
-            let saved_aliases = std::mem::replace(
-                &mut self.select_aliases,
-                projection_aliases(&select.projection),
-            );
+            self.scope.current().select_aliases = aliases.clone();
             for expr in exprs {
-                self.resolve_expr(expr);
+                self.expr(expr);
             }
-            self.select_aliases = saved_aliases;
+            self.scope.current().select_aliases.clear();
         }
 
-        // Resolve HAVING
         if let Some(having) = &select.having {
-            self.resolve_expr(having);
+            self.expr(having);
         }
+
+        let columns = self.projection_columns(&select.projection);
+
+        if let Some(query) = query {
+            self.scope.current().select_aliases = aliases;
+            self.query_tail(query);
+        }
+
+        self.scope.pop();
+        columns
     }
 
-    /// Resolve a table reference in FROM clause
-    fn resolve_table_with_joins(&mut self, table: &TableWithJoins) {
-        self.resolve_table_factor(&table.relation);
+    /// Output columns of a SELECT list (or RETURNING list) in the current frame, or
+    /// `None` if a wildcard can't be expanded
+    fn projection_columns(&self, projection: &[SelectItem]) -> Option<Vec<Column>> {
+        let frame = self.scope.current_ref()?;
+        let mut columns = Vec::new();
+        for item in projection {
+            match item {
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    columns.push(Column::new(alias.value.clone(), self.infer_expr_type(expr)));
+                }
+                SelectItem::UnnamedExpr(expr) => {
+                    let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
+                    columns.push(Column::new(name, self.infer_expr_type(expr)));
+                }
+                SelectItem::Wildcard(_) => {
+                    if frame.relations.is_empty() {
+                        return None;
+                    }
+                    for relation in frame.relations.values() {
+                        columns.extend(relation.star_columns()?.cloned());
+                    }
+                }
+                SelectItem::QualifiedWildcard(name, _) => {
+                    let qualifier = name.0.last()?;
+                    let relation = lookup_ignore_case(&frame.relations, &qualifier.value)?;
+                    columns.extend(relation.columns.clone()?);
+                }
+            }
+        }
+        Some(columns)
+    }
 
+    // ---------------------------------------------------------------------
+    // FROM
+    // ---------------------------------------------------------------------
+
+    /// Resolve a FROM item with its joins, registering its relations in the current frame
+    fn table_with_joins(&mut self, table: &TableWithJoins) {
+        self.table_factor(&table.relation);
         for join in &table.joins {
-            self.resolve_table_factor(&join.relation);
-            // Resolve join condition
-            self.resolve_join_condition(&join.join_operator, &join.relation);
+            self.table_factor(&join.relation);
+            self.join_constraint(&join.join_operator, &join.relation);
         }
     }
 
-    /// Resolve JOIN condition (ON clause)
-    fn resolve_join_condition(
-        &mut self,
-        join_op: &sqlparser::ast::JoinOperator,
-        relation: &TableFactor,
-    ) {
-        use sqlparser::ast::JoinConstraint;
-        use sqlparser::ast::JoinOperator::*;
-
+    /// Resolve a JOIN condition (ON / USING / NATURAL)
+    fn join_constraint(&mut self, join_op: &JoinOperator, relation: &TableFactor) {
+        use JoinOperator::*;
         let constraint = match join_op {
-            Inner(c) | LeftOuter(c) | RightOuter(c) | FullOuter(c) | LeftSemi(c) | RightSemi(c)
-            | LeftAnti(c) | RightAnti(c) => Some(c),
-            CrossJoin | CrossApply | OuterApply | AsOf { .. } | Anti(_) | Semi(_) => None,
+            Inner(c) | LeftOuter(c) | RightOuter(c) | FullOuter(c) | Semi(c) | LeftSemi(c)
+            | RightSemi(c) | Anti(c) | LeftAnti(c) | RightAnti(c) => c,
+            AsOf { constraint, .. } => constraint,
+            CrossJoin | CrossApply | OuterApply => return,
         };
 
-        if let Some(constraint) = constraint {
-            match constraint {
-                JoinConstraint::On(expr) => {
-                    self.resolve_expr(expr);
-                }
-                JoinConstraint::Using(columns) => {
-                    // USING columns exist in both sides by definition and are merged
-                    // into a single unqualified column, so only check they exist
-                    let right_key = relation_key(relation);
-                    for col in columns {
-                        let has = |resolver: &Self, t: &TableRef| {
-                            resolver.has_unknown_columns(t)
-                                || resolver.table_ref_has_column(t, &col.value)
-                        };
-                        let (right, left): (Vec<_>, Vec<_>) = self
-                            .tables
-                            .iter()
-                            .partition(|(k, _)| right_key.as_deref() == Some(k.as_str()));
-                        let in_right = right.is_empty() || right.iter().any(|(_, t)| has(self, t));
-                        let in_left = left.iter().any(|(_, t)| has(self, t));
-                        if !(in_right && in_left) {
-                            self.diagnostics.push(
-                                Diagnostic::error(
-                                    DiagnosticKind::ColumnNotFound,
-                                    format!("Column '{}' not found", col.value),
-                                )
-                                .with_span(Span::from_sqlparser(&col.span)),
-                            );
+        let right_key = relation_key(relation);
+        match constraint {
+            JoinConstraint::On(expr) => self.join_on(expr),
+            JoinConstraint::Using(columns) => {
+                // USING columns exist in both sides by definition and are merged
+                // into a single unqualified column, so only check they exist
+                for col in columns {
+                    let frame = self.scope.current();
+                    let (right, left): (Vec<_>, Vec<_>) = frame
+                        .relations
+                        .iter()
+                        .partition(|(k, _)| right_key.as_deref() == Some(k.as_str()));
+                    let has = |r: &Relation| {
+                        !matches!(r.column(&col.value, self.dialect), ColumnMatch::No)
+                    };
+                    let in_right = right.is_empty() || right.iter().any(|(_, r)| has(r));
+                    let in_left = left.iter().any(|(_, r)| has(r));
+                    let name = col.value.to_lowercase();
+                    frame.using_columns.insert(name.clone());
+                    if let Some(key) = &right_key {
+                        if let Some(r) = frame.relations.get_mut(key) {
+                            r.merged.insert(name);
                         }
-                        self.using_columns.insert(col.value.to_lowercase());
+                    }
+                    if !(in_right && in_left) {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                DiagnosticKind::ColumnNotFound,
+                                format!("Column '{}' not found", col.value),
+                            )
+                            .with_span(Span::from_sqlparser(&col.span)),
+                        );
                     }
                 }
-                JoinConstraint::Natural => {
-                    // NATURAL JOIN merges every column the two sides have in common
-                    if let Some(table_def) = self
-                        .table_factor_name(relation)
-                        .and_then(|n| self.catalog.get_table(&n))
-                    {
-                        self.using_columns
-                            .extend(table_def.columns.keys().map(|c| c.to_lowercase()));
-                    }
-                }
-                JoinConstraint::None => {}
             }
+            JoinConstraint::Natural => {
+                // NATURAL JOIN merges every column the two sides have in common
+                let Some(key) = right_key else {
+                    return;
+                };
+                let frame = self.scope.current();
+                let Some(right) = frame.relations.get(&key) else {
+                    return;
+                };
+                let right_names: Vec<String> =
+                    right.column_names().map(|c| c.to_lowercase()).collect();
+                let left_names: std::collections::HashSet<String> = frame
+                    .relations
+                    .iter()
+                    .filter(|(k, _)| **k != key)
+                    .flat_map(|(_, r)| r.column_names())
+                    .map(|c| c.to_lowercase())
+                    .collect();
+                let common: Vec<String> = right_names
+                    .into_iter()
+                    .filter(|c| left_names.contains(c))
+                    .collect();
+                frame.using_columns.extend(common.iter().cloned());
+                if let Some(r) = frame.relations.get_mut(&key) {
+                    r.merged.extend(common);
+                }
+            }
+            JoinConstraint::None => {}
         }
     }
 
-    /// Resolve a table factor (table name, subquery, etc.)
-    fn resolve_table_factor(&mut self, factor: &TableFactor) {
+    /// Register a FROM relation (table, view, CTE, subquery, function) in the current frame
+    fn table_factor(&mut self, factor: &TableFactor) {
         match factor {
             TableFactor::Table {
                 name, alias, args, ..
             } => {
                 let table_name = self.catalog.qualified_name(name);
+                let alias_name = alias.as_ref().map(|a| a.name.value.clone());
+                let alias_columns: Vec<String> = alias
+                    .iter()
+                    .flat_map(|a| a.columns.iter().map(|c| c.name.value.clone()))
+                    .collect();
 
-                // Table-valued function call (e.g., generate_series(...))
-                // Register alias if present, skip table existence check
+                // Table-valued function call (e.g., generate_series(...)): columns are
+                // known only from an alias column list
                 if args.is_some() {
                     // Without an alias, the function name names the relation
-                    let alias_name = alias
-                        .as_ref()
-                        .map(|a| a.name.value.clone())
-                        .or_else(|| name.0.last().map(|i| i.value.clone()));
-                    if let Some(a_name) = alias_name {
-                        let columns = alias
-                            .as_ref()
-                            .map(|a| a.columns.iter().map(|c| c.name.value.clone()).collect())
-                            .filter(|cols: &Vec<String>| !cols.is_empty())
-                            .unwrap_or_default();
-                        self.tables.insert(
-                            a_name.clone(),
-                            TableRef {
-                                table: QualifiedName::new(&a_name),
-                                alias: Some(a_name),
-                                view_columns: None,
-                                derived_columns: Some(columns),
-                            },
+                    if let Some(key) = alias_name.or_else(|| name.0.last().map(|i| i.value.clone()))
+                    {
+                        let columns = Relation::rename_columns(None, &alias_columns);
+                        self.scope.current().relations.insert(
+                            key.clone(),
+                            Relation::new(RelationKind::Function, key, columns),
                         );
                     }
                     return;
                 }
 
-                // Check if it's a CTE first
-                let is_cte = self.cte(&table_name.name).is_some();
-
-                // Check if table or view exists (in catalog or as CTE)
-                let is_view = !is_cte && self.catalog.view_exists(&table_name);
-                if !is_cte
-                    && !is_view
-                    && !self.catalog.table_exists(&table_name)
-                    && !is_system_table(self.dialect, &table_name)
-                {
-                    // Get span from the last identifier (table name)
-                    let table_span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
-                    let diag = self.table_not_found(&table_name, table_span);
-                    self.diagnostics.push(diag);
-
-                    // Register a placeholder with unknown columns, so references to the
-                    // missing table don't cascade into column/alias errors
-                    let alias_name = alias.as_ref().map(|a| a.name.value.clone());
-                    let lookup_name = alias_name
-                        .clone()
-                        .unwrap_or_else(|| table_name.name.clone());
-                    self.tables.insert(
-                        lookup_name,
-                        TableRef {
-                            table: table_name,
-                            alias: alias_name,
-                            view_columns: None,
-                            derived_columns: Some(Vec::new()),
-                        },
-                    );
-                    return;
-                }
-
-                // System catalogs: columns unknown
-                if is_system_table(self.dialect, &table_name)
-                    && !self.catalog.table_exists(&table_name)
-                {
-                    let alias_name = alias.as_ref().map(|a| a.name.value.clone());
-                    let lookup_name = alias_name
-                        .clone()
-                        .unwrap_or_else(|| table_name.name.clone());
-                    self.tables.insert(
-                        lookup_name,
-                        TableRef {
-                            table: table_name,
-                            alias: alias_name,
-                            view_columns: None,
-                            derived_columns: Some(Vec::new()),
-                        },
-                    );
-                    return;
-                }
-
-                // Get view columns if this is a view reference
-                let view_columns = if is_view {
-                    self.catalog
-                        .get_view(&table_name)
-                        .map(|v| v.columns.clone())
+                let key = alias_name.unwrap_or_else(|| table_name.name.clone());
+                let cte = table_name
+                    .schema
+                    .is_none()
+                    .then(|| self.scope.cte(self.catalog, &table_name.name))
+                    .flatten();
+                let mut relation = if let Some(cte) = cte {
+                    Relation::new(RelationKind::Cte, cte.name.clone(), cte.columns.clone())
+                } else if let Some(table) = Relation::table(self.catalog, &table_name) {
+                    table
+                } else if let Some(view) = Relation::view(self.catalog, &table_name) {
+                    view
                 } else {
-                    None
+                    if !is_system_table(self.dialect, &table_name) {
+                        let span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
+                        let diag = self.table_not_found(&table_name, span);
+                        self.diagnostics.push(diag);
+                    }
+                    // Unknown columns, so references to a missing table don't cascade
+                    // into column/alias errors
+                    Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 };
-
-                // Register table in scope
-                let alias_name = alias.as_ref().map(|a| a.name.value.clone());
-                let lookup_name = alias_name
-                    .clone()
-                    .unwrap_or_else(|| table_name.name.clone());
-
-                self.tables.insert(
-                    lookup_name,
-                    TableRef {
-                        table: table_name,
-                        alias: alias_name,
-                        view_columns,
-                        derived_columns: None,
-                    },
-                );
+                relation.columns = Relation::rename_columns(relation.columns, &alias_columns);
+                self.scope.current().relations.insert(key, relation);
             }
             TableFactor::Derived {
                 lateral,
                 subquery,
                 alias,
             } => {
-                // Save current table scope so subquery resolution doesn't leak
-                let saved_tables = self.tables.clone();
-                let saved_outer = self.outer_tables.clone();
-
-                // Non-LATERAL subqueries cannot reference outer FROM tables.
+                // Non-LATERAL subqueries can't reference the FROM clause they appear in.
                 // LATERAL subqueries can, with lower precedence than their own tables.
-                if *lateral {
-                    self.outer_tables.extend(self.tables.drain(..));
-                } else {
-                    self.tables.clear();
-                }
-
-                // Resolve subquery
-                self.resolve_query(subquery);
-                self.outer_tables = saved_outer;
-
-                // Infer column names from the subquery projection
-                let derived_columns = self.infer_cte_columns(&subquery.body);
-
-                // Restore table scope
-                self.tables = saved_tables;
-
-                // Register derived table alias in outer scope
-                if let Some(a) = alias {
-                    let alias_name = a.name.value.clone();
-                    // Use explicit column aliases if provided: (SELECT ...) AS v(col1, col2)
-                    let columns = if !a.columns.is_empty() {
-                        a.columns.iter().map(|c| c.name.value.clone()).collect()
-                    } else {
-                        derived_columns
-                    };
-                    self.tables.insert(
-                        alias_name.clone(),
-                        TableRef {
-                            table: QualifiedName::new(&alias_name),
-                            alias: Some(alias_name),
-                            view_columns: None,
-                            derived_columns: Some(columns),
-                        },
-                    );
-                }
+                let columns = self.query(subquery, !*lateral);
+                let (key, columns) = match alias {
+                    Some(a) => {
+                        let names: Vec<String> =
+                            a.columns.iter().map(|c| c.name.value.clone()).collect();
+                        (
+                            a.name.value.clone(),
+                            Relation::rename_columns(columns, &names),
+                        )
+                    }
+                    None => {
+                        // Unaliased derived table: its columns are still visible unqualified
+                        self.unaliased_subqueries += 1;
+                        (format!("?subquery{}", self.unaliased_subqueries), columns)
+                    }
+                };
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Subquery, key, columns),
+                );
             }
             TableFactor::TableFunction { alias, .. }
             | TableFactor::Function { alias, .. }
             | TableFactor::UNNEST { alias, .. } => {
-                // Table-valued functions (e.g., generate_series, unnest)
-                // Register with the alias's column list, or with unknown columns
-                let (alias_name, columns) = match alias {
+                // Table-valued functions (e.g., generate_series, unnest): columns are
+                // known only from an alias column list
+                let (key, names) = match alias {
                     Some(a) => (
                         a.name.value.clone(),
                         a.columns.iter().map(|c| c.name.value.clone()).collect(),
                     ),
                     None => (format!("{factor}"), Vec::new()),
                 };
-                {
-                    self.tables.insert(
-                        alias_name.clone(),
-                        TableRef {
-                            table: QualifiedName::new(&alias_name),
-                            alias: Some(alias_name),
-                            view_columns: None,
-                            derived_columns: Some(columns),
-                        },
+                let columns = Relation::rename_columns(None, &names);
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Function, key, columns),
+                );
+            }
+            TableFactor::NestedJoin {
+                table_with_joins,
+                alias,
+            } => {
+                let start = self.scope.current().relations.len();
+                self.table_with_joins(table_with_joins);
+                // `(a JOIN b) AS j`: the alias replaces the joined relations
+                if let Some(alias) = alias {
+                    let inner = self.scope.current().relations.split_off(start);
+                    let columns = inner
+                        .values()
+                        .map(|r| {
+                            r.star_columns()
+                                .map(|cols| cols.cloned().collect::<Vec<_>>())
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|cols| cols.concat());
+                    let key = alias.name.value.clone();
+                    self.scope.current().relations.insert(
+                        key.clone(),
+                        Relation::new(RelationKind::Subquery, key, columns),
                     );
                 }
             }
@@ -1072,30 +961,44 @@ impl<'a> NameResolver<'a> {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Expressions
+    // ---------------------------------------------------------------------
+
     /// Resolve a SELECT item
-    fn resolve_select_item(&mut self, item: &SelectItem, select_span: &Span) {
+    fn select_item(&mut self, item: &SelectItem, select_span: &Span) {
         match item {
-            SelectItem::UnnamedExpr(expr) => self.resolve_expr(expr),
-            SelectItem::ExprWithAlias { expr, .. } => self.resolve_expr(expr),
+            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                self.expr(expr)
+            }
             SelectItem::QualifiedWildcard(name, _) => {
                 // table.*
-                if let Some(first_ident) = name.0.first() {
-                    let table_name = &first_ident.value;
-                    if lookup_ignore_case(&self.tables, table_name).is_none() {
-                        let table_span = Span::from_sqlparser(&first_ident.span);
+                if let Some(ident) = name.0.last() {
+                    let in_scope = self
+                        .scope
+                        .current_ref()
+                        .is_some_and(|f| lookup_ignore_case(&f.relations, &ident.value).is_some());
+                    if !in_scope {
                         self.diagnostics.push(
                             Diagnostic::error(
                                 DiagnosticKind::TableNotFound,
-                                format!("Table or alias '{}' not found in FROM clause", table_name),
+                                format!(
+                                    "Table or alias '{}' not found in FROM clause",
+                                    ident.value
+                                ),
                             )
-                            .with_span(table_span),
+                            .with_span(Span::from_sqlparser(&ident.span)),
                         );
                     }
                 }
             }
             SelectItem::Wildcard(_) => {
                 // * - valid if we have at least one table
-                if self.tables.is_empty() {
+                if self
+                    .scope
+                    .current_ref()
+                    .map_or(true, |f| f.relations.is_empty())
+                {
                     self.diagnostics.push(
                         Diagnostic::error(
                             DiagnosticKind::TableNotFound,
@@ -1108,86 +1011,96 @@ impl<'a> NameResolver<'a> {
         }
     }
 
-    /// Resolve an expression
-    fn resolve_expr(&mut self, expr: &Expr) {
+    /// Resolve a subquery in an expression (it sees the enclosing query blocks)
+    fn subquery(&mut self, query: &Query) -> Option<Vec<Column>> {
+        let columns = self.query(query, false);
+        self.subquery_columns
+            .insert(query as *const Query as usize, columns.clone());
+        columns
+    }
+
+    /// Resolve an expression and check its types
+    pub(super) fn expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Identifier(ident) => {
-                // Simple column name - must exist in one of the tables
-                self.resolve_column(None, ident);
-            }
-            Expr::CompoundIdentifier(idents) => {
+            Expr::Identifier(ident) => self.column(None, ident),
+            Expr::CompoundIdentifier(idents) => match idents.as_slice() {
                 // table.column or schema.table.column
-                match idents.as_slice() {
-                    [table, column] => {
-                        self.resolve_column(Some(table), column);
-                    }
-                    [_schema, table, column] => {
-                        self.resolve_column(Some(table), column);
-                    }
-                    _ => {}
-                }
+                [table, column] | [_, table, column] => self.column(Some(table), column),
+                _ => {}
+            },
+            Expr::BinaryOp { left, op, right } => {
+                self.expr(left);
+                self.expr(right);
+                self.check_binary_op(left, op, right);
             }
-            Expr::BinaryOp { left, right, .. } => {
-                self.resolve_expr(left);
-                self.resolve_expr(right);
-            }
-            Expr::UnaryOp { expr, .. } => {
-                self.resolve_expr(expr);
-            }
-            Expr::Nested(inner) => {
-                self.resolve_expr(inner);
-            }
+            Expr::UnaryOp { expr, .. }
+            | Expr::Nested(expr)
+            | Expr::IsNull(expr)
+            | Expr::IsNotNull(expr)
+            | Expr::IsTrue(expr)
+            | Expr::IsFalse(expr)
+            | Expr::IsNotTrue(expr)
+            | Expr::IsNotFalse(expr)
+            | Expr::IsUnknown(expr)
+            | Expr::IsNotUnknown(expr)
+            | Expr::Cast { expr, .. }
+            | Expr::Extract { expr, .. }
+            | Expr::Collate { expr, .. }
+            | Expr::Ceil { expr, .. }
+            | Expr::Floor { expr, .. } => self.expr(expr),
             Expr::Function(func) => {
-                self.resolve_function_args_list(&func.args);
+                self.function_args(&func.args);
                 // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
                 if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
                     for clause in &list.clauses {
                         if let sqlparser::ast::FunctionArgumentClause::OrderBy(order_by) = clause {
                             for ob in order_by {
-                                self.resolve_expr(&ob.expr);
+                                self.expr(&ob.expr);
                             }
                         }
                     }
                 }
                 // WITHIN GROUP (ORDER BY ...)
                 for ob in &func.within_group {
-                    self.resolve_expr(&ob.expr);
+                    self.expr(&ob.expr);
                 }
-                // Resolve FILTER (WHERE ...) clause
+                // FILTER (WHERE ...)
                 if let Some(filter) = &func.filter {
-                    self.resolve_expr(filter);
+                    self.expr(filter);
                 }
-                // Resolve OVER (PARTITION BY ... ORDER BY ...) clause
+                // OVER (PARTITION BY ... ORDER BY ...)
                 if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &func.over {
                     for e in &spec.partition_by {
-                        self.resolve_expr(e);
+                        self.expr(e);
                     }
                     for ob in &spec.order_by {
-                        self.resolve_expr(&ob.expr);
+                        self.expr(&ob.expr);
                     }
                 }
             }
             Expr::InList { expr, list, .. } => {
-                self.resolve_expr(expr);
+                self.expr(expr);
                 for e in list {
-                    self.resolve_expr(e);
+                    self.expr(e);
                 }
             }
             Expr::InSubquery { expr, subquery, .. } => {
-                self.resolve_expr(expr);
-                let saved_tables = self.tables.clone();
-                let saved_outer = self.outer_tables.clone();
-                self.outer_tables.extend(self.tables.drain(..));
-                self.resolve_query(subquery);
-                self.tables = saved_tables;
-                self.outer_tables = saved_outer;
+                self.expr(expr);
+                let columns = self.subquery(subquery);
+                self.check_in_subquery(expr, columns.as_deref());
+            }
+            Expr::Subquery(query) => {
+                self.subquery(query);
+            }
+            Expr::Exists { subquery, .. } => {
+                self.subquery(subquery);
             }
             Expr::Between {
                 expr, low, high, ..
             } => {
-                self.resolve_expr(expr);
-                self.resolve_expr(low);
-                self.resolve_expr(high);
+                self.expr(expr);
+                self.expr(low);
+                self.expr(high);
             }
             Expr::Case {
                 operand,
@@ -1196,34 +1109,19 @@ impl<'a> NameResolver<'a> {
                 else_result,
             } => {
                 if let Some(op) = operand {
-                    self.resolve_expr(op);
+                    self.expr(op);
                 }
                 for cond in conditions {
-                    self.resolve_expr(cond);
+                    self.expr(cond);
                 }
                 for result in results {
-                    self.resolve_expr(result);
+                    self.expr(result);
                 }
                 if let Some(else_r) = else_result {
-                    self.resolve_expr(else_r);
+                    self.expr(else_r);
                 }
-            }
-            Expr::Subquery(query) => {
-                let saved_tables = self.tables.clone();
-                let saved_outer = self.outer_tables.clone();
-                self.outer_tables.extend(self.tables.drain(..));
-                self.resolve_query(query);
-                self.tables = saved_tables;
-                self.outer_tables = saved_outer;
-            }
-            Expr::IsNull(e) | Expr::IsNotNull(e) => {
-                self.resolve_expr(e);
-            }
-            Expr::Cast { expr, .. } => {
-                self.resolve_expr(expr);
-            }
-            Expr::Extract { expr, .. } => {
-                self.resolve_expr(expr);
+                let branches: Vec<&Expr> = results.iter().chain(else_result.as_deref()).collect();
+                self.check_case_branches(&branches);
             }
             Expr::Substring {
                 expr,
@@ -1231,60 +1129,44 @@ impl<'a> NameResolver<'a> {
                 substring_for,
                 ..
             } => {
-                self.resolve_expr(expr);
+                self.expr(expr);
                 if let Some(from) = substring_from {
-                    self.resolve_expr(from);
+                    self.expr(from);
                 }
                 if let Some(for_expr) = substring_for {
-                    self.resolve_expr(for_expr);
+                    self.expr(for_expr);
                 }
             }
             Expr::Trim {
                 expr, trim_what, ..
             } => {
-                self.resolve_expr(expr);
+                self.expr(expr);
                 if let Some(what) = trim_what {
-                    self.resolve_expr(what);
+                    self.expr(what);
                 }
             }
             Expr::Position { expr, r#in } => {
-                self.resolve_expr(expr);
-                self.resolve_expr(r#in);
+                self.expr(expr);
+                self.expr(r#in);
             }
-            Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
-                self.resolve_expr(expr);
-                self.resolve_expr(pattern);
+            Expr::Like { expr, pattern, .. }
+            | Expr::ILike { expr, pattern, .. }
+            | Expr::SimilarTo { expr, pattern, .. }
+            | Expr::RLike { expr, pattern, .. } => {
+                self.expr(expr);
+                self.expr(pattern);
             }
-            Expr::IsTrue(e) | Expr::IsFalse(e) | Expr::IsNotTrue(e) | Expr::IsNotFalse(e) => {
-                self.resolve_expr(e);
-            }
-            Expr::JsonAccess { value, .. } => {
-                self.resolve_expr(value);
-            }
+            Expr::JsonAccess { value, .. } => self.expr(value),
             Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
-                self.resolve_expr(left);
-                self.resolve_expr(right);
-            }
-            Expr::Exists { subquery, .. } => {
-                let saved_tables = self.tables.clone();
-                let saved_outer = self.outer_tables.clone();
-                self.outer_tables.extend(self.tables.drain(..));
-                self.resolve_query(subquery);
-                self.tables = saved_tables;
-                self.outer_tables = saved_outer;
+                self.expr(left);
+                self.expr(right);
             }
             Expr::AtTimeZone {
                 timestamp,
                 time_zone,
             } => {
-                self.resolve_expr(timestamp);
-                self.resolve_expr(time_zone);
-            }
-            Expr::Collate { expr, .. } => {
-                self.resolve_expr(expr);
-            }
-            Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => {
-                self.resolve_expr(expr);
+                self.expr(timestamp);
+                self.expr(time_zone);
             }
             Expr::Overlay {
                 expr,
@@ -1292,68 +1174,51 @@ impl<'a> NameResolver<'a> {
                 overlay_from,
                 overlay_for,
             } => {
-                self.resolve_expr(expr);
-                self.resolve_expr(overlay_what);
-                self.resolve_expr(overlay_from);
+                self.expr(expr);
+                self.expr(overlay_what);
+                self.expr(overlay_from);
                 if let Some(for_expr) = overlay_for {
-                    self.resolve_expr(for_expr);
+                    self.expr(for_expr);
                 }
             }
             Expr::IsDistinctFrom(a, b) | Expr::IsNotDistinctFrom(a, b) => {
-                self.resolve_expr(a);
-                self.resolve_expr(b);
-            }
-            Expr::IsUnknown(e) | Expr::IsNotUnknown(e) => {
-                self.resolve_expr(e);
-            }
-            Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => {
-                self.resolve_expr(expr);
-                self.resolve_expr(pattern);
+                self.expr(a);
+                self.expr(b);
             }
             Expr::Tuple(exprs) => {
                 for e in exprs {
-                    self.resolve_expr(e);
+                    self.expr(e);
                 }
             }
             Expr::Array(arr) => {
                 for e in &arr.elem {
-                    self.resolve_expr(e);
+                    self.expr(e);
                 }
             }
             Expr::Subscript { expr, subscript } => {
-                self.resolve_expr(expr);
+                self.expr(expr);
                 match subscript.as_ref() {
-                    Subscript::Index { index } => {
-                        self.resolve_expr(index);
-                    }
+                    Subscript::Index { index } => self.expr(index),
                     Subscript::Slice {
                         lower_bound,
                         upper_bound,
                         stride,
                     } => {
-                        if let Some(lb) = lower_bound {
-                            self.resolve_expr(lb);
-                        }
-                        if let Some(ub) = upper_bound {
-                            self.resolve_expr(ub);
-                        }
-                        if let Some(s) = stride {
-                            self.resolve_expr(s);
+                        for e in [lower_bound, upper_bound, stride].into_iter().flatten() {
+                            self.expr(e);
                         }
                     }
                 }
             }
             Expr::Method(method) => {
-                self.resolve_expr(&method.expr);
+                self.expr(&method.expr);
                 for func in &method.method_chain {
-                    self.resolve_function_args_list(&func.args);
+                    self.function_args(&func.args);
                 }
             }
             Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
-                for set in sets {
-                    for e in set {
-                        self.resolve_expr(e);
-                    }
+                for e in sets.iter().flatten() {
+                    self.expr(e);
                 }
             }
             // Literals, intervals, and other expressions don't need column resolution
@@ -1361,277 +1226,149 @@ impl<'a> NameResolver<'a> {
         }
     }
 
+    /// Resolve a JOIN ... ON condition: comparisons joined by AND/OR are checked as
+    /// join conditions (E0007), everything else as ordinary expressions
+    fn join_on(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Nested(inner) => self.join_on(inner),
+            Expr::BinaryOp { left, op, right } if is_logical_operator(op) => {
+                self.join_on(left);
+                self.join_on(right);
+            }
+            Expr::BinaryOp { left, op, right } if is_comparison_operator(op) => {
+                self.expr(left);
+                self.expr(right);
+                self.check_join_comparison(left, right);
+            }
+            other => self.expr(other),
+        }
+    }
+
     /// Resolve function arguments (handles Named, ExprNamed, and Unnamed variants)
-    fn resolve_function_args_list(&mut self, args: &sqlparser::ast::FunctionArguments) {
-        if let sqlparser::ast::FunctionArguments::List(arg_list) = args {
+    fn function_args(&mut self, args: &sqlparser::ast::FunctionArguments) {
+        use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+        if let FunctionArguments::List(arg_list) = args {
             for arg in &arg_list.args {
                 match arg {
-                    sqlparser::ast::FunctionArg::Unnamed(
-                        sqlparser::ast::FunctionArgExpr::Expr(e),
-                    ) => {
-                        self.resolve_expr(e);
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
                     }
-                    sqlparser::ast::FunctionArg::Named { arg, .. }
-                    | sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => {
-                        if let sqlparser::ast::FunctionArgExpr::Expr(e) = arg {
-                            self.resolve_expr(e);
-                        }
-                    }
+                    | FunctionArg::ExprNamed {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => self.expr(e),
                     _ => {}
                 }
             }
         }
     }
 
-    /// Check if a table reference contains the given column
-    fn table_ref_has_column(&self, table_ref: &TableRef, column_name: &str) -> bool {
-        if let Some(derived_cols) = &table_ref.derived_columns {
-            derived_cols.is_empty()
-                || derived_cols
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(column_name))
-        } else if let Some(cte) = self.cte(&table_ref.table.name) {
-            cte.columns
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(column_name))
-        } else if let Some(view_cols) = &table_ref.view_columns {
-            view_cols.is_empty()
-                || view_cols
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(column_name))
-        } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
-            table_def.column_exists(column_name) || is_system_column(self.dialect, column_name)
-        } else {
-            false
-        }
-    }
-
     /// Resolve a column reference
-    fn resolve_column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
+    fn column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
         let column_name = &column_ident.value;
         let column_span = Span::from_sqlparser(&column_ident.span);
 
+        // Qualified column reference (table.column)
         if let Some(table_id) = table_ident {
-            let table_alias = &table_id.value;
-            // Qualified column reference (table.column)
-            if let Some(table_ref) = lookup_ignore_case(&self.tables, table_alias)
-                .or_else(|| lookup_ignore_case(&self.outer_tables, table_alias))
-            {
-                // Check derived table first
-                if let Some(derived_cols) = &table_ref.derived_columns {
-                    // Empty column list means we can't validate (e.g., table-valued functions)
-                    if !derived_cols.is_empty()
-                        && !derived_cols
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(column_name))
-                        && !derived_cols.iter().any(|c| c == "?column?")
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::ColumnNotFound,
-                                format!(
-                                    "Column '{}' not found in subquery '{}'",
-                                    column_name, table_alias
-                                ),
-                            )
-                            .with_span(column_span),
-                        );
-                    }
-                } else if let Some(cte) = self.cte(&table_ref.table.name) {
-                    // Validate against CTE columns (unless they couldn't be inferred)
-                    if !cte.columns.is_empty()
-                        && !cte
-                            .columns
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(column_name))
-                        && !cte.columns.iter().any(|c| c == "?column?")
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::ColumnNotFound,
-                                format!(
-                                    "Column '{}' not found in CTE '{}'",
-                                    column_name, table_ref.table
-                                ),
-                            )
-                            .with_span(column_span),
-                        );
-                    }
-                } else if let Some(view_cols) = &table_ref.view_columns {
-                    // Validate against VIEW columns (unless they couldn't be inferred)
-                    if !view_cols.is_empty()
-                        && !view_cols
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(column_name))
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::ColumnNotFound,
-                                format!(
-                                    "Column '{}' not found in view '{}'",
-                                    column_name, table_ref.table
-                                ),
-                            )
-                            .with_span(column_span),
-                        );
-                    }
-                } else if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
-                    if !table_def.column_exists(column_name)
-                        && !is_system_column(self.dialect, column_name)
-                    {
-                        let similar = find_similar_column(table_def, column_name);
-                        let mut diag = Diagnostic::error(
-                            DiagnosticKind::ColumnNotFound,
-                            format!(
-                                "Column '{}' not found in table '{}'",
-                                column_name, table_ref.table
-                            ),
-                        )
-                        .with_span(column_span);
-                        if let Some(suggestion) = similar {
-                            diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
-                        }
-                        self.diagnostics.push(diag);
-                    }
-                }
-            } else {
-                let table_span = Span::from_sqlparser(&table_id.span);
+            let Some(relation) = self.scope.relation(&table_id.value) else {
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticKind::TableNotFound,
-                        format!("Table or alias '{}' not found in FROM clause", table_alias),
+                        format!(
+                            "Table or alias '{}' not found in FROM clause",
+                            table_id.value
+                        ),
                     )
-                    .with_span(table_span),
+                    .with_span(Span::from_sqlparser(&table_id.span)),
                 );
-            }
-        } else {
-            // Unqualified column reference - search inner scope first, then outer
-            let mut found_in: Vec<&str> = Vec::new();
-
-            // Tables with unknown columns (missing tables, table functions without
-            // a column list) could provide any column: they only matter when no
-            // table with known columns does, and never make a column ambiguous
-            for (name, table_ref) in &self.tables {
-                if !self.has_unknown_columns(table_ref)
-                    && self.table_ref_has_column(table_ref, column_name)
-                {
-                    found_in.push(name);
-                }
-            }
-
-            // If not found in inner scope, check outer scope (correlated subqueries)
-            if found_in.is_empty() {
-                for (name, table_ref) in &self.outer_tables {
-                    if !self.has_unknown_columns(table_ref)
-                        && self.table_ref_has_column(table_ref, column_name)
-                    {
-                        found_in.push(name);
-                    }
-                }
-            }
-
-            if found_in.is_empty()
-                && self
-                    .tables
-                    .values()
-                    .chain(self.outer_tables.values())
-                    .any(|t| self.has_unknown_columns(t))
-            {
+                return;
+            };
+            if !matches!(relation.column(column_name, self.dialect), ColumnMatch::No) {
                 return;
             }
+            let kind = match relation.kind {
+                RelationKind::Table => "table",
+                RelationKind::View => "view",
+                RelationKind::Cte => "CTE",
+                _ => "subquery",
+            };
+            let mut diag = Diagnostic::error(
+                DiagnosticKind::ColumnNotFound,
+                format!(
+                    "Column '{}' not found in {} '{}'",
+                    column_name, kind, relation.name
+                ),
+            )
+            .with_span(column_span);
+            if let Some(suggestion) = find_similar_name(relation.column_names(), column_name) {
+                diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+            }
+            self.diagnostics.push(diag);
+            return;
+        }
 
-            match found_in.len() {
-                0 => {
-                    // Check if it's a SELECT alias (valid in ORDER BY)
-                    if self
-                        .select_aliases
+        // Unqualified column reference: the innermost query block that has it wins
+        match self.scope.column(column_name, self.dialect) {
+            ColumnLookup::Found(_) | ColumnLookup::Unknown => {}
+            ColumnLookup::Ambiguous(tables) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::AmbiguousColumn,
+                        format!(
+                            "Column '{}' is ambiguous (found in tables: {})",
+                            column_name,
+                            tables.join(", ")
+                        ),
+                    )
+                    .with_span(column_span)
+                    .with_help(format!(
+                        "Qualify the column with a table name: {}.{}",
+                        tables[0], column_name
+                    )),
+                );
+            }
+            ColumnLookup::NotFound => {
+                // An output column alias (valid in ORDER BY / GROUP BY)
+                let is_alias = self.scope.current_ref().is_some_and(|f| {
+                    f.select_aliases
                         .iter()
                         .any(|a| a.eq_ignore_ascii_case(column_name))
-                    {
-                        return;
-                    }
-
-                    // Whole-row reference to a table (`json_agg(u)`, `row_to_json(t)`)
-                    if lookup_ignore_case(&self.tables, column_name).is_some()
-                        || lookup_ignore_case(&self.outer_tables, column_name).is_some()
-                    {
-                        return;
-                    }
-
-                    // Keywords and variables the parser represents as identifiers:
-                    // DEFAULT, date/time units (`TIMESTAMPDIFF(DAY, ...)`), `@var`
-                    if column_ident.quote_style.is_none()
-                        && (column_name.eq_ignore_ascii_case("DEFAULT")
-                            || is_date_part_keyword(column_name)
-                            || column_name.starts_with('@'))
-                    {
-                        return;
-                    }
-
-                    // Column not found in any table
-                    let mut suggestions = Vec::new();
-                    for table_ref in self.tables.values() {
-                        if let Some(table_def) = self.catalog.get_table(&table_ref.table) {
-                            if let Some(s) = find_similar_column(table_def, column_name) {
-                                suggestions.push(s);
-                            }
-                        }
-                    }
-
-                    let mut diag = Diagnostic::error(
-                        DiagnosticKind::ColumnNotFound,
-                        format!("Column '{}' not found", column_name),
-                    )
-                    .with_span(column_span);
-                    if !suggestions.is_empty() {
-                        diag = diag.with_help(format!("Did you mean '{}'?", suggestions[0]));
-                    }
-                    self.diagnostics.push(diag);
+                });
+                // Whole-row reference to a table (`json_agg(u)`, `row_to_json(t)`)
+                let is_relation = self.scope.relation(column_name).is_some();
+                // Keywords and variables the parser represents as identifiers:
+                // DEFAULT, date/time units (`TIMESTAMPDIFF(DAY, ...)`), `@var`
+                let is_keyword = column_ident.quote_style.is_none()
+                    && (column_name.eq_ignore_ascii_case("DEFAULT")
+                        || is_date_part_keyword(column_name)
+                        || column_name.starts_with('@'));
+                if is_alias || is_relation || is_keyword {
+                    return;
                 }
-                1 => {
-                    // Found in exactly one table - OK
+
+                let candidates: Vec<String> = self
+                    .scope
+                    .current_ref()
+                    .map(|f| {
+                        f.relations
+                            .values()
+                            .flat_map(|r| r.column_names())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut diag = Diagnostic::error(
+                    DiagnosticKind::ColumnNotFound,
+                    format!("Column '{}' not found", column_name),
+                )
+                .with_span(column_span);
+                if let Some(suggestion) = find_similar_name(candidates, column_name) {
+                    diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
                 }
-                _ if self.using_columns.contains(&column_name.to_lowercase()) => {
-                    // Merged by JOIN ... USING / NATURAL JOIN - not ambiguous
-                }
-                _ => {
-                    // Ambiguous - found in multiple tables
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            DiagnosticKind::AmbiguousColumn,
-                            format!(
-                                "Column '{}' is ambiguous (found in tables: {})",
-                                column_name,
-                                found_in.join(", ")
-                            ),
-                        )
-                        .with_span(column_span)
-                        .with_help(format!(
-                            "Qualify the column with a table name: {}.{}",
-                            found_in[0], column_name
-                        )),
-                    );
-                }
+                self.diagnostics.push(diag);
             }
         }
-    }
-
-    /// Catalog name of a plain table reference in FROM
-    fn table_factor_name(&self, factor: &TableFactor) -> Option<QualifiedName> {
-        match factor {
-            TableFactor::Table { name, .. } => Some(self.catalog.qualified_name(name)),
-            _ => None,
-        }
-    }
-
-    /// Look up a CTE by name, following the catalog's identifier case rules
-    fn cte(&self, name: &str) -> Option<&CteDefinition> {
-        self.ctes.get(name).or_else(|| {
-            self.ctes
-                .iter()
-                .find(|(k, _)| self.catalog.names_match(k, name))
-                .map(|(_, v)| v)
-        })
     }
 
     /// Whether the database supplies a value for `col` when an INSERT omits it
@@ -1647,18 +1384,6 @@ impl<'a> NameResolver<'a> {
             })
     }
 
-    /// Whether a table reference has an unknown column list (a missing table, a table
-    /// function without column aliases, or a CTE/subquery whose columns can't be inferred),
-    /// so any column may belong to it
-    fn has_unknown_columns(&self, table_ref: &TableRef) -> bool {
-        match (&table_ref.derived_columns, &table_ref.view_columns) {
-            (Some(columns), _) | (None, Some(columns)) => columns.is_empty(),
-            (None, None) => self
-                .cte(&table_ref.table.name)
-                .is_some_and(|cte| cte.columns.is_empty()),
-        }
-    }
-
     /// Build a "table not found" diagnostic, suggesting a similarly named table, view or CTE
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
         let candidates = self
@@ -1666,7 +1391,7 @@ impl<'a> NameResolver<'a> {
             .table_or_view_names()
             .into_iter()
             .map(|n| n.name)
-            .chain(self.ctes.keys().cloned());
+            .chain(self.scope.cte_names());
         let help = match find_similar_name(candidates, &table_name.name) {
             Some(suggestion) => format!("Did you mean '{}'?", suggestion),
             None => "Check that the table exists in your schema definition".to_string(),
@@ -1681,13 +1406,18 @@ impl<'a> NameResolver<'a> {
         }
         diag
     }
+}
 
-    /// Consume the resolver and return collected diagnostics
-    ///
-    /// Returns all diagnostics collected during name resolution.
-    pub fn into_diagnostics(self) -> Vec<Diagnostic> {
-        self.diagnostics
-    }
+/// Whether an operator is a comparison (=, <>, <, <=, >, >=)
+pub(super) fn is_comparison_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
+    use sqlparser::ast::BinaryOperator::*;
+    matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
+}
+
+/// Whether an operator is AND / OR
+fn is_logical_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
+    use sqlparser::ast::BinaryOperator::*;
+    matches!(op, And | Or)
 }
 
 /// Scope key (alias or table name) a FROM relation is registered under
@@ -1713,19 +1443,6 @@ fn projection_aliases(projection: &[SelectItem]) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-/// Implicit system columns every table has
-fn is_system_column(dialect: SqlDialect, column: &str) -> bool {
-    let column = column.to_ascii_lowercase();
-    match dialect {
-        SqlDialect::PostgreSQL => matches!(
-            column.as_str(),
-            "ctid" | "xmin" | "xmax" | "cmin" | "cmax" | "tableoid"
-        ),
-        SqlDialect::SQLite => matches!(column.as_str(), "rowid" | "oid" | "_rowid_"),
-        SqlDialect::MySQL => false,
-    }
 }
 
 /// System catalog tables, whose columns sqlsift doesn't model
@@ -1782,6 +1499,7 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
         Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
         Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
         Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
+        Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }
 }
@@ -1816,15 +1534,6 @@ pub(super) fn find_similar_name(
     }
 
     best_match.map(|(_, name)| name)
-}
-
-/// Look up a table reference by alias or name, falling back to a case-insensitive match
-pub(super) fn lookup_ignore_case<'m, V>(map: &'m IndexMap<String, V>, key: &str) -> Option<&'m V> {
-    map.get(key).or_else(|| {
-        map.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(key))
-            .map(|(_, v)| v)
-    })
 }
 
 /// Simple Levenshtein distance implementation

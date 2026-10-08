@@ -1,14 +1,13 @@
 //! Schema builder - converts SQL AST to Catalog
 
 use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
-    Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Query, Select, SelectItem,
-    SetExpr, Statement, TableAlias, TableConstraint, TableFactor, TableWithJoins,
-    UserDefinedTypeRepresentation,
+    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Ident,
+    ObjectName, ObjectType, Query, Statement, TableConstraint, UserDefinedTypeRepresentation,
 };
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
+use crate::analyzer;
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{
@@ -16,21 +15,6 @@ use crate::schema::{
     PrimaryKeyDef, QualifiedName, TableDef, UniqueConstraintDef, ViewDef,
 };
 use crate::types::SqlType;
-
-/// Columns of the CTEs visible while inferring a query's output columns
-/// (`None` = the CTE's columns could not be determined)
-type CteColumns = Vec<(String, Option<Vec<String>>)>;
-
-/// A relation in a FROM clause, as seen by view column inference
-struct FromRelation {
-    /// Alias, or the (unqualified) table name
-    name: String,
-    /// Output columns, or `None` when they can't be determined
-    columns: Option<Vec<String>>,
-    /// Columns (lowercased) merged into an earlier relation by a USING or
-    /// NATURAL join, which an unqualified `*` lists only once
-    merged: Vec<String>,
-}
 
 /// Builder for constructing a Catalog from SQL schema definitions
 pub struct SchemaBuilder {
@@ -640,13 +624,13 @@ impl SchemaBuilder {
         // CREATE TABLE ... AS SELECT: infer column names from the query
         if let Some(query) = &create.query {
             if create.columns.is_empty() {
-                match self.infer_query_columns(query, &Vec::new()) {
-                    Some(names) => {
-                        for col_name in names {
+                match analyzer::query_output_columns(&self.catalog, self.dialect, query) {
+                    Some(columns) => {
+                        for (col_name, data_type) in columns {
                             table
                                 .columns
                                 .entry(col_name.clone())
-                                .or_insert_with(|| ColumnDef::new(col_name, SqlType::Unknown));
+                                .or_insert_with(|| ColumnDef::new(col_name, data_type));
                         }
                     }
                     None => self.diagnostics.push(Diagnostic::warning(
@@ -712,206 +696,30 @@ impl SchemaBuilder {
         query: &Query,
         materialized: bool,
     ) {
-        // Determine column names: explicit column list or inferred from SELECT.
-        // An empty list means the columns could not be determined.
-        let column_names = if !columns.is_empty() {
-            columns.iter().map(|c| c.name.value.clone()).collect()
+        // Column names: explicit column list or inferred from SELECT, with the types
+        // inferred from SELECT. An empty list means the columns could not be determined.
+        let inferred =
+            analyzer::query_output_columns(&self.catalog, self.dialect, query).unwrap_or_default();
+        let (column_names, column_types) = if !columns.is_empty() {
+            columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let data_type = inferred.get(i).map_or(SqlType::Unknown, |(_, t)| t.clone());
+                    (c.name.value.clone(), data_type)
+                })
+                .unzip()
         } else {
-            self.infer_query_columns(query, &Vec::new())
-                .unwrap_or_default()
+            inferred.into_iter().unzip()
         };
 
         let view = ViewDef {
             name: qualified,
             columns: column_names,
+            column_types,
             materialized,
         };
         self.catalog.add_view(view);
-    }
-
-    /// Infer the output column names of a query (for views and CREATE TABLE AS).
-    ///
-    /// Returns `None` when the columns can't be determined (e.g. `SELECT *` over a
-    /// table function or an unknown table).
-    fn infer_query_columns(&self, query: &Query, ctes: &CteColumns) -> Option<Vec<String>> {
-        let mut scope = ctes.clone();
-        if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                let columns = if cte.alias.columns.is_empty() {
-                    self.infer_query_columns(&cte.query, &scope)
-                } else {
-                    Some(
-                        cte.alias
-                            .columns
-                            .iter()
-                            .map(|c| c.name.value.clone())
-                            .collect(),
-                    )
-                };
-                scope.push((cte.alias.name.value.clone(), columns));
-            }
-        }
-        self.infer_set_expr_columns(&query.body, &scope)
-    }
-
-    fn infer_set_expr_columns(&self, body: &SetExpr, ctes: &CteColumns) -> Option<Vec<String>> {
-        match body {
-            SetExpr::Select(select) => self.infer_select_columns(select, ctes),
-            SetExpr::Query(query) => self.infer_query_columns(query, ctes),
-            // UNION / INTERSECT / EXCEPT take their column names from the left branch
-            SetExpr::SetOperation { left, .. } => self.infer_set_expr_columns(left, ctes),
-            SetExpr::Values(values) => {
-                let width = values.rows.first()?.len();
-                Some((1..=width).map(|i| format!("column{i}")).collect())
-            }
-            _ => None,
-        }
-    }
-
-    fn infer_select_columns(&self, select: &Select, ctes: &CteColumns) -> Option<Vec<String>> {
-        let mut relations = Vec::new();
-        for from in &select.from {
-            self.collect_from_relations(from, ctes, &mut relations);
-        }
-
-        let mut columns: Vec<String> = Vec::new();
-        for item in &select.projection {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    columns.push(implicit_column_name(expr).unwrap_or_else(|| "?column?".into()));
-                }
-                SelectItem::ExprWithAlias { alias, .. } => columns.push(alias.value.clone()),
-                SelectItem::Wildcard(_) => {
-                    if relations.is_empty() {
-                        return None;
-                    }
-                    for relation in &relations {
-                        let relation_columns = relation.columns.as_ref()?;
-                        columns.extend(
-                            relation_columns
-                                .iter()
-                                .filter(|c| !relation.merged.contains(&c.to_lowercase()))
-                                .cloned(),
-                        );
-                    }
-                }
-                SelectItem::QualifiedWildcard(name, _) => {
-                    let qualifier = name.0.last()?;
-                    let relation = relations
-                        .iter()
-                        .rev()
-                        .find(|r| r.name.eq_ignore_ascii_case(&qualifier.value))?;
-                    columns.extend(relation.columns.clone()?);
-                }
-            }
-        }
-
-        Some(columns)
-    }
-
-    fn collect_from_relations(
-        &self,
-        from: &TableWithJoins,
-        ctes: &CteColumns,
-        relations: &mut Vec<FromRelation>,
-    ) {
-        let start = relations.len();
-        self.collect_factor_relations(&from.relation, ctes, relations);
-        for join in &from.joins {
-            let right = relations.len();
-            self.collect_factor_relations(&join.relation, ctes, relations);
-            let merged: Vec<String> = match join_constraint(&join.join_operator) {
-                Some(JoinConstraint::Using(columns)) => {
-                    columns.iter().map(|c| c.value.to_lowercase()).collect()
-                }
-                Some(JoinConstraint::Natural) => relations[start..right]
-                    .iter()
-                    .filter_map(|r| r.columns.as_ref())
-                    .flatten()
-                    .map(|c| c.to_lowercase())
-                    .collect(),
-                _ => continue,
-            };
-            for relation in &mut relations[right..] {
-                relation.merged.extend(merged.iter().cloned());
-            }
-        }
-    }
-
-    fn collect_factor_relations(
-        &self,
-        factor: &TableFactor,
-        ctes: &CteColumns,
-        relations: &mut Vec<FromRelation>,
-    ) {
-        match factor {
-            TableFactor::Table {
-                name, alias, args, ..
-            } => {
-                let columns = if args.is_some() {
-                    None // table-valued function
-                } else {
-                    self.relation_columns(name, ctes)
-                };
-                let default_name = name.0.last().map(|i| i.value.clone()).unwrap_or_default();
-                relations.push(aliased_relation(default_name, columns, alias.as_ref()));
-            }
-            TableFactor::Derived {
-                subquery, alias, ..
-            } => {
-                let columns = self.infer_query_columns(subquery, ctes);
-                relations.push(aliased_relation(String::new(), columns, alias.as_ref()));
-            }
-            TableFactor::NestedJoin {
-                table_with_joins,
-                alias: None,
-            } => self.collect_from_relations(table_with_joins, ctes, relations),
-            TableFactor::NestedJoin {
-                table_with_joins,
-                alias: Some(alias),
-            } => {
-                let mut inner = Vec::new();
-                self.collect_from_relations(table_with_joins, ctes, &mut inner);
-                let columns = inner
-                    .into_iter()
-                    .map(|r| r.columns)
-                    .collect::<Option<Vec<_>>>()
-                    .map(|cols| cols.concat());
-                relations.push(aliased_relation(String::new(), columns, Some(alias)));
-            }
-            other => {
-                // Table functions, UNNEST, ... : columns unknown
-                let alias = match other {
-                    TableFactor::TableFunction { alias, .. }
-                    | TableFactor::Function { alias, .. }
-                    | TableFactor::UNNEST { alias, .. } => alias.as_ref(),
-                    _ => None,
-                };
-                relations.push(aliased_relation(String::new(), None, alias));
-            }
-        }
-    }
-
-    /// Columns of a table, view or CTE referenced by name in FROM
-    fn relation_columns(&self, name: &ObjectName, ctes: &CteColumns) -> Option<Vec<String>> {
-        if let [ident] = name.0.as_slice() {
-            if let Some((_, columns)) = ctes
-                .iter()
-                .rev()
-                .find(|(cte, _)| cte.eq_ignore_ascii_case(&ident.value))
-            {
-                return columns.clone();
-            }
-        }
-        let qualified = self.catalog.qualified_name(name);
-        if let Some(table) = self.catalog.get_table(&qualified) {
-            return Some(table.columns.keys().cloned().collect());
-        }
-        // An empty view column list means "unknown"
-        self.catalog
-            .get_view(&qualified)
-            .map(|v| v.columns.clone())
-            .filter(|c| !c.is_empty())
     }
 
     /// Process ALTER TABLE statement
@@ -1361,72 +1169,6 @@ fn like_pseudo_column(column: &sqlparser::ast::ColumnDef) -> Option<&ObjectName>
     }
     match &column.data_type {
         DataType::Custom(name, modifiers) if modifiers.is_empty() => Some(name),
-        _ => None,
-    }
-}
-
-/// Build a FROM relation, applying a table alias (and its column aliases, which
-/// rename the leading columns)
-fn aliased_relation(
-    default_name: String,
-    columns: Option<Vec<String>>,
-    alias: Option<&TableAlias>,
-) -> FromRelation {
-    let Some(alias) = alias else {
-        return FromRelation {
-            name: default_name,
-            columns,
-            merged: Vec::new(),
-        };
-    };
-    let renamed: Vec<String> = alias.columns.iter().map(|c| c.name.value.clone()).collect();
-    let columns = match columns {
-        Some(mut cols) => {
-            for (col, new_name) in cols.iter_mut().zip(&renamed) {
-                *col = new_name.clone();
-            }
-            if renamed.len() > cols.len() {
-                cols.extend(renamed[cols.len()..].iter().cloned());
-            }
-            Some(cols)
-        }
-        None if !renamed.is_empty() => Some(renamed),
-        None => None,
-    };
-    FromRelation {
-        name: alias.name.value.clone(),
-        columns,
-        merged: Vec::new(),
-    }
-}
-
-/// The join constraint (ON / USING / NATURAL) of a join, if it has one
-fn join_constraint(op: &JoinOperator) -> Option<&JoinConstraint> {
-    match op {
-        JoinOperator::Inner(c)
-        | JoinOperator::LeftOuter(c)
-        | JoinOperator::RightOuter(c)
-        | JoinOperator::FullOuter(c)
-        | JoinOperator::Semi(c)
-        | JoinOperator::LeftSemi(c)
-        | JoinOperator::RightSemi(c)
-        | JoinOperator::Anti(c)
-        | JoinOperator::LeftAnti(c)
-        | JoinOperator::RightAnti(c) => Some(c),
-        JoinOperator::AsOf { constraint, .. } => Some(constraint),
-        _ => None,
-    }
-}
-
-/// Name PostgreSQL gives an unaliased SELECT expression (`count(*)` -> `count`,
-/// `t.col` -> `col`, `col::int` -> `col`), or `None` for `?column?`
-fn implicit_column_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Identifier(ident) => Some(ident.value.clone()),
-        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
-        Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
-        Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
-        Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }
 }

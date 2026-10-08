@@ -51,18 +51,20 @@ sqlsift/
 1. **SchemaBuilder** (`schema/builder.rs`): Parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) using sqlparser-rs and builds a `Catalog`. Supports resilient parsing to skip unsupported syntax.
 2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints, views, enums)
 3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation
-4. **NameResolver** (`analyzer/resolver.rs`): Resolves table, view, and column references, supports CTEs with scope isolation
-5. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
-6. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
-7. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
-8. **ServerState** (`sqlsift-lsp/state.rs`): LSP server state management (catalog, config, open documents)
+4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types
+5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
+6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
+7. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
+8. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
+9. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
+10. **ServerState** (`sqlsift-lsp/state.rs`): LSP server state management (catalog, config, open documents)
 
 ### Data Flow
 
 ```
 Schema SQL → sqlparser → AST → SchemaBuilder → Catalog
                                                   ↓
-Query SQL  → sqlparser → AST → Analyzer → NameResolver → TypeResolver → Diagnostics
+Query SQL  → sqlparser → AST → Analyzer → Resolver (names + types, one walk) → Diagnostics
 ```
 
 ## Setup
@@ -103,7 +105,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 ### Adding a New Diagnostic Rule
 
 1. Add variant to `DiagnosticKind` in `error.rs`
-2. Implement detection logic in `analyzer/resolver.rs` or create a new rule module
+2. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
 3. Add test case in `analyzer/mod.rs`
 
 ### Adding SQL Type Support
@@ -176,18 +178,15 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Dialect-aware coercions (MySQL/SQLite booleans are integers)
 - CASE expression branch consistency and result type (`check_case_branches`, `infer_case_type`)
 - Enum literal values for named enums and MySQL inline `ENUM(...)` (`SqlType::Enum`, `report_enum_literal`)
-
-**Not Yet Implemented (TODO):**
-- Subquery/CTE column type inference
-- VIEW column type inference from SELECT projection
+- Column types of CTEs, derived tables, scalar/IN subqueries, RETURNING lists, views and `CREATE TABLE ... AS` (every query block reports typed output columns; views and CTAS use `analyzer::query_output_columns`)
+- UNION/INTERSECT/EXCEPT column count and type compatibility (also after `*` expansion)
 
 **Implementation Notes:**
-- Current type inference covers ~85% of real-world type errors
-- See `crates/sqlsift-core/src/analyzer/type_resolver.rs` for implementation
+- Anything that can't be inferred is `ExpressionType::Unknown` and never reported
+- See `crates/sqlsift-core/src/analyzer/type_check.rs` for implementation
 
 ### Other Limitations
 - Functions and stored procedures are skipped (not analyzed)
-- UNION/INTERSECT/EXCEPT column count validation not implemented
 
 ## Supported Features
 

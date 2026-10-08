@@ -1419,20 +1419,42 @@ fn test_union_type_compatible_validation() {
 }
 
 #[test]
-fn test_union_with_wildcard_no_set_op_type_diagnostic() {
+fn test_union_with_wildcard_is_checked_after_expansion() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
 
+    // users (id, name VARCHAR, email TEXT) vs orders (id, user_id INTEGER, total NUMERIC)
     let diagnostics = analyzer.analyze(
         "SELECT * FROM users
             UNION
             SELECT * FROM orders",
     );
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "Set operation type mismatch at column 2: varchar(100) vs integer",
+            "Set operation type mismatch at column 3: text vs numeric(10,2)",
+        ]
+    );
+}
+
+#[test]
+fn test_union_with_unexpandable_wildcard_no_set_op_diagnostic() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // The columns of a table function are unknown, so `*` can't be expanded
+    let diagnostics = analyzer.analyze(
+        "SELECT * FROM generate_series(1, 3)
+            UNION
+            SELECT id FROM users",
+    );
     assert!(
         diagnostics
             .iter()
             .all(|d| !d.message.contains("Set operation")),
-        "Wildcard UNION should not emit set-operation projection diagnostics: {:?}",
+        "Unexpandable wildcard UNION should not emit set-operation diagnostics: {:?}",
         diagnostics
     );
 }

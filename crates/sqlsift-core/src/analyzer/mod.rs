@@ -2,7 +2,8 @@
 
 mod comment_directives;
 mod resolver;
-mod type_resolver;
+mod scope;
+mod type_check;
 
 use std::ops::Range;
 
@@ -16,8 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::Catalog;
 
 use comment_directives::InlineDirectives;
-pub use resolver::NameResolver;
-use type_resolver::TypeResolver;
+use resolver::Resolver;
 
 /// SQL Analyzer - validates SQL against a schema catalog
 pub struct Analyzer<'a> {
@@ -96,21 +96,12 @@ impl<'a> Analyzer<'a> {
 
         // Analyze each statement
         for (stmt, origin) in &statements {
-            // Phase 1: Name resolution
-            let mut resolver = NameResolver::new(self.catalog).with_dialect(self.dialect);
-            resolver.resolve_statement(stmt);
+            // Name resolution and type checking in one walk over the statement
+            let mut resolver = Resolver::new(self.catalog, self.dialect);
+            resolver.statement(stmt);
 
-            // Phase 2: Type inference and checking
-            let mut type_resolver = TypeResolver::new(self.catalog).with_dialect(self.dialect);
-            type_resolver.inherit_scope(&resolver);
-            type_resolver.check_statement(stmt);
-
-            // Collect diagnostics from both phases, with locations relative to the input
-            for mut diagnostic in resolver
-                .into_diagnostics()
-                .into_iter()
-                .chain(type_resolver.into_diagnostics())
-            {
+            // Locations relative to the input
+            for mut diagnostic in resolver.into_diagnostics() {
                 if let Some(span) = diagnostic.span.as_mut() {
                     origin.shift(span);
                 }
@@ -295,4 +286,21 @@ fn parse_error_diagnostic(
         format!("Parse error: {}", message),
     )
     .with_span(span)
+}
+/// Output columns (name and type) of a query, as far as they can be inferred, or
+/// `None` if they can't be determined (e.g. `SELECT *` over an unknown table).
+/// Used to infer the columns of views and `CREATE TABLE ... AS`.
+pub(crate) fn query_output_columns(
+    catalog: &Catalog,
+    dialect: SqlDialect,
+    query: &sqlparser::ast::Query,
+) -> Option<Vec<(String, crate::types::SqlType)>> {
+    let mut resolver = Resolver::new(catalog, dialect);
+    let columns = resolver.query(query, false)?;
+    Some(
+        columns
+            .into_iter()
+            .map(|c| (c.name, c.ty.to_sql_type()))
+            .collect(),
+    )
 }

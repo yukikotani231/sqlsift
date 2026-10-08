@@ -298,9 +298,7 @@ SELECT bad_col FROM missing_table;
 - ✅ Date/time arithmetic (`now() - interval '7 days'`, `placed_on + 7`, `ts1 - ts2`)
 - ✅ CASE expression branch consistency (`THEN total ELSE 'cheap'`) and result type
 - ✅ Enum values for PostgreSQL enum types and MySQL inline `ENUM(...)` (`status = 'opne'` → "Did you mean 'open'?")
-
-**Not Yet Detected:**
-- ⏳ Subquery/CTE column type inference
+- ✅ Column types through CTEs, subqueries, views and `CREATE TABLE ... AS` (`WITH t AS (SELECT id FROM users) SELECT * FROM t WHERE id = 'abc'`)
 
 </details>
 
@@ -374,9 +372,9 @@ Options:
 - [x] Type inference for expressions (WHERE, JOIN, arithmetic, INSERT/UPDATE)
 - [x] LSP server for editor integration (VS Code extension)
 - [x] CASE expression type consistency checking
+- [x] Subquery/CTE/VIEW column type inference
 
 #### Planned
-- [ ] Subquery/CTE column type inference
 - [ ] Custom rule plugins
 
 ## Contributing
