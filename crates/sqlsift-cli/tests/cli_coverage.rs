@@ -1087,7 +1087,7 @@ fn cli_format_overrides_config_format() {
 }
 
 #[test]
-fn cli_disable_replaces_config_disable() {
+fn cli_rule_flags_are_applied_after_config() {
     let t = with_users_schema("cfg-disable-override");
     t.write(
         "sqlsift.toml",
@@ -1099,11 +1099,15 @@ fn cli_disable_replaces_config_disable() {
     run.assert_code(1);
     assert_eq!(run.count_code("E0002"), 0);
     assert!(run.count_code("E0001") >= 1);
-    // CLI --disable replaces (not unions) the config list.
+    // CLI --disable adds to the config's settings
     let run = t.run(&["check", "--disable", "E0001", "q.sql"]);
+    run.assert_code(0);
+    assert_eq!(run.count_code("E0001"), 0);
+    assert_eq!(run.count_code("E0002"), 0);
+    // ... and --deny turns a rule the config disables back on
+    let run = t.run(&["check", "--deny", "E0002", "q.sql"]);
     run.assert_code(1)
         .assert_stderr_contains("Column 'nme' not found");
-    assert_eq!(run.count_code("E0001"), 0);
 }
 
 #[test]
@@ -1170,12 +1174,119 @@ fn disable_one_of_two_codes_keeps_the_other() {
 }
 
 #[test]
-fn disable_unknown_code_has_no_effect() {
+fn disable_unknown_code_is_an_error() {
     let t = with_users_schema("disable-unknown");
     t.write("q.sql", "SELECT nme FROM users;\n");
     t.run(&["check", "-s", "schema.sql", "--disable", "E9999", "q.sql"])
-        .assert_code(1)
-        .assert_stderr_contains("error[E0002]");
+        .assert_code(2)
+        .assert_stderr_contains("unknown rule or category 'E9999'");
+}
+
+#[test]
+fn rule_names_work_like_codes() {
+    let t = with_users_schema("disable-name");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--disable",
+        "column-not-found",
+        "q.sql",
+    ])
+    .assert_code(0);
+}
+
+#[test]
+fn warn_flag_reports_without_failing() {
+    let t = with_users_schema("warn-flag");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "-W", "E0002", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("warning[E0002]")
+        .assert_stderr_contains("0 error(s), 1 warning(s)");
+}
+
+#[test]
+fn category_flag_sets_all_rules_of_the_category() {
+    let t = with_users_schema("warn-category");
+    t.write("q.sql", "SELECT nme FROM users;\nSELECT id FROM nope;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-W", "correctness", "q.sql"]);
+    run.assert_code(0)
+        .assert_stderr_contains("0 error(s), 2 warning(s)");
+    // A rule's own level wins over its category's
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "correctness",
+        "-D",
+        "table-not-found",
+        "q.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("1 error(s), 1 warning(s)");
+}
+
+#[test]
+fn config_rules_and_categories_tables_set_levels() {
+    let t = with_users_schema("cfg-rules");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\n\n[categories]\ncorrectness = \"warn\"\n\n[rules]\nE0001 = \"error\"\nambiguous-column = \"off\"\n",
+    );
+    t.write("q.sql", "SELECT nme FROM users;\nSELECT id FROM nope;\n");
+    let run = t.run(&["check", "--format", "json", "q.sql"]);
+    run.assert_code(1);
+    let json: Value = serde_json::from_str(&run.stdout).expect("json");
+    let severities: Vec<(String, String)> = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .map(|d| {
+            (
+                d["kind"].as_str().unwrap().to_string(),
+                d["severity"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        severities,
+        [
+            ("ColumnNotFound".to_string(), "warning".to_string()),
+            ("TableNotFound".to_string(), "error".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn invalid_rule_level_in_config_is_an_error() {
+    let t = with_users_schema("cfg-bad-level");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\n\n[rules]\nE0002 = \"loud\"\n",
+    );
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.run(&["check", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("invalid rule level 'loud'");
+}
+
+#[test]
+fn rules_subcommand_lists_the_registry() {
+    let t = TempDir::new("rules-list");
+    let run = t.run(&["rules"]);
+    run.assert_code(0);
+    for text in [
+        "E0001",
+        "table-not-found",
+        "correctness",
+        "E1000",
+        "parse-error",
+    ] {
+        run.assert_stdout_contains(text);
+    }
 }
 
 #[test]

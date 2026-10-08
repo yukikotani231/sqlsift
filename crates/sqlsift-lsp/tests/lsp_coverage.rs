@@ -532,6 +532,34 @@ fn config_disable_filters_diagnostics() {
 }
 
 #[test]
+fn config_rule_levels_set_severity() {
+    let t = workspace(
+        "cfg-rules",
+        "[rules]\ncolumn-not-found = \"warn\"\nE0003 = \"off\"\n",
+    );
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(
+        &uri,
+        "SELECT nme FROM users;\nSELECT id FROM users WHERE id = 'x';",
+    );
+    let diagnostics = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diagnostics), vec!["E0002"]);
+    // LSP DiagnosticSeverity::WARNING
+    assert_eq!(diagnostics[0]["severity"], 2, "{diagnostics:?}");
+}
+
+#[test]
+fn unknown_rule_in_config_is_reported() {
+    let t = workspace("bad-rule", "[rules]\nno-such-rule = \"off\"\n");
+    let mut lsp = Lsp::spawn();
+    lsp.initialize(Some(&t.root_uri()));
+    let msg = wait_for_warning(&mut lsp, "no-such-rule");
+    assert!(msg.contains("unknown rule or category"), "{msg}");
+}
+
+#[test]
 fn config_schema_dir_is_loaded_in_order() {
     let t = TempDir::new("cfg-schema-dir");
     t.write("migrations/001_create.sql", USERS_SCHEMA);

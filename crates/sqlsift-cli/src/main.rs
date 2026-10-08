@@ -11,10 +11,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::Result;
 use sqlsift_core::schema::SchemaBuilder;
-use sqlsift_core::{Analyzer, Diagnostic, SqlDialect};
+use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
-use crate::config::Config;
+use crate::config::{Config, RuleFlags};
 use crate::output::{FileDiagnostics, OutputFormatter};
 
 fn main() -> ExitCode {
@@ -64,11 +64,14 @@ fn analyze_files(
     files: &[PathBuf],
     catalog: &sqlsift_core::schema::Catalog,
     dialect: SqlDialect,
+    rules: &RuleConfig,
 ) -> Vec<AnalyzedFile> {
     let analyze_one = |path: &PathBuf| -> AnalyzedFile {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
         let content = read_file(path)?;
-        let diagnostics = Analyzer::with_dialect(catalog, dialect).analyze(&content);
+        let diagnostics = Analyzer::with_dialect(catalog, dialect)
+            .with_rules(rules.clone())
+            .analyze(&content);
         Ok((content, diagnostics))
     };
 
@@ -109,6 +112,26 @@ fn analyze_files(
         .collect()
 }
 
+/// Print the rule registry as a table
+fn print_rules() {
+    use sqlsift_core::rules::RULES;
+    let name_width = RULES.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    println!(
+        "{:<6} {:<name_width$} {:<12} {:<8} DESCRIPTION",
+        "CODE", "NAME", "CATEGORY", "DEFAULT"
+    );
+    for rule in RULES {
+        println!(
+            "{:<6} {:<name_width$} {:<12} {:<8} {}",
+            rule.code,
+            rule.name,
+            rule.category.name(),
+            rule.default_level().name(),
+            rule.summary
+        );
+    }
+}
+
 /// Read a file, naming the path in the error message
 fn read_file(path: &Path) -> Result<String> {
     fs::read_to_string(path)
@@ -136,7 +159,9 @@ fn run(args: Args) -> Result<bool> {
             schema,
             schema_dir,
             config: config_path,
-            disable,
+            allow,
+            warn,
+            deny,
             dialect,
             format,
             max_errors,
@@ -151,13 +176,18 @@ fn run(args: Args) -> Result<bool> {
             };
 
             // Merge CLI args with config (CLI takes precedence)
-            let config =
-                config.merge_with_args(&schema, &schema_dir, &files, &format, &disable, &dialect);
+            let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &dialect);
             tracing::info!(
                 schema_count = config.schema.len(),
                 query_pattern_count = config.files.len(),
                 "Loaded sqlsift configuration"
             );
+
+            let rules = config.rule_config(&RuleFlags {
+                allow: &allow,
+                warn: &warn,
+                deny: &deny,
+            })?;
 
             // Parse and validate dialect
             let dialect: SqlDialect = match &config.dialect {
@@ -250,7 +280,7 @@ fn run(args: Args) -> Result<bool> {
 
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
-            let analyzed = analyze_files(&query_files, &catalog, dialect);
+            let analyzed = analyze_files(&query_files, &catalog, dialect, &rules);
 
             let mut total_errors = 0;
             let mut total_warnings = 0;
@@ -263,10 +293,6 @@ fn run(args: Args) -> Result<bool> {
             };
             let mut limit_reached = false;
 
-            // Get disabled rules
-            let disabled_rules: std::collections::HashSet<String> =
-                config.disable.iter().cloned().collect();
-
             for (query_file, analyzed) in query_files.iter().zip(analyzed) {
                 if total_errors >= max_errors {
                     limit_reached = true;
@@ -276,14 +302,8 @@ fn run(args: Args) -> Result<bool> {
                 let (content, diagnostics) = analyzed?;
                 files_checked += 1;
 
-                // Filter out disabled rules
-                let filtered_diagnostics: Vec<_> = diagnostics
-                    .into_iter()
-                    .filter(|d| !disabled_rules.contains(d.code()))
-                    .collect();
-
                 let mut diagnostics_to_print = Vec::new();
-                for diag in filtered_diagnostics {
+                for diag in diagnostics {
                     if matches!(diag.severity, sqlsift_core::Severity::Error)
                         && total_errors >= max_errors
                     {
@@ -337,6 +357,11 @@ fn run(args: Args) -> Result<bool> {
             }
 
             Ok(total_errors > 0)
+        }
+
+        Command::Rules => {
+            print_rules();
+            Ok(false)
         }
 
         Command::Schema { files } => {

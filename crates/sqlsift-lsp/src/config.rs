@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sqlsift_core::rules::{RuleConfig, RuleLevel};
 
 /// Configuration for sqlsift (loaded from sqlsift.toml)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -20,10 +22,47 @@ pub struct Config {
     #[serde(default)]
     pub disable: Vec<String>,
 
+    /// Rule levels by rule code or name (e.g. `E0006 = "warn"`)
+    #[serde(default)]
+    pub rules: BTreeMap<String, String>,
+
+    /// Levels of whole rule categories (e.g. `suspicious = "error"`)
+    #[serde(default)]
+    pub categories: BTreeMap<String, String>,
+
     pub schema_dir: Option<String>,
 }
 
 impl Config {
+    /// Rule levels from `[categories]`, `[rules]` and `disable`, with a message for
+    /// each setting that names no rule or category or has an invalid level
+    pub fn rule_config(&self) -> (RuleConfig, Vec<String>) {
+        let mut rules = RuleConfig::default();
+        let mut problems = Vec::new();
+        let settings = self
+            .categories
+            .iter()
+            .map(|(id, level)| ("categories", id, level.parse::<RuleLevel>()))
+            .chain(
+                self.rules
+                    .iter()
+                    .map(|(id, level)| ("rules", id, level.parse::<RuleLevel>())),
+            )
+            .chain(
+                self.disable
+                    .iter()
+                    .map(|id| ("disable", id, Ok(RuleLevel::Off))),
+            );
+        for (origin, id, level) in settings {
+            let result =
+                level.and_then(|level| rules.configure(id, level).map_err(|e| e.to_string()));
+            if let Err(e) = result {
+                problems.push(format!("{origin}: {e}"));
+            }
+        }
+        (rules, problems)
+    }
+
     /// Find sqlsift.toml in the given root directory or its parents.
     ///
     /// Returns the path of the config file that was found together with the

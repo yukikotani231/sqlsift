@@ -3,9 +3,12 @@
 //! Supports:
 //! - `-- sqlsift:disable E0002` (same line: suppress on this line; standalone: suppress on next line)
 //! - `-- sqlsift:disable E0002, E0003` (multiple rules)
+//! - `-- sqlsift:disable column-not-found` (rule names work too)
 //! - `-- sqlsift:disable` (suppress all rules)
 
 use std::collections::{HashMap, HashSet};
+
+use crate::error::DiagnosticKind;
 
 /// Parsed inline disable directives from SQL comments
 pub struct InlineDirectives {
@@ -49,11 +52,16 @@ impl InlineDirectives {
         Self { disabled_lines }
     }
 
-    /// Check if a diagnostic with the given code on the given line should be suppressed
-    pub fn is_suppressed(&self, code: &str, line: usize) -> bool {
+    /// Check if a diagnostic of the given kind on the given line should be suppressed
+    pub fn is_suppressed(&self, kind: DiagnosticKind, line: usize) -> bool {
+        self.suppresses(kind.code(), line) || self.suppresses(kind.name(), line)
+    }
+
+    /// Whether the rule code or name `id` is disabled on the given line
+    fn suppresses(&self, id: &str, line: usize) -> bool {
         match self.disabled_lines.get(&line) {
             Some(None) => true, // All rules disabled
-            Some(Some(codes)) => codes.contains(code),
+            Some(Some(ids)) => ids.contains(&id.to_uppercase()),
             None => false,
         }
     }
@@ -181,72 +189,72 @@ mod tests {
     fn test_inline_same_line() {
         let directives =
             InlineDirectives::parse("SELECT bad_col FROM users -- sqlsift:disable E0002");
-        assert!(directives.is_suppressed("E0002", 1));
-        assert!(!directives.is_suppressed("E0001", 1));
+        assert!(directives.suppresses("E0002", 1));
+        assert!(!directives.suppresses("E0001", 1));
     }
 
     #[test]
     fn test_standalone_next_line() {
         let sql = "-- sqlsift:disable E0002\nSELECT bad_col FROM users";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0002", 2));
-        assert!(!directives.is_suppressed("E0002", 1));
+        assert!(directives.suppresses("E0002", 2));
+        assert!(!directives.suppresses("E0002", 1));
     }
 
     #[test]
     fn test_multiple_codes() {
         let sql = "SELECT * FROM t -- sqlsift:disable E0001, E0002";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0001", 1));
-        assert!(directives.is_suppressed("E0002", 1));
-        assert!(!directives.is_suppressed("E0003", 1));
+        assert!(directives.suppresses("E0001", 1));
+        assert!(directives.suppresses("E0002", 1));
+        assert!(!directives.suppresses("E0003", 1));
     }
 
     #[test]
     fn test_disable_all() {
         let sql = "SELECT * FROM t -- sqlsift:disable";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0001", 1));
-        assert!(directives.is_suppressed("E0002", 1));
-        assert!(directives.is_suppressed("E9999", 1));
+        assert!(directives.suppresses("E0001", 1));
+        assert!(directives.suppresses("E0002", 1));
+        assert!(directives.suppresses("E9999", 1));
     }
 
     #[test]
     fn test_standalone_disable_all_next_line() {
         let sql = "-- sqlsift:disable\nSELECT * FROM t";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0001", 2));
-        assert!(!directives.is_suppressed("E0001", 1));
+        assert!(directives.suppresses("E0001", 2));
+        assert!(!directives.suppresses("E0001", 1));
     }
 
     #[test]
     fn test_multiple_standalone_directives_accumulate() {
         let sql = "-- sqlsift:disable E0001\n-- sqlsift:disable E0002\nSELECT * FROM t";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0001", 3));
-        assert!(directives.is_suppressed("E0002", 3));
-        assert!(!directives.is_suppressed("E0003", 3));
+        assert!(directives.suppresses("E0001", 3));
+        assert!(directives.suppresses("E0002", 3));
+        assert!(!directives.suppresses("E0003", 3));
     }
 
     #[test]
     fn test_no_directive() {
         let sql = "SELECT * FROM users";
         let directives = InlineDirectives::parse(sql);
-        assert!(!directives.is_suppressed("E0001", 1));
+        assert!(!directives.suppresses("E0001", 1));
     }
 
     #[test]
     fn test_directive_inside_string_ignored() {
         let sql = "SELECT '-- sqlsift:disable E0002' FROM users";
         let directives = InlineDirectives::parse(sql);
-        assert!(!directives.is_suppressed("E0002", 1));
+        assert!(!directives.suppresses("E0002", 1));
     }
 
     #[test]
     fn test_case_insensitive_codes() {
         let sql = "SELECT * FROM t -- sqlsift:disable e0002";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0002", 1));
+        assert!(directives.suppresses("E0002", 1));
     }
 
     #[test]
@@ -254,28 +262,38 @@ mod tests {
         let sql = "-- sqlsift:disable E0001\n\nSELECT * FROM t";
         let directives = InlineDirectives::parse(sql);
         // Empty line doesn't consume the pending directive
-        assert!(directives.is_suppressed("E0001", 3));
+        assert!(directives.suppresses("E0001", 3));
     }
 
     #[test]
     fn test_comma_separated_no_spaces() {
         let sql = "SELECT * FROM t -- sqlsift:disable E0001,E0002";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0001", 1));
-        assert!(directives.is_suppressed("E0002", 1));
+        assert!(directives.suppresses("E0001", 1));
+        assert!(directives.suppresses("E0002", 1));
     }
 
     #[test]
     fn test_not_a_directive() {
         let sql = "SELECT * FROM t -- sqlsift:disabled E0002";
         let directives = InlineDirectives::parse(sql);
-        assert!(!directives.is_suppressed("E0002", 1));
+        assert!(!directives.suppresses("E0002", 1));
     }
 
     #[test]
     fn test_double_quoted_identifier_with_dashes() {
         let sql = "SELECT \"col--name\" FROM t -- sqlsift:disable E0002";
         let directives = InlineDirectives::parse(sql);
-        assert!(directives.is_suppressed("E0002", 1));
+        assert!(directives.suppresses("E0002", 1));
+    }
+
+    #[test]
+    fn test_rule_names_suppress_like_codes() {
+        let directives =
+            InlineDirectives::parse("SELECT nme FROM users; -- sqlsift:disable column-not-found");
+        assert!(directives.is_suppressed(DiagnosticKind::ColumnNotFound, 1));
+        assert!(!directives.is_suppressed(DiagnosticKind::TableNotFound, 1));
+        let directives = InlineDirectives::parse("SELECT nme FROM users; -- sqlsift:disable E0002");
+        assert!(directives.is_suppressed(DiagnosticKind::ColumnNotFound, 1));
     }
 }

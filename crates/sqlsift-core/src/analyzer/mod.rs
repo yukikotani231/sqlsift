@@ -14,6 +14,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::rules::RuleConfig;
 use crate::schema::Catalog;
 
 use comment_directives::InlineDirectives;
@@ -24,6 +25,7 @@ pub struct Analyzer<'a> {
     catalog: &'a Catalog,
     diagnostics: Vec<Diagnostic>,
     dialect: SqlDialect,
+    rules: RuleConfig,
 }
 
 impl<'a> Analyzer<'a> {
@@ -43,6 +45,7 @@ impl<'a> Analyzer<'a> {
             catalog,
             diagnostics: Vec::new(),
             dialect: SqlDialect::default(),
+            rules: RuleConfig::default(),
         }
     }
 
@@ -63,7 +66,28 @@ impl<'a> Analyzer<'a> {
             catalog,
             diagnostics: Vec::new(),
             dialect,
+            rules: RuleConfig::default(),
         }
+    }
+
+    /// Report rules at the configured levels (rules that are off are not reported)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::rules::{RuleConfig, RuleLevel};
+    /// use sqlsift_core::schema::Catalog;
+    ///
+    /// let catalog = Catalog::default();
+    /// let mut rules = RuleConfig::default();
+    /// rules.configure("table-not-found", RuleLevel::Off).unwrap();
+    /// let mut analyzer = Analyzer::new(&catalog).with_rules(rules);
+    /// assert!(analyzer.analyze("SELECT 1 FROM missing").is_empty());
+    /// ```
+    pub fn with_rules(mut self, rules: RuleConfig) -> Self {
+        self.rules = rules;
+        self
     }
 
     /// Analyze a SQL query and return diagnostics
@@ -113,17 +137,18 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline directives
-        std::mem::take(&mut self.diagnostics)
+        // Filter out diagnostics suppressed by inline directives, then apply rule levels
+        let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
             .filter(|d| {
                 if let Some(span) = &d.span {
-                    !directives.is_suppressed(d.code(), span.line)
+                    !directives.is_suppressed(d.kind, span.line)
                 } else {
                     true
                 }
             })
-            .collect()
+            .collect();
+        self.rules.apply(diagnostics)
     }
 
     /// Parse `sql` into statements, each with the position where its text starts.

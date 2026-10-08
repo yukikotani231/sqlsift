@@ -2335,14 +2335,24 @@ fn suppress_code_case_insensitive_and_extra_text() {
 }
 
 #[test]
-fn suppress_does_not_accept_rule_names_or_uppercase_prefix() {
-    // Current behavior: only codes are accepted and the prefix is case-sensitive.
+fn suppress_accepts_rule_names() {
     let c = diag_catalog();
-    assert_codes(
+    assert_clean(
         &c,
         "SELECT naem FROM users -- sqlsift:disable column-not-found",
+    );
+    // A different rule's name doesn't suppress
+    assert_codes(
+        &c,
+        "SELECT naem FROM users -- sqlsift:disable table-not-found",
         &["E0002"],
     );
+}
+
+#[test]
+fn suppress_does_not_accept_uppercase_prefix() {
+    // The directive prefix is case-sensitive.
+    let c = diag_catalog();
     assert_codes(
         &c,
         "SELECT naem FROM users -- SQLSIFT:DISABLE E0002",
