@@ -1,5 +1,7 @@
 //! Output formatting
 
+pub mod schema;
+
 use std::io::{IsTerminal, Write};
 
 use sqlsift_core::{Diagnostic, DiagnosticKind, Severity};

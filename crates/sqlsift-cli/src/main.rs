@@ -10,11 +10,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
-use sqlsift_core::schema::SchemaBuilder;
+use sqlsift_core::schema::{Catalog, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
-use crate::args::{Args, Command, OutputFormat};
+use crate::args::{Args, Command, OutputFormat, SchemaFormat};
 use crate::config::{Config, RuleFlags};
+use crate::output::schema::SchemaReport;
 use crate::output::{FileDiagnostics, OutputFormatter};
 
 fn main() -> ExitCode {
@@ -62,7 +63,7 @@ type AnalyzedFile = Result<(String, Vec<Diagnostic>)>;
 /// Results are returned in the same order as `files`.
 fn analyze_files(
     files: &[PathBuf],
-    catalog: &sqlsift_core::schema::Catalog,
+    catalog: &Catalog,
     dialect: SqlDialect,
     rules: &RuleConfig,
 ) -> Vec<AnalyzedFile> {
@@ -150,6 +151,89 @@ fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>> {
     Ok(paths.flatten().collect())
 }
 
+/// Load the configuration file given with `--config`, or discover `sqlsift.toml`
+/// in the current or a parent directory (an empty configuration when there is none)
+fn load_config(config_path: Option<&Path>) -> Result<Config> {
+    match config_path {
+        Some(path) => Config::from_file(path),
+        None => Ok(Config::find_and_load()?.unwrap_or_default()),
+    }
+}
+
+/// The configured SQL dialect (PostgreSQL by default)
+fn config_dialect(config: &Config) -> Result<SqlDialect> {
+    match &config.dialect {
+        Some(d) => d.parse().map_err(|e: String| miette::miette!(e)),
+        None => Ok(SqlDialect::default()),
+    }
+}
+
+/// Schema files from `schema` (glob patterns are expanded) followed by every
+/// `.sql` file under `schema_dir`, in filename order
+fn schema_files(config: &Config) -> Result<Vec<PathBuf>> {
+    let mut schema_files: Vec<PathBuf> = Vec::new();
+    for pattern in &config.schema {
+        if is_glob(pattern) {
+            let matches = expand_glob(pattern)?;
+            if matches.is_empty() {
+                miette::bail!("No schema files match pattern '{}'", pattern);
+            }
+            schema_files.extend(matches);
+        } else {
+            schema_files.push(PathBuf::from(pattern));
+        }
+    }
+
+    if let Some(dir) = &config.schema_dir {
+        if !Path::new(dir).is_dir() {
+            miette::bail!("Schema directory not found: {}", dir);
+        }
+        let matches = expand_glob(&format!("{}/**/*.sql", dir))?;
+        if matches.is_empty() {
+            miette::bail!("No .sql files found in schema directory {}", dir);
+        }
+        schema_files.extend(matches);
+    }
+
+    if schema_files.is_empty() {
+        miette::bail!(
+            "No schema files specified. Use --schema, --schema-dir, or configure in sqlsift.toml"
+        );
+    }
+    Ok(schema_files)
+}
+
+/// Build the catalog from the schema files. Schema warnings are printed to
+/// stderr; a file with errors is returned with its diagnostics instead.
+fn build_catalog(
+    schema_files: &[PathBuf],
+    dialect: SqlDialect,
+) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
+    let mut builder = SchemaBuilder::with_dialect(dialect);
+    for schema_file in schema_files {
+        let content = read_file(schema_file)?;
+        if let Err(diags) = builder.parse(&content) {
+            return Ok(Err(FileDiagnostics {
+                file: schema_file.display().to_string(),
+                source: content,
+                diagnostics: diags,
+            }));
+        }
+    }
+    let (catalog, schema_diags) = builder.build();
+
+    if !schema_diags.is_empty() {
+        eprintln!(
+            "Warning: Schema parsing produced {} warning(s):",
+            schema_diags.len()
+        );
+        for diag in &schema_diags {
+            eprintln!("  - {}", diag.message);
+        }
+    }
+    Ok(Ok(catalog))
+}
+
 fn run(args: Args) -> Result<bool> {
     let quiet = args.quiet;
 
@@ -166,17 +250,14 @@ fn run(args: Args) -> Result<bool> {
             format,
             max_errors,
         } => {
-            // Load configuration
-            let config = if let Some(path) = config_path {
-                // Load from specified path
-                Config::from_file(&path)?
-            } else {
-                // Try to find sqlsift.toml
-                Config::find_and_load()?.unwrap_or_default()
-            };
-
-            // Merge CLI args with config (CLI takes precedence)
-            let config = config.merge_with_args(&schema, &schema_dir, &files, &format, &dialect);
+            // Load configuration; CLI args take precedence over the config file
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                &schema_dir,
+                &files,
+                &format,
+                &dialect,
+            );
             tracing::info!(
                 schema_count = config.schema.len(),
                 query_pattern_count = config.files.len(),
@@ -189,11 +270,7 @@ fn run(args: Args) -> Result<bool> {
                 deny: &deny,
             })?;
 
-            // Parse and validate dialect
-            let dialect: SqlDialect = match &config.dialect {
-                Some(d) => d.parse().map_err(|e: String| miette::miette!(e))?,
-                None => SqlDialect::default(),
-            };
+            let dialect = config_dialect(&config)?;
 
             // Determine output format
             let output_format = match config.format.as_deref() {
@@ -208,61 +285,15 @@ fn run(args: Args) -> Result<bool> {
                 }
             };
 
-            // Get schema files from config or CLI (glob patterns are expanded)
-            let mut schema_files: Vec<PathBuf> = Vec::new();
-            for pattern in &config.schema {
-                if is_glob(pattern) {
-                    let matches = expand_glob(pattern)?;
-                    if matches.is_empty() {
-                        miette::bail!("No schema files match pattern '{}'", pattern);
-                    }
-                    schema_files.extend(matches);
-                } else {
-                    schema_files.push(PathBuf::from(pattern));
-                }
-            }
-
-            if let Some(dir) = &config.schema_dir {
-                if !Path::new(dir).is_dir() {
-                    miette::bail!("Schema directory not found: {}", dir);
-                }
-                let matches = expand_glob(&format!("{}/**/*.sql", dir))?;
-                if matches.is_empty() {
-                    miette::bail!("No .sql files found in schema directory {}", dir);
-                }
-                schema_files.extend(matches);
-            }
-
-            if schema_files.is_empty() {
-                miette::bail!("No schema files specified. Use --schema, --schema-dir, or configure in sqlsift.toml");
-            }
-
+            let schema_files = schema_files(&config)?;
             let formatter = OutputFormatter::new(output_format);
-
-            // Build schema catalog
-            let mut builder = SchemaBuilder::with_dialect(dialect);
-            for schema_file in &schema_files {
-                let content = read_file(schema_file)?;
-                if let Err(diags) = builder.parse(&content) {
-                    formatter.print(&[FileDiagnostics {
-                        file: schema_file.display().to_string(),
-                        source: content,
-                        diagnostics: diags,
-                    }]);
+            let catalog = match build_catalog(&schema_files, dialect)? {
+                Ok(catalog) => catalog,
+                Err(failed) => {
+                    formatter.print(&[failed]);
                     return Ok(true);
                 }
-            }
-            let (catalog, schema_diags) = builder.build();
-
-            if !schema_diags.is_empty() {
-                eprintln!(
-                    "Warning: Schema parsing produced {} warning(s):",
-                    schema_diags.len()
-                );
-                for diag in &schema_diags {
-                    eprintln!("  - {}", diag.message);
-                }
-            }
+            };
 
             // Collect query files from config or CLI (glob patterns are expanded)
             let mut query_files = Vec::new();
@@ -364,33 +395,44 @@ fn run(args: Args) -> Result<bool> {
             Ok(false)
         }
 
-        Command::Schema { files } => {
-            // Build and display schema information
-            let mut builder = SchemaBuilder::new();
-            for schema_file in &files {
-                let content = read_file(schema_file)?;
-                let _ = builder.parse(&content);
-            }
-            let (catalog, _) = builder.build();
+        Command::Schema {
+            files,
+            mut schema,
+            schema_dir,
+            config: config_path,
+            dialect,
+            format,
+        } => {
+            // Positional files are schema files too (kept for backward compatibility)
+            schema.extend(files);
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                &schema_dir,
+                &[],
+                &None,
+                &dialect,
+            );
+            let dialect = config_dialect(&config)?;
+            let schema_files = schema_files(&config)?;
 
-            println!("Schema Information:");
-            println!("==================");
-            for (schema_name, schema) in &catalog.schemas {
-                println!("\nSchema: {}", schema_name);
-                for (table_name, table) in &schema.tables {
-                    println!("  Table: {}", table_name);
-                    for (col_name, col) in &table.columns {
-                        let nullable = if col.nullable { "NULL" } else { "NOT NULL" };
-                        println!(
-                            "    - {} {} {}",
-                            col_name,
-                            col.data_type.display_name(),
-                            nullable
-                        );
-                    }
+            let catalog = match build_catalog(&schema_files, dialect)? {
+                Ok(catalog) => catalog,
+                Err(failed) => {
+                    let output_format = match format {
+                        SchemaFormat::Human => OutputFormat::Human,
+                        SchemaFormat::Json => OutputFormat::Json,
+                    };
+                    OutputFormatter::new(output_format).print(&[failed]);
+                    return Ok(true);
                 }
-            }
+            };
 
+            let report = SchemaReport {
+                catalog: &catalog,
+                dialect,
+                schema_files: &schema_files,
+            };
+            print!("{}", report.render(format));
             Ok(false)
         }
 

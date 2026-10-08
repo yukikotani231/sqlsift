@@ -73,11 +73,32 @@ pub enum Command {
     /// List all rules with their category and default level
     Rules,
 
-    /// Display schema information
+    /// Display the schema sqlsift loaded (tables, views, enum types)
+    ///
+    /// Schema files are taken from the arguments, or from sqlsift.toml when none are given.
     Schema {
-        /// Schema definition files
-        #[arg(required = true)]
+        /// Schema definition files (same as --schema; supports glob patterns)
         files: Vec<PathBuf>,
+
+        /// Schema definition files
+        #[arg(short, long = "schema", value_name = "FILE")]
+        schema: Vec<PathBuf>,
+
+        /// Directory containing schema files
+        #[arg(long = "schema-dir", value_name = "DIR")]
+        schema_dir: Option<PathBuf>,
+
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
+        #[arg(short, long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+
+        /// SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = SchemaFormat::Human)]
+        format: SchemaFormat,
     },
 
     /// Parse SQL and display AST (for debugging)
@@ -96,4 +117,14 @@ pub enum OutputFormat {
     Json,
     /// SARIF output (for GitHub Code Scanning)
     Sarif,
+}
+
+/// Output format of `sqlsift schema`
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
+pub enum SchemaFormat {
+    /// Human-readable listing
+    #[default]
+    Human,
+    /// JSON output
+    Json,
 }
