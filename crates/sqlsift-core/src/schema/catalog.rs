@@ -19,6 +19,19 @@ pub struct Catalog {
     /// are case-sensitive. When false, table/view/schema names match case-insensitively.
     #[serde(default)]
     pub case_sensitive_names: bool,
+    /// Table, view and type definitions in the schema input that could not be parsed
+    /// and were skipped (for diagnostics on queries that use them)
+    #[serde(default)]
+    pub skipped_definitions: Vec<SkippedDefinition>,
+}
+
+/// A schema statement that could not be parsed and was skipped
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedDefinition {
+    /// Kind of statement (`CREATE TABLE`, `CREATE VIEW`, `ALTER TABLE`, ...)
+    pub kind: String,
+    /// Name of the object it defines or alters, if it could be determined
+    pub name: Option<String>,
 }
 
 impl Catalog {
@@ -28,6 +41,7 @@ impl Catalog {
             default_schema: "public".to_string(),
             enums: IndexMap::new(),
             case_sensitive_names: false,
+            skipped_definitions: Vec::new(),
         };
         // Create default schema
         catalog.schemas.insert(
@@ -318,6 +332,19 @@ pub struct TableDef {
     pub foreign_keys: Vec<ForeignKeyDef>,
     pub unique_constraints: Vec<UniqueConstraintDef>,
     pub check_constraints: Vec<CheckConstraintDef>,
+    /// Columns the table no longer has because ALTER TABLE renamed or dropped them
+    /// (for diagnostics on queries that still use the old names)
+    #[serde(default)]
+    pub former_columns: Vec<FormerColumn>,
+}
+
+/// A column that ALTER TABLE renamed or dropped
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormerColumn {
+    /// The old column name
+    pub name: String,
+    /// The column's current name if it was renamed, or `None` if it was dropped
+    pub renamed_to: Option<String>,
 }
 
 impl TableDef {
@@ -329,7 +356,62 @@ impl TableDef {
             foreign_keys: Vec::new(),
             unique_constraints: Vec::new(),
             check_constraints: Vec::new(),
+            former_columns: Vec::new(),
         }
+    }
+
+    /// The renamed or dropped column that was called `name`, if any
+    pub fn former_column(&self, name: &str) -> Option<&FormerColumn> {
+        self.former_columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Remember that column `old` was renamed to `new`. Earlier names of `old` now
+    /// refer to `new` as well.
+    pub fn record_column_rename(&mut self, old: &str, new: &str) {
+        if old.eq_ignore_ascii_case(new) {
+            return;
+        }
+        self.forget_former_column(new);
+        self.forget_former_column(old);
+        for former in &mut self.former_columns {
+            if former
+                .renamed_to
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(old))
+            {
+                former.renamed_to = Some(new.to_string());
+            }
+        }
+        self.former_columns.push(FormerColumn {
+            name: old.to_string(),
+            renamed_to: Some(new.to_string()),
+        });
+    }
+
+    /// Remember that column `name` was dropped. Earlier names of it are dropped too.
+    pub fn record_column_drop(&mut self, name: &str) {
+        self.forget_former_column(name);
+        for former in &mut self.former_columns {
+            if former
+                .renamed_to
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            {
+                former.renamed_to = None;
+            }
+        }
+        self.former_columns.push(FormerColumn {
+            name: name.to_string(),
+            renamed_to: None,
+        });
+    }
+
+    /// Forget a former column name (a column with that name exists again)
+    pub fn forget_former_column(&mut self, name: &str) {
+        self.former_columns
+            .retain(|c| !c.name.eq_ignore_ascii_case(name));
     }
 
     /// Get a column by name

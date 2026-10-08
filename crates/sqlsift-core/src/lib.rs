@@ -8,6 +8,7 @@ pub mod dialect;
 pub mod error;
 pub mod rules;
 pub mod schema;
+mod suggest;
 pub mod types;
 
 pub use analyzer::Analyzer;

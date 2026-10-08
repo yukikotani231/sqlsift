@@ -24,8 +24,9 @@ use crate::schema::Catalog;
 use crate::schema::TableDef;
 use crate::types::{ArithmeticOp, SqlType, TypeCompatibility};
 
-use super::resolver::{find_similar_name, is_comparison_operator, Resolver};
+use super::resolver::{is_comparison_operator, Resolver};
 use super::scope::{Column, ColumnLookup, ColumnMatch, ExpressionType};
+use crate::suggest::find_similar_name;
 
 impl Resolver<'_> {
     // ---------------------------------------------------------------------
@@ -33,11 +34,14 @@ impl Resolver<'_> {
     // ---------------------------------------------------------------------
 
     /// Report a string literal that is not a value of the enum type on the other side.
-    /// Returns true if a diagnostic was emitted.
+    /// `column` names the enum-typed column (`table.column`), if it is one: inline
+    /// `ENUM(...)` types have no name of their own. Returns true if a diagnostic was
+    /// emitted.
     fn report_enum_literal(
         &mut self,
         left: &ExpressionType,
         right: &ExpressionType,
+        column: Option<String>,
         span: Option<Span>,
     ) -> bool {
         let (enum_type, literal) = match (left, right) {
@@ -46,12 +50,21 @@ impl Resolver<'_> {
             _ => return false,
         };
         // Named enum type (CREATE TYPE ... AS ENUM) or inline ENUM(...) column type
-        let (type_name, values) = match enum_type {
+        let (target, values) = match enum_type {
             SqlType::Custom(name) => match self.catalog.get_enum(name) {
-                Some(enum_def) => (enum_def.name.clone(), enum_def.values.clone()),
+                Some(enum_def) => (
+                    format!("enum type '{}'", enum_def.name),
+                    enum_def.values.clone(),
+                ),
                 None => return false,
             },
-            SqlType::Enum(values) => (enum_type.display_name(), values.clone()),
+            SqlType::Enum(values) => match column {
+                Some(column) => (format!("enum column '{}'", column), values.clone()),
+                None => (
+                    format!("enum type '{}'", enum_type.display_name()),
+                    values.clone(),
+                ),
+            },
             _ => return false,
         };
         if values.is_empty() || values.iter().any(|v| v == literal) {
@@ -71,7 +84,7 @@ impl Resolver<'_> {
             });
         let mut diag = Diagnostic::error(
             DiagnosticKind::TypeMismatch,
-            format!("Invalid value '{}' for enum type '{}'", literal, type_name),
+            format!("Invalid value '{}' for {}", literal, target),
         )
         .with_help(help);
         diag.span = span;
@@ -112,7 +125,8 @@ impl Resolver<'_> {
         let right_type = self.infer_expr_type(right);
         // Literals carry no location: use the other operand's
         let span = located_span(left).or_else(|| located_span(right));
-        if self.report_enum_literal(&left_type, &right_type, span) {
+        let column = self.column_label(left).or_else(|| self.column_label(right));
+        if self.report_enum_literal(&left_type, &right_type, column, span) {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
@@ -131,7 +145,8 @@ impl Resolver<'_> {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
         let span = located_span(left).or_else(|| located_span(right));
-        if self.report_enum_literal(&left_type, &right_type, span) {
+        let column = self.column_label(left).or_else(|| self.column_label(right));
+        if self.report_enum_literal(&left_type, &right_type, column, span) {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
@@ -361,7 +376,8 @@ impl Resolver<'_> {
                 let value_type = self.infer_expr_type(value_expr);
                 let column_type = ExpressionType::of_column(&col_def.data_type);
                 let column_span = insert.columns.get(i).map(|c| Span::from_sqlparser(&c.span));
-                if self.report_enum_literal(&column_type, &value_type, column_span) {
+                let column = format!("{}.{}", table_def.name, col_def.name);
+                if self.report_enum_literal(&column_type, &value_type, Some(column), column_span) {
                     continue;
                 }
                 if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
@@ -401,7 +417,9 @@ impl Resolver<'_> {
 
             let value_type = self.infer_expr_type(&assignment.value);
             let column_type = ExpressionType::of_column(&col_def.data_type);
-            if self.report_enum_literal(&column_type, &value_type, Some(target_span)) {
+            let column = format!("{}.{}", table_def.name, col_def.name);
+            if self.report_enum_literal(&column_type, &value_type, Some(column), Some(target_span))
+            {
                 continue;
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
@@ -466,6 +484,25 @@ impl Resolver<'_> {
     }
 
     /// Type of `table.column`
+    /// `table.column` for an expression that is a column reference
+    fn column_label(&self, expr: &Expr) -> Option<String> {
+        let (relation, column) = match expr {
+            Expr::Identifier(ident) => (
+                self.scope.column_relation(&ident.value, self.dialect)?,
+                ident,
+            ),
+            Expr::CompoundIdentifier(parts) if (2..=3).contains(&parts.len()) => {
+                let [.., table, column] = parts.as_slice() else {
+                    return None;
+                };
+                (self.scope.relation(&table.value)?, column)
+            }
+            Expr::Nested(inner) => return self.column_label(inner),
+            _ => return None,
+        };
+        Some(format!("{}.{}", relation.name, column.value))
+    }
+
     fn infer_qualified_column(
         &self,
         table: &sqlparser::ast::Ident,

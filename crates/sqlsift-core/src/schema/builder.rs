@@ -12,7 +12,7 @@ use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{
     Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
-    PrimaryKeyDef, QualifiedName, TableDef, UniqueConstraintDef, ViewDef,
+    PrimaryKeyDef, QualifiedName, SkippedDefinition, TableDef, UniqueConstraintDef, ViewDef,
 };
 use crate::types::SqlType;
 
@@ -258,6 +258,11 @@ impl SchemaBuilder {
             .map(|l| l.trim_end().len())
             .unwrap_or(0)
             .max(1);
+
+        self.catalog.skipped_definitions.push(SkippedDefinition {
+            kind: kind.to_string(),
+            name: name.clone(),
+        });
 
         let parser_message = relocate_parser_message(&err.to_string(), (base_line, base_column));
         let what = match &name {
@@ -774,13 +779,16 @@ impl SchemaBuilder {
                     );
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         merge_constraints(table, constraints);
+                        table.forget_former_column(&col.name);
                         table.columns.insert(col.name.clone(), col);
                     }
                 }
                 AlterTableOperation::DropColumn { column_name, .. } => {
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(index) = column_index(table, &column_name.value) {
-                            table.columns.shift_remove_index(index);
+                            if let Some((name, _)) = table.columns.shift_remove_index(index) {
+                                table.record_column_drop(&name);
+                            }
                         }
                     }
                 }
@@ -792,6 +800,8 @@ impl SchemaBuilder {
                         if let Some(index) = column_index(table, &old_column_name.value) {
                             let mut col = table.columns[index].clone();
                             col.name = new_column_name.value.clone();
+                            let old_name = table.columns[index].name.clone();
+                            table.record_column_rename(&old_name, &col.name);
                             replace_column(table, index, col);
                         }
                     }
@@ -836,8 +846,13 @@ impl SchemaBuilder {
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         merge_constraints(table, constraints);
                         match column_index(table, &col_name.value) {
-                            Some(index) => replace_column(table, index, col),
+                            Some(index) => {
+                                let old_name = table.columns[index].name.clone();
+                                table.record_column_rename(&old_name, &col.name);
+                                replace_column(table, index, col);
+                            }
                             None => {
+                                table.forget_former_column(&col.name);
                                 table.columns.insert(col.name.clone(), col);
                             }
                         }

@@ -137,15 +137,25 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline directives, then apply rule levels
+        // Filter out diagnostics suppressed by inline directives, then apply rule levels.
+        // A diagnostic that a directive meant to suppress but misspelled the rule of
+        // says so.
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
-            .filter(|d| {
-                if let Some(span) = &d.span {
-                    !directives.is_suppressed(d.kind, span.line)
-                } else {
-                    true
+            .filter_map(|mut d| {
+                let Some(line) = d.span.map(|s| s.line) else {
+                    return Some(d);
+                };
+                if directives.is_suppressed(d.kind, line) {
+                    return None;
                 }
+                if let Some(note) = directives.unknown_id_help(line) {
+                    d.help = Some(match d.help.take() {
+                        Some(help) => format!("{help}\n{note}"),
+                        None => note,
+                    });
+                }
+                Some(d)
             })
             .collect();
         self.rules.apply(diagnostics)

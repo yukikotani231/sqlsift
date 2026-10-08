@@ -239,7 +239,7 @@ jobs:
           "code": "E0002",
           "kind": "ColumnNotFound",
           "severity": "error",
-          "message": "Column 'user_id' not found",
+          "message": "Column 'user_id' not found in table 'users'",
           "help": "Did you mean 'id'?",
           "line": 3,
           "column": 15,
