@@ -14,6 +14,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::mysql;
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
@@ -188,7 +189,8 @@ impl<'a> Analyzer<'a> {
         };
         let source = match self.dialect {
             SqlDialect::PostgreSQL => psql::preprocess(&template.text),
-            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
+            SqlDialect::MySQL => mysql::preprocess(&template.text),
+            SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
         };
 
         // Parse the SQL
@@ -234,7 +236,7 @@ impl<'a> Analyzer<'a> {
         // Spans are built from line/column locations: add their byte offsets in the
         // original input (extracting embedded SQL or masking a template may change
         // byte lengths, never lines or character columns)
-        let original_lines = (!std::ptr::eq(original, sql) || template.text.len() != sql.len())
+        let original_lines = (!std::ptr::eq(original, sql) || source.text.len() != sql.len())
             .then(|| LineIndex::new(original));
         let offsets = original_lines.as_ref().unwrap_or(&lines);
         for diagnostic in &mut self.diagnostics {
@@ -304,7 +306,16 @@ impl<'a> Analyzer<'a> {
         for range in ranges {
             let (line, column) = lines.line_column(range.start);
             let origin = Origin { line, column };
-            match Parser::parse_sql(dialect.as_ref(), &sql[range.clone()]) {
+            let text = &sql[range.clone()];
+            let parsed = Parser::parse_sql(dialect.as_ref(), text).or_else(|error| {
+                // MySQL's INSERT ... SET, which sqlparser doesn't support
+                match self.dialect {
+                    SqlDialect::MySQL => mysql::parse_insert_set(dialect.as_ref(), text)
+                        .map_or(Err(error), |parsed| parsed.map(|s| vec![s])),
+                    SqlDialect::PostgreSQL | SqlDialect::SQLite => Err(error),
+                }
+            });
+            match parsed {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
                 Err(error) => self
                     .diagnostics

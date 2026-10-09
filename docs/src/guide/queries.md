@@ -40,7 +40,7 @@ sqlsift follows SQL's visibility rules rather than just matching names:
 - Correlated subqueries in `WHERE`, `SELECT` and `HAVING`
 - `LATERAL` vs non-`LATERAL` subqueries in `FROM`
 - `JOIN ... USING` and `NATURAL JOIN` columns
-- `ORDER BY` references to `SELECT` aliases
+- `ORDER BY` references to `SELECT` aliases (also in `HAVING` with MySQL and SQLite, which allow it; PostgreSQL doesn't)
 - `UPDATE ... FROM` and `DELETE ... USING`
 - Table-valued functions in `FROM` (for example `generate_series`)
 
@@ -62,6 +62,15 @@ With the PostgreSQL dialect, files written for `psql` are accepted:
 - Backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, …) are skipped.
 - `\g`, `\gset` and `\gx` end a query like `;`.
 - `:var` and `:'var'` interpolations are treated as untyped placeholders, and `:"var"` as an identifier whose name sqlsift can't know, so no "not found" diagnostic is reported for it.
+
+## MySQL syntax
+
+With the MySQL dialect, these are accepted in schema and query files:
+
+- Versioned comments (`/*!50001 ... */`, as written by `mysqldump`) are read as SQL, the way MySQL runs them. Views in a dump are loaded.
+- `ALGORITHM = ...`, `DEFINER = ...` and `SQL SECURITY ...` in `CREATE VIEW` are ignored.
+- `INSERT ... SET col = value, ...` is checked like `INSERT ... (col, ...) VALUES (value, ...)`, including `ON DUPLICATE KEY UPDATE`.
+- Index hints (`USE`, `FORCE` and `IGNORE INDEX`/`KEY`), `STRAIGHT_JOIN` and the SELECT modifiers (`SQL_CALC_FOUND_ROWS`, `SQL_NO_CACHE`, `HIGH_PRIORITY`, `DISTINCTROW`, ...) are ignored.
 
 ## dbt and Jinja templates
 
