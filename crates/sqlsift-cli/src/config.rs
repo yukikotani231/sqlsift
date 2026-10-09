@@ -19,6 +19,7 @@ const KNOWN_KEYS: &[&str] = &[
     "schema_dir",
     "rules",
     "categories",
+    "max_warnings",
 ];
 
 /// Configuration for sqlsift
@@ -36,9 +37,13 @@ pub struct Config {
     #[serde(default)]
     pub dialect: Option<String>,
 
-    /// Output format (human, json, sarif)
+    /// Output format (human, json, sarif, github)
     #[serde(default)]
     pub format: Option<String>,
+
+    /// Fail the check when more than this many warnings are reported
+    #[serde(default)]
+    pub max_warnings: Option<usize>,
 
     /// Rules to disable (e.g., ["E0001", "E0002"])
     #[serde(default)]
@@ -116,6 +121,7 @@ impl Config {
         files: &[PathBuf],
         format: &Option<crate::args::OutputFormat>,
         dialect: &Option<String>,
+        max_warnings: Option<usize>,
     ) -> Self {
         // CLI args override config file
         if !schema.is_empty() {
@@ -136,6 +142,10 @@ impl Config {
 
         if dialect.is_some() {
             self.dialect = dialect.clone();
+        }
+
+        if max_warnings.is_some() {
+            self.max_warnings = max_warnings;
         }
 
         self

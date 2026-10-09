@@ -59,17 +59,33 @@ fn init_tracing(verbose: u8, quiet: bool) {
 /// A query file's contents and its diagnostics
 type AnalyzedFile = Result<(String, Vec<Diagnostic>)>;
 
+/// The file argument that reads a query from stdin
+const STDIN_ARG: &str = "-";
+
+/// Name reported for the query read from stdin without `--stdin-filename`
+const STDIN_DEFAULT_NAME: &str = "<stdin>";
+
+/// Whether a query file argument means stdin
+fn is_stdin(path: &Path) -> bool {
+    path.as_os_str() == STDIN_ARG
+}
+
 /// Read and analyze each query file, in parallel across the available cores.
-/// Results are returned in the same order as `files`.
+/// Results are returned in the same order as `files`. The file `-` is the
+/// query read from stdin, `stdin`.
 fn analyze_files(
     files: &[PathBuf],
+    stdin: Option<&str>,
     catalog: &Catalog,
     dialect: SqlDialect,
     rules: &RuleConfig,
 ) -> Vec<AnalyzedFile> {
     let analyze_one = |path: &PathBuf| -> AnalyzedFile {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
-        let content = read_file(path)?;
+        let content = match stdin {
+            Some(stdin) if is_stdin(path) => stdin.to_string(),
+            _ => read_file(path)?,
+        };
         let diagnostics = Analyzer::with_dialect(catalog, dialect)
             .with_rules(rules.clone())
             .analyze(&content);
@@ -253,6 +269,8 @@ fn run(args: Args) -> Result<bool> {
             dialect,
             format,
             max_errors,
+            max_warnings,
+            stdin_filename,
         } => {
             // Load configuration; CLI args take precedence over the config file
             let config = load_config(config_path.as_deref())?.merge_with_args(
@@ -261,6 +279,7 @@ fn run(args: Args) -> Result<bool> {
                 &files,
                 &format,
                 &dialect,
+                max_warnings,
             );
             tracing::info!(
                 schema_count = config.schema.len(),
@@ -281,9 +300,10 @@ fn run(args: Args) -> Result<bool> {
                 None | Some("human") => OutputFormat::Human,
                 Some("json") => OutputFormat::Json,
                 Some("sarif") => OutputFormat::Sarif,
+                Some("github") => OutputFormat::Github,
                 Some(other) => {
                     return Err(miette::miette!(
-                        "Invalid format '{}'. Supported formats: human, json, sarif.",
+                        "Invalid format '{}'. Supported formats: human, json, sarif, github.",
                         other
                     ))
                 }
@@ -301,21 +321,62 @@ fn run(args: Args) -> Result<bool> {
 
             // Collect query files from config or CLI (glob patterns are expanded)
             let mut query_files = Vec::new();
+            let mut unmatched = Vec::new();
             for pattern in &config.files {
                 if is_glob(pattern) {
-                    query_files.extend(expand_glob(pattern)?);
+                    let matches = expand_glob(pattern)?;
+                    if matches.is_empty() {
+                        unmatched.push(format!("'{pattern}'"));
+                    }
+                    query_files.extend(matches);
                 } else {
                     query_files.push(PathBuf::from(pattern));
                 }
             }
 
             if query_files.is_empty() {
+                if !unmatched.is_empty() {
+                    miette::bail!("No files match {}", unmatched.join(", "));
+                }
                 miette::bail!("No query files specified. Use positional arguments or configure in sqlsift.toml");
             }
+            // A typo in one of several patterns shouldn't go unnoticed
+            for pattern in &unmatched {
+                eprintln!("Warning: no files match {pattern}");
+            }
+
+            // The query read from stdin (`-`)
+            let stdin_count = query_files.iter().filter(|p| is_stdin(p)).count();
+            if stdin_count > 1 {
+                miette::bail!("'-' (stdin) can only be given once");
+            }
+            if stdin_count == 0 && stdin_filename.is_some() {
+                miette::bail!(
+                    "--stdin-filename requires '-' among the files to read the query from stdin"
+                );
+            }
+            let stdin = if stdin_count == 1 {
+                let mut content = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)
+                    .map_err(|e| miette::miette!("Failed to read stdin: {}", e))?;
+                Some(content)
+            } else {
+                None
+            };
+            let display_name = |path: &Path| -> String {
+                if stdin.is_some() && is_stdin(path) {
+                    stdin_filename.as_ref().map_or_else(
+                        || STDIN_DEFAULT_NAME.to_string(),
+                        |name| name.display().to_string(),
+                    )
+                } else {
+                    path.display().to_string()
+                }
+            };
 
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
-            let analyzed = analyze_files(&query_files, &catalog, dialect, &rules);
+            let analyzed = analyze_files(&query_files, stdin.as_deref(), &catalog, dialect, &rules);
 
             let mut total_errors = 0;
             let mut total_warnings = 0;
@@ -355,7 +416,7 @@ fn run(args: Args) -> Result<bool> {
                 }
 
                 results.push(FileDiagnostics {
-                    file: query_file.display().to_string(),
+                    file: display_name(query_file),
                     source: content,
                     diagnostics: diagnostics_to_print,
                 });
@@ -391,7 +452,21 @@ fn run(args: Args) -> Result<bool> {
                 }
             }
 
-            Ok(total_errors > 0)
+            // Too many warnings fail the check; the reason is printed even with
+            // --quiet, as it explains the exit code
+            let too_many_warnings = config.max_warnings.filter(|max| total_warnings > *max);
+            if let Some(max) = too_many_warnings {
+                let origin = if max_warnings.is_some() {
+                    "--max-warnings"
+                } else {
+                    "max_warnings in sqlsift.toml"
+                };
+                eprintln!(
+                    "Too many warnings: {total_warnings} found, the maximum is {max} ({origin})"
+                );
+            }
+
+            Ok(total_errors > 0 || too_many_warnings.is_some())
         }
 
         Command::Rules => {
@@ -415,6 +490,7 @@ fn run(args: Args) -> Result<bool> {
                 &[],
                 &None,
                 &dialect,
+                None,
             );
             let dialect = config_dialect(&config)?;
             let schema_files = schema_files(&config)?;

@@ -106,6 +106,9 @@ sqlsift check --schema-dir ./migrations queries/*.sql
 
 # Other dialects
 sqlsift check --dialect mysql --schema schema.sql queries/*.sql
+
+# Read a query from stdin (e.g. the staged version in a pre-commit hook)
+git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queries/users.sql -
 ```
 
 To avoid repeating flags, add a `sqlsift.toml` to your project root (see [`sqlsift.toml`](sqlsift.toml) for all options):
@@ -184,7 +187,8 @@ schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
 # schema_dir = "db/migrations"    # all .sql files under this directory, in filename order
 files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
 dialect = "postgresql"            # postgresql, mysql or sqlite
-format = "human"                  # human, json or sarif
+format = "human"                  # human, json, sarif or github
+# max_warnings = 0                # fail when more than this many warnings are reported
 disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
 
 [rules]                           # per-rule level: "off", "warn" or "error"
@@ -197,7 +201,7 @@ correctness = "error"
 
 Relative paths in the file are resolved against the directory containing `sqlsift.toml`. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
 
-Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported, `2` for usage or configuration errors (missing files, invalid config, etc.).
+Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported (or more warnings than `max_warnings` / `--max-warnings`), `2` for usage or configuration errors (missing files, patterns that match no files, invalid config, etc.).
 
 </details>
 
@@ -256,7 +260,9 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 
 The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration error).
 
-Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI.
+Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI (add `--format github` for annotations in GitHub Actions).
+
+Rolling out a rule as `warn`? `--max-warnings <N>` (or `max_warnings` in `sqlsift.toml`) fails the check when more than `N` warnings are reported, so the backlog can only shrink.
 
 ### Re-check everything when the schema changes
 
@@ -330,7 +336,7 @@ jobs:
           "help": "Did you mean 'id'?",
           "line": 3,
           "column": 15,
-          "span": { "line": 3, "column": 15, "length": 7, "offset": 0 },
+          "span": { "line": 3, "column": 15, "length": 7, "offset": 62 },
           "labels": []
         }
       ]
@@ -338,6 +344,21 @@ jobs:
   ]
 }
 ```
+
+`line` and `column` are 1-indexed (columns count characters); `span.offset` is the 0-indexed byte offset of the same position in the file, and `span.length` is in bytes.
+
+### GitHub Actions annotations
+
+Running sqlsift inside your own job (a `make lint` step, a script, a container)? `--format github` prints one [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) per diagnostic on stdout, which GitHub turns into annotations on the pull request diff:
+
+```
+::error file=queries/fetch.sql,line=3,col=15,endLine=3,endColumn=22,title=E0002 column-not-found::Column 'user_id' not found%0Ahelp: Did you mean 'id'?
+::warning file=queries/report.sql,line=6,col=8,endLine=6,endColumn=10,title=E0006 ambiguous-column::Column 'id' is ambiguous
+```
+
+Warnings become `::warning`, errors `::error`. The summary still goes to stderr.
+
+### Other formats
 
 The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for all files and a `tool.driver.rules` entry for every diagnostic rule. Human output uses colors only when stderr is a terminal and `NO_COLOR` is not set.
 
@@ -460,7 +481,7 @@ Use the `--dialect` flag to specify the dialect.
 sqlsift check [OPTIONS] <FILES>...
 
 Arguments:
-  <FILES>...                SQL files to validate (supports glob patterns)
+  <FILES>...                SQL files to validate (supports glob patterns; `-` reads stdin)
 
 Options:
   -s, --schema <FILE>       Schema definition file (can be specified multiple times)
@@ -470,8 +491,11 @@ Options:
   -W, --warn <RULE>         Report a rule or category as warnings
   -D, --deny <RULE>         Report a rule or category as errors
   -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
-  -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
+  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
+      --max-warnings <N>    Fail (exit 1) when more than N warnings are reported
+      --stdin-filename <PATH>
+                            File name to report for the query read from stdin (`-`)
   -v, --verbose             Enable verbose logging to stderr (-vv for debug)
   -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help

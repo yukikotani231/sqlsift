@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Source location span
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
-    /// Byte offset from start of source (optional, for miette compatibility)
+    /// Byte offset of the start of the span in the source. Diagnostics returned
+    /// by the analyzer always have it set (it matches `line` / `column`); spans
+    /// created with [`Span::with_location`] or [`Span::from_sqlparser`] start
+    /// with 0 until the analyzer fills it in.
     pub offset: usize,
     /// Length in bytes
     pub length: usize,
