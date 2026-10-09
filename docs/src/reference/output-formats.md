@@ -83,6 +83,6 @@ Warnings become `::warning`, errors `::error`. Use it when you run sqlsift insid
     "views": [{ "name": "user_names", "materialized": false,
                 "columns": [{ "name": "id", "type": "integer" }] }]   // type is null when unknown
   }],
-  "enums": [{ "name": "mood", "values": ["sad", "ok", "happy"] }]
+  "enums": [{ "name": "mood", "schema": null, "values": ["sad", "ok", "happy"] }]
 }
 ```

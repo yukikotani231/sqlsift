@@ -17,7 +17,8 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::mysql;
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
-use crate::schema::{Catalog, SchemaBuilder};
+use crate::schema::{mask_unsupported_clauses, unparsed_definition};
+use crate::schema::{Catalog, SchemaBuilder, SkippedDefinition};
 use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Templating};
 
@@ -234,7 +235,9 @@ impl<'a> Analyzer<'a> {
 
         // Parse the SQL
         let lines = LineIndex::new(&text);
-        let statements = self.parse_statements(&text, &lines);
+        let (statements, mut skipped) = self.parse_statements(&text, &lines);
+        // Applied in source order, before the statements that follow them
+        skipped.reverse();
 
         // Tables, views and types created, altered or dropped by the file's own
         // statements, applied to a copy of the catalog made on the first such
@@ -243,6 +246,20 @@ impl<'a> Analyzer<'a> {
 
         // Analyze each statement
         for (stmt, origin) in &statements {
+            // Definitions before this statement that could not be parsed
+            while skipped
+                .last()
+                .is_some_and(|(at, _)| (at.line, at.column) < (origin.line, origin.column))
+            {
+                if let Some((_, definition)) = skipped.pop() {
+                    file_schema
+                        .get_or_insert_with(|| {
+                            SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
+                        })
+                        .skip_definition(definition);
+                }
+            }
+
             let catalog = file_schema
                 .as_ref()
                 .map_or(self.catalog, SchemaBuilder::catalog);
@@ -327,10 +344,16 @@ impl<'a> Analyzer<'a> {
     /// a syntax error is reported where it occurs and doesn't hide diagnostics in the
     /// other statements. Only the statement's own text is parsed (keeping this linear
     /// in the input size); its locations are shifted by its [`Origin`] afterwards.
-    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> Vec<(Statement, Origin)> {
+    /// A CREATE TABLE / VIEW that doesn't parse is retried without clauses that don't
+    /// change its columns (`UNLOGGED`, `WITH NO DATA`, ...); if it still doesn't
+    /// parse, the table or view it defines is returned with its position.
+    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> ParsedStatements {
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
-            Ok(statements) => return statements.into_iter().map(|s| (s, Origin::START)).collect(),
+            Ok(statements) => {
+                let statements = statements.into_iter().map(|s| (s, Origin::START)).collect();
+                return (statements, Vec::new());
+            }
             Err(error) => error,
         };
 
@@ -338,10 +361,11 @@ impl<'a> Analyzer<'a> {
             // Tokenizer error: nothing can be parsed reliably
             self.diagnostics
                 .push(parse_error_diagnostic(&error, sql, 0..sql.len(), lines));
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
 
         let mut statements = Vec::new();
+        let mut skipped = Vec::new();
         for range in ranges {
             let (line, column) = lines.line_column(range.start);
             let origin = Origin { line, column };
@@ -354,16 +378,40 @@ impl<'a> Analyzer<'a> {
                     SqlDialect::PostgreSQL | SqlDialect::SQLite => Err(error),
                 }
             });
-            match parsed {
-                Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
-                Err(error) => self
-                    .diagnostics
-                    .push(parse_error_diagnostic(&error, sql, range, lines)),
+            let error = match parsed {
+                Ok(parsed) => {
+                    statements.extend(parsed.into_iter().map(|s| (s, origin)));
+                    continue;
+                }
+                Err(error) => error,
+            };
+            let retried = mask_unsupported_clauses(self.dialect, text, false)
+                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok());
+            if let Some(parsed) = retried {
+                statements.extend(parsed.into_iter().map(|s| (s, origin)));
+                continue;
             }
+            if let Some((kind, name)) = unparsed_definition(self.dialect, text) {
+                let start = range.start + (text.len() - text.trim_start().len());
+                skipped.push((
+                    origin,
+                    SkippedDefinition {
+                        kind,
+                        name: Some(name),
+                        line: Some(lines.line_column(start).0),
+                    },
+                ));
+            }
+            self.diagnostics
+                .push(parse_error_diagnostic(&error, sql, range, lines));
         }
-        statements
+        (statements, skipped)
     }
 }
+
+/// Parsed statements and the table / view definitions that could not be parsed,
+/// each with the position where its text starts
+type ParsedStatements = (Vec<(Statement, Origin)>, Vec<(Origin, SkippedDefinition)>);
 
 /// `text` without a leading UTF-8 byte order mark (which editors on Windows and
 /// tools like SSMS write), and the byte length removed. Columns of the stripped
