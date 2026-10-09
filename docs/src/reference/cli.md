@@ -35,6 +35,9 @@ Options:
   -W, --warn <RULE>         Report a rule or category as warnings
   -D, --deny <RULE>         Report a rule or category as errors
   -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+      --templating <ENGINE> Query file templating: jinja (dbt models), none [default: jinja
+                            when dbt_project.yml is in the current or the config file's
+                            directory, else none]
   -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
       --max-warnings <N>    Fail (exit 1) when more than N warnings are reported

@@ -24,6 +24,10 @@ pub struct Config {
     #[serde(default)]
     pub format: Option<String>,
 
+    /// Query file templating ("jinja", "none")
+    #[serde(default)]
+    pub templating: Option<String>,
+
     #[serde(default)]
     pub disable: Vec<String>,
 

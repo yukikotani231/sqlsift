@@ -2918,3 +2918,118 @@ fn disable_file_directive_suppresses_parse_errors_and_everything() {
         .assert_code(0)
         .assert_stderr_contains("All 2 file(s) passed validation");
 }
+
+// ---------------------------------------------------------------------------
+// dbt / Jinja templating
+// ---------------------------------------------------------------------------
+
+/// The dbt-like project in `tests/fixtures/dbt`
+fn dbt_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/dbt")
+        .canonicalize()
+        .expect("dbt fixture exists")
+}
+
+const DBT_MODELS: [&str; 2] = [
+    "models/staging/stg_orders.sql",
+    "models/marts/customer_orders.sql",
+];
+
+#[test]
+fn dbt_project_in_current_directory_enables_jinja() {
+    let t = TempDir::new("dbt-cwd");
+    let dbt = dbt_fixture();
+    let mut args = vec!["check", "--schema", "schema.sql"];
+    args.extend(DBT_MODELS);
+    t.run_in(&dbt, &args)
+        .assert_code(0)
+        .assert_stderr_contains("All 2 file(s) passed validation");
+
+    // A typo in a real table's column is still reported at its original location
+    let run = t.run_in(
+        &dbt,
+        &[
+            "check",
+            "--schema",
+            "schema.sql",
+            "--format",
+            "json",
+            "models/marts/customer_typo.sql",
+        ],
+    );
+    run.assert_code(1);
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .clone();
+    assert_eq!(diagnostics.len(), 1, "{json:#}");
+    assert_eq!(diagnostics[0]["code"], "E0002");
+    assert_eq!(diagnostics[0]["span"]["line"], 3);
+    assert_eq!(diagnostics[0]["span"]["column"], 16);
+}
+
+#[test]
+fn templating_none_turns_dbt_detection_off() {
+    let t = TempDir::new("dbt-none");
+    let mut args = vec!["check", "--templating", "none", "--schema", "schema.sql"];
+    args.extend(DBT_MODELS);
+    let run = t.run_in(&dbt_fixture(), &args);
+    run.assert_code(1);
+    assert!(run.count_code("E1000") > 0, "{}", run.stderr);
+}
+
+#[test]
+fn templating_flag_and_config_key() {
+    let t = with_users_schema("jinja-config");
+    t.write(
+        "q.sql",
+        "{{ config(materialized='view') }}\nSELECT u.id, e.kind FROM users u JOIN {{ ref('events') }} e ON e.user_id = u.id\n",
+    );
+    // Without templating (and no dbt_project.yml) the template doesn't parse
+    let run = t.run(&["check", "-s", "schema.sql", "q.sql"]);
+    run.assert_code(1);
+    assert!(run.count_code("E1000") > 0, "{}", run.stderr);
+
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--templating",
+        "jinja",
+        "q.sql",
+    ])
+    .assert_code(0);
+
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\ntemplating = \"jinja\"\n",
+    );
+    t.run(&["check", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("unknown key");
+
+    t.run(&["check", "--templating", "mustache", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("Unknown templating: 'mustache'");
+}
+
+#[test]
+fn dbt_project_next_to_config_file_enables_jinja() {
+    let t = TempDir::new("dbt-config-dir");
+    t.write("project/schema.sql", USERS_SCHEMA);
+    t.write("project/sqlsift.toml", "schema = [\"schema.sql\"]\n");
+    t.write("project/dbt_project.yml", "name: demo\n");
+    t.write(
+        "project/models/m.sql",
+        "SELECT id FROM users WHERE id > {{ var('min_id') }}\n",
+    );
+    t.run(&[
+        "check",
+        "--config",
+        "project/sqlsift.toml",
+        "project/models/m.sql",
+    ])
+    .assert_code(0);
+}

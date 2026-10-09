@@ -12,6 +12,7 @@ files = ["queries/**/*.sql"]      # query files to check when none are given on 
 ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
 
 dialect = "postgresql"            # postgresql, mysql or sqlite
+templating = "jinja"              # jinja (dbt models) or none
 format = "human"                  # human, json, sarif or github
 max_warnings = 0                  # fail when more than this many warnings are reported
 
@@ -35,6 +36,7 @@ correctness = "error"
 | `files` | list of paths / globs | `[]` | Query files to check when none are given on the command line |
 | `ignore` | list of globs | `[]` | Query files to skip. `**` matches any number of directories; a pattern matching a directory skips everything below it. `--ignore` adds to this list |
 | `dialect` | string | `"postgresql"` | `postgresql`, `mysql` or `sqlite` |
+| `templating` | string | auto | `jinja` masks dbt / Jinja templates in query files, `none` turns that off. When unset, `jinja` is used if a `dbt_project.yml` is in the current directory or next to `sqlsift.toml`. See [dbt and Jinja templates](../guide/queries.md#dbt-and-jinja-templates) |
 | `format` | string | `"human"` | `human`, `json`, `sarif` or `github` |
 | `max_warnings` | integer | none | Fail when more than this many warnings are reported |
 | `disable` | list of rules | `[]` | Rules (codes or names) to turn off |
@@ -47,4 +49,4 @@ Relative paths and patterns in the file are resolved against the directory conta
 
 ## Validation
 
-Unknown keys produce a warning. Invalid `dialect` or `format` values, unknown rules or categories and invalid levels are errors (exit code `2`), with a suggestion when the name is close to a valid one.
+Unknown keys produce a warning. Invalid `dialect`, `templating` or `format` values, unknown rules or categories and invalid levels are errors (exit code `2`), with a suggestion when the name is close to a valid one.

@@ -71,6 +71,11 @@ pub enum Command {
         #[arg(short, long)]
         dialect: Option<String>,
 
+        /// Query file templating: jinja (dbt models), none [default: jinja when
+        /// dbt_project.yml is in the current or the config file's directory, else none]
+        #[arg(long, value_name = "ENGINE")]
+        templating: Option<String>,
+
         /// Output format
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,

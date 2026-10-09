@@ -27,6 +27,11 @@ schema = [
 # SQL dialect: "postgresql" (default), "mysql", or "sqlite"
 # dialect = "postgresql"
 
+# Query file templating: "jinja" (dbt models) or "none". When unset, Jinja
+# templates are masked automatically if a dbt_project.yml is in the current
+# directory or next to this file.
+# templating = "jinja"
+
 # Output format: "human", "json", "sarif", or "github" (GitHub Actions annotations)
 # format = "human"
 
