@@ -45,9 +45,22 @@ pub struct Config {
     /// diagnostics are not shown
     #[serde(default)]
     pub baseline: Option<String>,
+
+    /// Tags of the template literals checked as SQL in TypeScript and
+    /// JavaScript documents (default `["sql"]`)
+    #[serde(default)]
+    pub embedded_sql_tags: Option<Vec<String>>,
 }
 
 impl Config {
+    /// Template literal tags whose SQL is checked in TypeScript and JavaScript
+    /// documents
+    pub fn embedded_sql_tags(&self) -> Vec<String> {
+        self.embedded_sql_tags
+            .clone()
+            .unwrap_or_else(default_embedded_sql_tags)
+    }
+
     /// Rule levels from `[categories]`, `[rules]` and `disable`, with a message for
     /// each setting that names no rule or category or has an invalid level
     pub fn rule_config(&self) -> (RuleConfig, Vec<String>) {
@@ -101,4 +114,12 @@ impl Config {
         }
         None
     }
+}
+
+/// The default `embedded_sql_tags`
+pub fn default_embedded_sql_tags() -> Vec<String> {
+    sqlsift_core::embedded::DEFAULT_TAGS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }

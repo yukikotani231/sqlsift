@@ -2,6 +2,12 @@
 
 SQL static analysis extension powered by [sqlsift](https://github.com/yukikotani231/sqlsift). Validates SQL queries against schema definitions and shows diagnostics in real-time.
 
+## Checked files
+
+- SQL files (`sql` language)
+- dbt models: `jinja-sql` documents (set by the "dbt Power User" extension) and `.sql` files in the `jinja` language. Jinja is also masked in any SQL file inside a dbt project (a `dbt_project.yml` in one of its parent directories).
+- TypeScript and JavaScript files: the SQL in tagged template literals whose tag is in `embedded_sql_tags` in `sqlsift.toml` (default `["sql"]`). Files without such a template get no diagnostics. Turn this off with `sqlsift.embeddedSql.enable`.
+
 ## Prerequisites
 
 `sqlsift-lsp` binary must be available in your PATH.
@@ -50,6 +56,9 @@ schema = ["db/schema.sql"]
 # SQL dialect: "postgresql" (default), "mysql" or "sqlite"
 # dialect = "postgresql"
 
+# Template literal tags checked as SQL in TypeScript / JavaScript files
+# embedded_sql_tags = ["sql", "$queryRaw"]
+
 # Disable specific rules
 # disable = ["E0001"]
 
@@ -63,6 +72,7 @@ schema = ["db/schema.sql"]
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `sqlsift.serverPath` | `sqlsift-lsp` | Path to the sqlsift-lsp binary |
+| `sqlsift.embeddedSql.enable` | `true` | Check SQL in tagged template literals (`` sql`...` ``) of TypeScript and JavaScript files (reload the window after changing it) |
 
 ## Uninstall
 

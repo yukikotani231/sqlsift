@@ -1044,10 +1044,24 @@ impl<'a> Resolver<'a> {
                 [table, column] | [_, table, column] => self.column(Some(table), column),
                 _ => {}
             },
-            Expr::BinaryOp { left, op, right } => {
-                self.expr(left);
-                self.expr(right);
-                self.check_binary_op(left, op, right);
+            Expr::BinaryOp { .. } => {
+                // Binary operators are left-associative, so a long chain
+                // (`a = 1 OR a = 2 OR ...`) nests as deep as it is long: walk its
+                // left spine in a loop instead of recursing, in the same order
+                // (left operand, right operand, then the operator's check)
+                let mut chain = Vec::new();
+                let mut leftmost = expr;
+                while let Expr::BinaryOp { left, op, right } = leftmost {
+                    chain.push((&**left, op, &**right));
+                    leftmost = left;
+                }
+                self.expr(leftmost);
+                // The type of the left operand, passed up an arithmetic chain
+                let mut left_type = None;
+                for (left, op, right) in chain.into_iter().rev() {
+                    self.expr(right);
+                    left_type = self.check_binary_op(left, op, right, left_type);
+                }
             }
             Expr::UnaryOp { expr, .. }
             | Expr::Nested(expr)

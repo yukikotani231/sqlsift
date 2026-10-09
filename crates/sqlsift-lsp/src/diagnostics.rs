@@ -29,12 +29,21 @@ fn to_lsp_diagnostic(diag: &Diagnostic, text: &str) -> lsp_types::Diagnostic {
 fn span_to_range(span: Option<&Span>, text: &str) -> Range {
     match span {
         Some(s) if s.line > 0 => {
-            let line_text = text.lines().nth(s.line - 1).unwrap_or("");
+            let mut line_text = text.lines().nth(s.line - 1).unwrap_or("");
+            // Columns don't count a byte order mark at the start of the text (the
+            // analyzer ignores it), but the document's positions do
+            let mut bom = 0;
+            if s.line == 1 {
+                if let Some(rest) = line_text.strip_prefix('\u{feff}') {
+                    line_text = rest;
+                    bom = 1;
+                }
+            }
             let start_chars = s.column.saturating_sub(1);
             let line = (s.line - 1) as u32;
             Range {
-                start: Position::new(line, utf16_offset(line_text, start_chars)),
-                end: Position::new(line, utf16_offset(line_text, start_chars + s.length)),
+                start: Position::new(line, bom + utf16_offset(line_text, start_chars)),
+                end: Position::new(line, bom + utf16_offset(line_text, start_chars + s.length)),
             }
         }
         _ => Range::default(),
@@ -94,6 +103,17 @@ mod tests {
         let range = span_to_range(Some(&span), text);
         assert_eq!(range.start, Position::new(1, 14));
         assert_eq!(range.end, Position::new(1, 17));
+    }
+
+    #[test]
+    fn test_span_to_range_after_bom() {
+        // The analyzer's columns don't count a leading byte order mark
+        let text = "\u{feff}SELECT nme FROM users\nSELECT nme";
+        let range = span_to_range(Some(&Span::with_location(1, 8, 3)), text);
+        assert_eq!(range.start, Position::new(0, 8));
+        assert_eq!(range.end, Position::new(0, 11));
+        let range = span_to_range(Some(&Span::with_location(2, 8, 3)), text);
+        assert_eq!(range.start, Position::new(1, 7));
     }
 
     #[test]
