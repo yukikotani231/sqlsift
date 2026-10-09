@@ -4,21 +4,28 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
 
+use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
-use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
+use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::config::Config;
 
 pub struct ServerState {
     pub catalog: Catalog,
     pub dialect: SqlDialect,
+    /// Templating of query documents (`templating` in sqlsift.toml, or Jinja in a
+    /// dbt project)
+    pub templating: Templating,
     /// Rule levels from sqlsift.toml
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
     /// `ignore` patterns from sqlsift.toml: matching documents get no diagnostics
     pub ignore: IgnorePatterns,
+    /// `baseline` from sqlsift.toml and the directory its file names are relative to:
+    /// baselined diagnostics are not shown, as in `sqlsift check`
+    pub baseline: Option<(BaselineFilter, PathBuf)>,
     pub workspace_root: Option<PathBuf>,
     /// Problems found while loading sqlsift.toml, to be shown to the user
     pub config_warnings: Vec<String>,
@@ -29,10 +36,12 @@ impl ServerState {
         Self {
             catalog: Catalog::default(),
             dialect: SqlDialect::default(),
+            templating: Templating::None,
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             schema_files: Vec::new(),
             ignore: IgnorePatterns::default(),
+            baseline: None,
             workspace_root: None,
             config_warnings: Vec::new(),
         }
@@ -41,6 +50,7 @@ impl ServerState {
     /// Load configuration from sqlsift.toml and set up state
     pub fn load_config(&mut self, workspace_root: &Path) {
         self.workspace_root = Some(workspace_root.to_path_buf());
+        self.templating = dbt_templating(workspace_root);
 
         let Some((config_path, result)) = Config::find_from_root(workspace_root) else {
             return;
@@ -63,6 +73,23 @@ impl ServerState {
             }
         }
 
+        // Templating: explicit, or Jinja when dbt_project.yml is in the workspace
+        // root or next to sqlsift.toml
+        let config_dir = config_path.parent().unwrap_or(workspace_root);
+        match &config.templating {
+            Some(templating) => match templating.parse() {
+                Ok(t) => self.templating = t,
+                Err(e) => self
+                    .config_warnings
+                    .push(format!("{}: {}", config_path.display(), e)),
+            },
+            None => {
+                if self.templating == Templating::None {
+                    self.templating = dbt_templating(config_dir);
+                }
+            }
+        }
+
         // Rule levels (`disable`, `[rules]`, `[categories]`)
         let (rules, problems) = config.rule_config();
         self.rules = rules;
@@ -74,13 +101,29 @@ impl ServerState {
 
         // Resolve schema files and ignore patterns relative to the directory
         // containing sqlsift.toml
-        let config_dir = config_path.parent().unwrap_or(workspace_root);
         self.schema_files = resolve_schema_files(&config, config_dir);
         match IgnorePatterns::new(config_dir, &config.ignore) {
             Ok(ignore) => self.ignore = ignore,
             Err(e) => self
                 .config_warnings
                 .push(format!("{}: {}", config_path.display(), e)),
+        }
+
+        self.baseline = None;
+        if let Some(path) = &config.baseline {
+            let path = config_dir.join(path);
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read baseline {}: {}", path.display(), e))
+                .and_then(|json| {
+                    Baseline::from_json(&json).map_err(|e| format!("{}: {}", path.display(), e))
+                });
+            match loaded {
+                Ok(loaded) => {
+                    let dir = path.parent().unwrap_or(config_dir).to_path_buf();
+                    self.baseline = Some((BaselineFilter::new(&loaded), dir));
+                }
+                Err(e) => self.config_warnings.push(e),
+            }
         }
     }
 
@@ -116,9 +159,26 @@ impl ServerState {
 
     /// Analyze a SQL document and return diagnostics
     pub fn analyze_document(&self, text: &str) -> Vec<Diagnostic> {
-        let mut analyzer =
-            Analyzer::with_dialect(&self.catalog, self.dialect).with_rules(self.rules.clone());
+        let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
+            .with_rules(self.rules.clone())
+            .with_templating(self.templating);
         analyzer.analyze(text)
+    }
+
+    /// Diagnostics to show for the document at `uri`: none for ignored files
+    /// (`ignore` in sqlsift.toml), and without the baselined ones
+    pub fn document_diagnostics(&self, uri: &Url, text: &str) -> Vec<Diagnostic> {
+        if self.is_ignored(uri) {
+            return Vec::new();
+        }
+        let diagnostics = self.analyze_document(text);
+        match (&self.baseline, uri.to_file_path()) {
+            (Some((filter, dir)), Ok(path)) => {
+                let key = baseline::file_key(&path, dir);
+                filter.filter(&key, text, diagnostics).kept
+            }
+            _ => diagnostics,
+        }
     }
 
     /// Whether the document at `uri` matches an `ignore` pattern (only `file:`
@@ -259,6 +319,15 @@ impl ServerState {
     }
 }
 
+/// Jinja when `dir` holds a dbt project (`dbt_project.yml`), else no templating
+fn dbt_templating(dir: &Path) -> Templating {
+    if dir.join("dbt_project.yml").is_file() {
+        Templating::Jinja
+    } else {
+        Templating::None
+    }
+}
+
 /// Resolve schema file paths from config (handles glob patterns and schema_dir).
 /// Relative paths are resolved against `base_dir` (the config file's directory).
 fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
@@ -371,6 +440,48 @@ mod tests {
         let diagnostics =
             state.analyze_document("SELECT u.id, o.id, i.id FROM users u, orders o, items i");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_dbt_project_enables_jinja() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("sqlsift-lsp-dbt-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("schema.sql"), "CREATE TABLE users (id INT);").unwrap();
+        std::fs::write(root.join("sqlsift.toml"), "schema = [\"schema.sql\"]\n").unwrap();
+        let sql = "{{ config(materialized='view') }}\n\
+                   SELECT u.id, s.x FROM users u JOIN {{ ref('s') }} s ON s.id = u.id";
+
+        // Without dbt_project.yml the template is a parse error
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        state.rebuild_catalog();
+        assert_eq!(state.templating, Templating::None);
+        assert!(!state.analyze_document(sql).is_empty());
+
+        std::fs::write(root.join("dbt_project.yml"), "name: demo\n").unwrap();
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        state.rebuild_catalog();
+        assert_eq!(state.templating, Templating::Jinja);
+        let diagnostics = state.analyze_document(sql);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // An explicit setting wins
+        std::fs::write(
+            root.join("sqlsift.toml"),
+            "schema = [\"schema.sql\"]\ntemplating = \"none\"\n",
+        )
+        .unwrap();
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        assert_eq!(state.templating, Templating::None);
 
         let _ = std::fs::remove_dir_all(&root);
     }

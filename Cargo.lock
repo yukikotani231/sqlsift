@@ -956,6 +956,7 @@ dependencies = [
  "miette",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "sqlparser",
  "thiserror",
  "tracing",

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use sqlsift_core::rules::{
     find_category, find_rule, similar_category_name, similar_rule_name, RuleConfig, RuleLevel,
 };
+use sqlsift_core::Templating;
 
 /// Keys recognized in `sqlsift.toml`
 const KNOWN_KEYS: &[&str] = &[
@@ -21,6 +22,8 @@ const KNOWN_KEYS: &[&str] = &[
     "rules",
     "categories",
     "max_warnings",
+    "templating",
+    "baseline",
     "embedded_sql_tags",
 ];
 
@@ -44,6 +47,11 @@ pub struct Config {
     #[serde(default)]
     pub dialect: Option<String>,
 
+    /// Query file templating ("jinja", "none"); when unset, Jinja is used if a
+    /// `dbt_project.yml` is next to the config file or in the current directory
+    #[serde(default)]
+    pub templating: Option<String>,
+
     /// Output format (human, json, sarif, github)
     #[serde(default)]
     pub format: Option<String>,
@@ -51,6 +59,10 @@ pub struct Config {
     /// Fail the check when more than this many warnings are reported
     #[serde(default)]
     pub max_warnings: Option<usize>,
+
+    /// Baseline file of known diagnostics that are not reported
+    #[serde(default)]
+    pub baseline: Option<String>,
 
     /// Tags of the template literals checked as SQL in TypeScript and JavaScript
     /// files (default `["sql"]`); matched against the last identifier of the tag,
@@ -72,12 +84,16 @@ pub struct Config {
 
     /// Schema directory
     pub schema_dir: Option<String>,
+
+    /// Directory of the configuration file this was loaded from
+    #[serde(skip)]
+    pub base_dir: Option<PathBuf>,
 }
 
 impl Config {
     /// Load configuration from a TOML file.
     ///
-    /// Relative paths in `schema`, `files`, `ignore` and `schema_dir` are
+    /// Relative paths in `schema`, `files`, `ignore`, `schema_dir` and `baseline` are
     /// resolved against the directory containing the configuration file.
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
@@ -99,10 +115,12 @@ impl Config {
             .map_err(|e| miette::miette!("Failed to parse {}: {}", path.display(), e))?;
 
         let base = config_base_dir(path);
+        config.base_dir = Some(base.clone());
         let resolve = |p: &String| resolve_path(&base, p);
         config.schema = config.schema.iter().map(resolve).collect();
         config.files = config.files.iter().map(resolve).collect();
         config.schema_dir = config.schema_dir.as_ref().map(resolve);
+        config.baseline = config.baseline.as_ref().map(resolve);
         // Ignore patterns are matched later; the base directory is literal text
         for pattern in &config.ignore {
             glob::Pattern::new(pattern).map_err(|e| {
@@ -154,7 +172,9 @@ impl Config {
         ignore: &[String],
         format: Option<crate::args::OutputFormat>,
         dialect: Option<&str>,
+        templating: Option<&str>,
         max_warnings: Option<usize>,
+        baseline: Option<&Path>,
     ) -> Self {
         self.ignore.extend(ignore.iter().cloned());
 
@@ -179,11 +199,40 @@ impl Config {
             self.dialect = Some(dialect.to_string());
         }
 
+        if let Some(templating) = templating {
+            self.templating = Some(templating.to_string());
+        }
+
         if max_warnings.is_some() {
             self.max_warnings = max_warnings;
         }
 
+        if let Some(baseline) = baseline {
+            self.baseline = Some(baseline.display().to_string());
+        }
+
         self
+    }
+}
+
+impl Config {
+    /// The configured templating of query files. When unset, Jinja is used for dbt
+    /// projects: a `dbt_project.yml` in the current directory or in the directory
+    /// of the configuration file.
+    pub fn templating(&self) -> Result<Templating> {
+        if let Some(templating) = &self.templating {
+            return templating.parse().map_err(|e: String| miette::miette!(e));
+        }
+        let dirs = [Some(Path::new("")), self.base_dir.as_deref()];
+        let dbt = dirs
+            .into_iter()
+            .flatten()
+            .any(|dir| dir.join("dbt_project.yml").is_file());
+        Ok(if dbt {
+            Templating::Jinja
+        } else {
+            Templating::None
+        })
     }
 }
 

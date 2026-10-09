@@ -906,3 +906,62 @@ fn ranges_use_utf16_code_units() {
         json!({"line": 0, "character": 17})
     );
 }
+
+// ---------------------------------------------------------------------------
+// Baseline (#97)
+// ---------------------------------------------------------------------------
+
+/// A baseline file with one E0002 entry for `file`, in the statement `statement`
+fn baseline_json(file: &str, statement: &str) -> String {
+    json!({
+        "version": 1,
+        "entries": [{
+            "file": file,
+            "code": "E0002",
+            "statement_hash": sqlsift_core::baseline::statement_hash(statement),
+            "occurrence": 0,
+            "line": 1,
+            "message": "Column 'nme' not found in table 'users'"
+        }]
+    })
+    .to_string()
+}
+
+#[test]
+fn baselined_diagnostics_are_hidden() {
+    let t = workspace("baseline", "baseline = \"ci/baseline.json\"\n");
+    t.write(
+        "ci/baseline.json",
+        &baseline_json("../sql/q.sql", "SELECT nme FROM users;"),
+    );
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("sql/q.sql");
+    // The known problem moved down a line; the new one is still shown
+    lsp.open(
+        &uri,
+        "SELECT id FROM users;\nSELECT nme FROM users;\nSELECT bad FROM users;\n",
+    );
+    let diagnostics = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diagnostics), vec!["E0002"]);
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'bad'"),
+        "{diagnostics:?}"
+    );
+    // Another file with the same statement isn't covered
+    let other = t.uri("sql/other.sql");
+    lsp.open(&other, "SELECT nme FROM users;");
+    assert_eq!(codes(&lsp.diagnostics_for(&other)), vec!["E0002"]);
+}
+
+#[test]
+fn missing_baseline_file_is_reported() {
+    let t = workspace("baseline-missing", "baseline = \"nope.json\"\n");
+    let mut lsp = Lsp::spawn();
+    lsp.initialize(Some(&t.root_uri()));
+    let msg = wait_for_warning(&mut lsp, "nope.json");
+    assert!(msg.contains("Failed to read baseline"), "{msg}");
+}

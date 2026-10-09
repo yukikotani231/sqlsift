@@ -33,12 +33,21 @@ schema = [
 # SQL dialect: "postgresql" (default), "mysql", or "sqlite"
 # dialect = "postgresql"
 
+# Query file templating: "jinja" (dbt models) or "none". When unset, Jinja
+# templates are masked automatically if a dbt_project.yml is in the current
+# directory or next to this file.
+# templating = "jinja"
+
 # Output format: "human", "json", "sarif", or "github" (GitHub Actions annotations)
 # format = "human"
 
 # Fail the check (exit 1) when more than this many warnings are reported.
 # Use 0 to fail on any warning without turning warnings into errors.
 # max_warnings = 0
+
+# Baseline of known diagnostics, which are not reported (by `sqlsift check` or
+# the language server). Create or refresh it with `sqlsift check --write-baseline`.
+# baseline = "sqlsift-baseline.json"
 
 # Disable specific rules (codes or names)
 # disable = ["E0001", "column-not-found"]

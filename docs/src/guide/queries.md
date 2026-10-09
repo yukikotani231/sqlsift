@@ -63,6 +63,31 @@ With the PostgreSQL dialect, files written for `psql` are accepted:
 - `\g`, `\gset` and `\gx` end a query like `;`.
 - `:var` and `:'var'` interpolations are treated as untyped placeholders, and `:"var"` as an identifier whose name sqlsift can't know, so no "not found" diagnostic is reported for it.
 
+## dbt and Jinja templates
+
+dbt models are Jinja templates, not plain SQL. With `--templating jinja` (or `templating = "jinja"` in `sqlsift.toml`) sqlsift masks the template syntax before checking a query file. This is turned on automatically when a `dbt_project.yml` is in the current directory or in the directory of `sqlsift.toml`; set `templating = "none"` to turn it off.
+
+```sql
+{{ config(materialized='incremental') }}
+
+select c.id, c.frist_name, o.amount       -- E0002: 'frist_name' is checked against customers
+from customers c
+join {{ ref('stg_orders') }} o on o.customer_id = c.id   -- o.amount: not reported
+{% if is_incremental() %}
+where c.id > (select max(customer_id) from {{ this }})
+{% endif %}
+```
+
+- `{# comments #}` and `{% statements %}` are skipped. The SQL inside `{% if %}` and `{% for %}` blocks is checked once, as written.
+- `{{ ref(...) }}`, `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema to get them checked.
+- `{{ ... }}` as part of a name (`total_{{ c }}`, `as {{ alias }}`) is a name sqlsift doesn't know, and at the start of a statement (`{{ config(...) }}`) it is skipped.
+- Any other `{{ ... }}` is an untyped value, like a bind parameter: it is never a type mismatch.
+- Everything else is checked as usual, and diagnostics point at the original file.
+
+Macros that expand to whole clauses or statements can't be followed, and both branches of an `{% if %} ... {% else %}` are kept, which may not be valid SQL. Use `ignore` or `-- sqlsift:disable-file` for such files.
+
+sqlsift supports the PostgreSQL, MySQL and SQLite dialects only, so this helps dbt projects on Postgres (or a Postgres-compatible warehouse such as Redshift, as far as its SQL is Postgres-compatible), MySQL or SQLite. Projects on Snowflake, BigQuery or Databricks won't benefit until those dialects are supported.
+
 ## sqlc query files
 
 [sqlc](https://sqlc.dev) query files are plain SQL with a `-- name:` comment before each query, so they can be checked as they are. Diagnostics name the query they are in:

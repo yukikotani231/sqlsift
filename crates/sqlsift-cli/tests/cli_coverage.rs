@@ -2920,6 +2920,373 @@ fn disable_file_directive_suppresses_parse_errors_and_everything() {
 }
 
 // ---------------------------------------------------------------------------
+// Baseline (#97)
+// ---------------------------------------------------------------------------
+
+/// Temp dir with a query file that has two errors (E0002 and E0001)
+fn with_two_errors(prefix: &str) -> TempDir {
+    let t = with_users_schema(prefix);
+    t.write("q.sql", "SELECT nme FROM users;\nSELECT id FROM userz;\n");
+    t
+}
+
+fn read_baseline(t: &TempDir, rel: &str) -> Value {
+    let text = fs::read_to_string(t.path().join(rel)).expect("baseline file written");
+    serde_json::from_str(&text).expect("baseline is JSON")
+}
+
+#[test]
+fn write_baseline_records_every_diagnostic_and_exits_zero() {
+    let t = with_two_errors("bl-write");
+    t.write("w.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--write-baseline",
+        "q.sql",
+        "w.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("Wrote 3 baseline entries for 2 file(s) to sqlsift-baseline.json")
+    .assert_stderr_contains("--baseline sqlsift-baseline.json");
+    let baseline = read_baseline(&t, "sqlsift-baseline.json");
+    assert_eq!(baseline["version"], 1);
+    let entries = baseline["entries"].as_array().unwrap();
+    // Warnings are recorded too
+    let summary: Vec<(String, String, u64)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["file"].as_str().unwrap().to_string(),
+                e["code"].as_str().unwrap().to_string(),
+                e["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("q.sql".to_string(), "E0002".to_string(), 1),
+            ("q.sql".to_string(), "E0001".to_string(), 2),
+            ("w.sql".to_string(), "E0002".to_string(), 1),
+        ]
+    );
+    assert!(entries[0]["message"].as_str().unwrap().contains("nme"));
+    assert_eq!(entries[0]["statement_hash"].as_str().unwrap().len(), 16);
+}
+
+#[test]
+fn baselined_diagnostics_are_not_reported() {
+    let t = with_two_errors("bl-check");
+    t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
+        .assert_code(0);
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("All 1 file(s) passed validation")
+    .assert_stderr_contains("2 known diagnostic(s) hidden by the baseline")
+    .assert_stderr_lacks("error[");
+}
+
+#[test]
+fn baseline_survives_lines_added_above_and_reports_new_problems() {
+    let t = with_two_errors("bl-shift");
+    t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
+        .assert_code(0);
+    t.write(
+        "q.sql",
+        "-- a new comment\nSELECT id FROM users;\n\nSELECT nme\n  FROM users;\nSELECT id FROM userz;\nSELECT bad FROM users;\n",
+    );
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "-f",
+        "json",
+        "q.sql",
+    ]);
+    run.assert_code(1)
+        .assert_stderr_contains("Found 1 error(s), 0 warning(s) in 1 file(s)")
+        .assert_stderr_contains("2 known diagnostic(s) hidden by the baseline");
+    let json = run.json();
+    assert_eq!(diag_codes(&json), ["ColumnNotFound"]);
+    assert!(run.stdout.contains("bad"), "{}", run.stdout);
+}
+
+#[test]
+fn fixed_baseline_entries_are_a_note_not_a_failure() {
+    let t = with_two_errors("bl-stale");
+    t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
+        .assert_code(0);
+    t.write("q.sql", "SELECT name FROM users;\nSELECT id FROM userz;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains(
+        "Note: 1 baseline entry no longer occurs; re-run with --write-baseline to remove it",
+    );
+}
+
+#[test]
+fn baseline_entries_of_unchecked_files_are_not_stale() {
+    let t = with_two_errors("bl-subset");
+    t.write("p.sql", "SELECT x FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--write-baseline",
+        "q.sql",
+        "p.sql",
+    ])
+    .assert_code(0);
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "p.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_lacks("no longer occur");
+}
+
+#[test]
+fn baseline_from_config_works_from_a_subdirectory() {
+    let t = with_two_errors("bl-config");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"sql/*.sql\"]\nbaseline = \"ci/baseline.json\"\n",
+    );
+    t.write("sql/q.sql", "SELECT nme FROM users;\n");
+    t.mkdir("ci");
+    t.run(&["check", "--write-baseline"])
+        .assert_code(0)
+        .assert_stderr_contains("Wrote 1 baseline entry for 1 file(s)")
+        .assert_stderr_lacks("--baseline");
+    let baseline = read_baseline(&t, "ci/baseline.json");
+    assert_eq!(baseline["entries"][0]["file"], "../sql/q.sql");
+    // Same file names whatever the working directory
+    t.run_in(&t.path().join("sql"), &["check", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline");
+    t.run(&["check"]).assert_code(0);
+}
+
+#[test]
+fn missing_baseline_file_exits_two() {
+    let t = with_two_errors("bl-missing");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "nope.json",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("Baseline file not found: nope.json")
+    .assert_stderr_contains("--write-baseline");
+}
+
+#[test]
+fn invalid_baseline_file_exits_two() {
+    let t = with_two_errors("bl-invalid");
+    t.write("b.json", "{\"version\": 7, \"entries\": []}");
+    t.run(&["check", "-s", "schema.sql", "--baseline", "b.json", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("unsupported baseline version 7");
+}
+
+#[test]
+fn baselined_warnings_do_not_count_toward_max_warnings() {
+    let t = two_warnings("bl-maxw");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--write-baseline",
+        "q.sql",
+    ])
+    .assert_code(0);
+    t.write(
+        "q.sql",
+        "SELECT a FROM users;\nSELECT b FROM users;\nSELECT c FROM users;\n",
+    );
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--max-warnings",
+        "1",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("Found 0 error(s), 1 warning(s) in 1 file(s)");
+}
+
+#[test]
+fn baseline_matches_stdin_by_stdin_filename() {
+    let t = with_users_schema("bl-stdin");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
+        .assert_code(0);
+    t.run_stdin(
+        &[
+            "check",
+            "-s",
+            "schema.sql",
+            "--baseline",
+            "sqlsift-baseline.json",
+            "--stdin-filename",
+            "q.sql",
+            "-",
+        ],
+        "SELECT nme FROM users;\n",
+    )
+    .assert_code(0);
+}
+
+// ---------------------------------------------------------------------------
+// dbt / Jinja templating
+// ---------------------------------------------------------------------------
+
+/// The dbt-like project in `tests/fixtures/dbt`
+fn dbt_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/dbt")
+        .canonicalize()
+        .expect("dbt fixture exists")
+}
+
+const DBT_MODELS: [&str; 2] = [
+    "models/staging/stg_orders.sql",
+    "models/marts/customer_orders.sql",
+];
+
+#[test]
+fn dbt_project_in_current_directory_enables_jinja() {
+    let t = TempDir::new("dbt-cwd");
+    let dbt = dbt_fixture();
+    let mut args = vec!["check", "--schema", "schema.sql"];
+    args.extend(DBT_MODELS);
+    t.run_in(&dbt, &args)
+        .assert_code(0)
+        .assert_stderr_contains("All 2 file(s) passed validation");
+
+    // A typo in a real table's column is still reported at its original location
+    let run = t.run_in(
+        &dbt,
+        &[
+            "check",
+            "--schema",
+            "schema.sql",
+            "--format",
+            "json",
+            "models/marts/customer_typo.sql",
+        ],
+    );
+    run.assert_code(1);
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .clone();
+    assert_eq!(diagnostics.len(), 1, "{json:#}");
+    assert_eq!(diagnostics[0]["code"], "E0002");
+    assert_eq!(diagnostics[0]["span"]["line"], 3);
+    assert_eq!(diagnostics[0]["span"]["column"], 16);
+}
+
+#[test]
+fn templating_none_turns_dbt_detection_off() {
+    let t = TempDir::new("dbt-none");
+    let mut args = vec!["check", "--templating", "none", "--schema", "schema.sql"];
+    args.extend(DBT_MODELS);
+    let run = t.run_in(&dbt_fixture(), &args);
+    run.assert_code(1);
+    assert!(run.count_code("E1000") > 0, "{}", run.stderr);
+}
+
+#[test]
+fn templating_flag_and_config_key() {
+    let t = with_users_schema("jinja-config");
+    t.write(
+        "q.sql",
+        "{{ config(materialized='view') }}\nSELECT u.id, e.kind FROM users u JOIN {{ ref('events') }} e ON e.user_id = u.id\n",
+    );
+    // Without templating (and no dbt_project.yml) the template doesn't parse
+    let run = t.run(&["check", "-s", "schema.sql", "q.sql"]);
+    run.assert_code(1);
+    assert!(run.count_code("E1000") > 0, "{}", run.stderr);
+
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--templating",
+        "jinja",
+        "q.sql",
+    ])
+    .assert_code(0);
+
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\ntemplating = \"jinja\"\n",
+    );
+    t.run(&["check", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("unknown key");
+
+    t.run(&["check", "--templating", "mustache", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("Unknown templating: 'mustache'");
+}
+
+#[test]
+fn dbt_project_next_to_config_file_enables_jinja() {
+    let t = TempDir::new("dbt-config-dir");
+    t.write("project/schema.sql", USERS_SCHEMA);
+    t.write("project/sqlsift.toml", "schema = [\"schema.sql\"]\n");
+    t.write("project/dbt_project.yml", "name: demo\n");
+    t.write(
+        "project/models/m.sql",
+        "SELECT id FROM users WHERE id > {{ var('min_id') }}\n",
+    );
+    t.run(&[
+        "check",
+        "--config",
+        "project/sqlsift.toml",
+        "project/models/m.sql",
+    ])
+    .assert_code(0);
+}
+
+// ---------------------------------------------------------------------------
 // SQL embedded in application code (tests/fixtures/embedded)
 // ---------------------------------------------------------------------------
 

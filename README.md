@@ -140,6 +140,7 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+| **dbt** (Postgres, MySQL, SQLite) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`) |
 
 Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
 
@@ -164,7 +165,7 @@ jobs:
           files: queries/**/*.sql
 ```
 
-Errors are shown as annotations on the pull request diff. The [CI guide](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html) covers the action's inputs, re-checking every query when the schema changes, GitHub Code Scanning (SARIF), `--format github` / `json` for other setups, and `--max-warnings` for rolling out a rule gradually. There is also a [pre-commit recipe](https://yukikotani231.github.io/sqlsift/docs/integrations/pre-commit.html).
+Errors are shown as annotations on the pull request diff. The [CI guide](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html) covers the action's inputs, re-checking every query when the schema changes, GitHub Code Scanning (SARIF), `--format github` / `json` for other setups, `--max-warnings` for rolling out a rule gradually, and a baseline for adopting sqlsift on an existing codebase (`sqlsift check --write-baseline` records the current diagnostics in `sqlsift-baseline.json`; with `baseline = "sqlsift-baseline.json"` in `sqlsift.toml` only new ones are reported). There is also a [pre-commit recipe](https://yukikotani231.github.io/sqlsift/docs/integrations/pre-commit.html).
 
 ## Diagnostic Rules
 
@@ -179,13 +180,13 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0007](https://yukikotani231.github.io/sqlsift/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
 | [E0008](https://yukikotani231.github.io/sqlsift/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
 
-Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments. See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
+Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 
 ## Documentation
 
 The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
-- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL, psql scripts, sqlc query files and SQL in TypeScript tagged templates)
+- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc query files and SQL in TypeScript tagged templates)
 - [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
 - [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
 - [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)
@@ -202,6 +203,7 @@ The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 - [x] Subquery/CTE/VIEW column type inference
 
 - [x] Per-rule and per-category levels (`off` / `warn` / `error`)
+- [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
 - [x] SQL embedded in application code (sqlc query names, TypeScript tagged templates)
 
 #### Planned
