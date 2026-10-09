@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
-use sqlsift_core::schema::SchemaBuilder;
+use sqlsift_core::schema::{is_rollback_migration, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
 use crate::args::{Args, Command, OutputFormat};
@@ -226,7 +226,11 @@ fn run(args: Args) -> Result<bool> {
                 if !Path::new(dir).is_dir() {
                     miette::bail!("Schema directory not found: {}", dir);
                 }
-                let matches = expand_glob(&format!("{}/**/*.sql", dir))?;
+                // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
+                let matches: Vec<PathBuf> = expand_glob(&format!("{}/**/*.sql", dir))?
+                    .into_iter()
+                    .filter(|path| !is_rollback_migration(path))
+                    .collect();
                 if matches.is_empty() {
                     miette::bail!("No .sql files found in schema directory {}", dir);
                 }
