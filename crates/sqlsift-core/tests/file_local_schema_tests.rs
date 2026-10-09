@@ -371,3 +371,119 @@ fn set_search_path_is_followed() {
     );
     assert_eq!(analyze("SELECT dau FROM daily_active").len(), 1);
 }
+
+// Issue #124: E0001 help mentions when the table was dropped earlier in the file
+
+#[test]
+fn dropped_table_help_mentions_line_of_drop() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+SELECT id FROM tmp_ev;
+DROP TABLE tmp_ev;
+SELECT id FROM tmp_ev;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(d.span.map(|s| s.line), Some(4));
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'tmp_ev' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn dropped_table_help_three_statements_line_3() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+
+DROP TABLE tmp_ev;
+
+SELECT id FROM tmp_ev;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(d.span.map(|s| s.line), Some(5));
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'tmp_ev' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn dropped_table_help_multiline_drop() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+
+DROP TABLE
+    tmp_ev;
+
+SELECT id FROM tmp_ev;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'tmp_ev' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn table_never_present_preserves_standard_help() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+SELECT id FROM tmp_ev;
+DROP TABLE tmp_ev;
+SELECT id FROM missing_table;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(d.span.map(|s| s.line), Some(4));
+    let help = d.help.as_deref().unwrap();
+    assert!(
+        !help.contains("was dropped at line"),
+        "Expected standard help, got: {help}"
+    );
+    assert_eq!(
+        help,
+        "Check that the table exists in your schema definition; run `sqlsift schema <schema files>` to list the tables that were loaded"
+    );
+}
+
+#[test]
+fn dropped_view_help_mentions_line_of_drop() {
+    let sql = "CREATE VIEW tmp_v AS SELECT customer_id FROM payment;
+SELECT customer_id FROM tmp_v;
+DROP VIEW tmp_v;
+SELECT customer_id FROM tmp_v;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(d.span.map(|s| s.line), Some(4));
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'tmp_v' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn dropped_table_help_case_insensitive() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+DROP TABLE TMP_EV;
+SELECT id FROM tmp_ev;";
+    let diagnostics = analyze(sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TableNotFound]);
+    let d = &diagnostics[0];
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'tmp_ev' was dropped at line 2 of this file")
+    );
+}
+
+#[test]
+fn dropped_and_recreated_table_succeeds() {
+    let sql = "CREATE TEMP TABLE tmp_ev (id INTEGER);
+DROP TABLE tmp_ev;
+CREATE TEMP TABLE tmp_ev (id INTEGER);
+SELECT id FROM tmp_ev;";
+    let diagnostics = analyze(sql);
+    assert!(
+        diagnostics.is_empty(),
+        "Expected no diagnostics, got: {diagnostics:#?}"
+    );
+}

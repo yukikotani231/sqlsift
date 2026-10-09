@@ -7,7 +7,7 @@ mod type_check;
 
 use std::ops::Range;
 
-use sqlparser::ast::Statement;
+use sqlparser::ast::{ObjectType, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -250,6 +250,7 @@ impl<'a> Analyzer<'a> {
         // statements, applied to a copy of the catalog made on the first such
         // statement, so they are visible to the later statements of this file only
         let mut file_schema: Option<SchemaBuilder> = None;
+        let mut dropped_tables: Vec<(String, usize)> = Vec::new();
 
         // Analyze each statement
         for (stmt, origin) in &statements {
@@ -280,6 +281,19 @@ impl<'a> Analyzer<'a> {
                 if let Some(span) = diagnostic.span.as_mut() {
                     origin.shift(span);
                 }
+                if diagnostic.kind == DiagnosticKind::TableNotFound {
+                    if let Some(name) = extract_table_name(&diagnostic.message) {
+                        if let Some((_, drop_line)) = dropped_tables
+                            .iter()
+                            .rev()
+                            .find(|(dropped, _)| table_names_match(dropped, name))
+                        {
+                            diagnostic.help = Some(format!(
+                                "'{name}' was dropped at line {drop_line} of this file"
+                            ));
+                        }
+                    }
+                }
                 self.diagnostics.push(diagnostic);
             }
 
@@ -289,6 +303,26 @@ impl<'a> Analyzer<'a> {
                         SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
                     })
                     .apply_statement(stmt);
+            }
+
+            if let Statement::Drop {
+                object_type: ObjectType::Table | ObjectType::View,
+                names,
+                ..
+            } = stmt
+            {
+                let drop_line = statement_drop_line(stmt, *origin, sql, &lines);
+                for name in names {
+                    let raw = name.to_string();
+                    let qualified = self.catalog.qualified_name(name);
+                    dropped_tables.push((raw, drop_line));
+                    if qualified.to_string() != name.to_string() {
+                        dropped_tables.push((qualified.to_string(), drop_line));
+                    }
+                    if qualified.name != name.to_string() {
+                        dropped_tables.push((qualified.name, drop_line));
+                    }
+                }
             }
         }
 
@@ -622,4 +656,54 @@ pub(crate) fn query_output_columns(
             .map(|c| (c.name, c.ty.to_sql_type()))
             .collect(),
     )
+}
+
+/// Extract the table name from a TableNotFound diagnostic message
+fn extract_table_name(message: &str) -> Option<&str> {
+    let rest = message
+        .strip_prefix("Table '")
+        .or_else(|| message.strip_prefix("Table or alias '"))?;
+    let (name, _) = rest.split_once('\'')?;
+    Some(name)
+}
+
+/// Whether two table names match, ignoring case and schema qualification if one is unqualified
+fn table_names_match(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    let a_parts: Vec<&str> = a.split('.').collect();
+    let b_parts: Vec<&str> = b.split('.').collect();
+    match (a_parts.as_slice(), b_parts.as_slice()) {
+        ([table_a], [_, table_b]) | ([_, table_a], [table_b]) => {
+            table_a.eq_ignore_ascii_case(table_b)
+        }
+        _ => false,
+    }
+}
+
+/// The 1-indexed line where a DROP statement began
+fn statement_drop_line(stmt: &Statement, origin: Origin, sql: &str, lines: &LineIndex) -> usize {
+    if origin.line > 1 {
+        return origin.line;
+    }
+    if let Statement::Drop { names, .. } = stmt {
+        if let Some(id) = names.first().and_then(|n| n.0.first()) {
+            let ident_line = id.span.start.line as usize;
+            if ident_line > 0 {
+                let offset = lines.byte_offset(id.span.start.line, id.span.start.column);
+                let before = &sql[..offset];
+                for (i, _) in before.char_indices().rev() {
+                    if before[i..].to_ascii_uppercase().starts_with("DROP") {
+                        let prev_char = before[..i].chars().next_back();
+                        if prev_char.map_or(true, |c| !c.is_alphanumeric() && c != '_') {
+                            return lines.line_column(i).0;
+                        }
+                    }
+                }
+                return ident_line;
+            }
+        }
+    }
+    origin.line
 }
