@@ -53,12 +53,30 @@ The `publish-vscode.yml` workflow builds platform-specific VSIX files and upload
 
 1. Create a publisher on [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage)
    - Publisher ID: `sqlsift`
-2. Create a Personal Access Token (PAT) on [Azure DevOps](https://dev.azure.com/):
-   - User Settings > Personal Access Tokens > New Token
-   - Organization: "All accessible organizations"
-   - Scopes: "Marketplace" > "Manage"
-3. Add `VSCE_PAT` secret to GitHub repository Settings > Secrets and variables > Actions
-4. Add repository variable `PUBLISH_VSCODE` = `true` in Settings > Secrets and variables > Actions > Variables
+2. The workflow signs in to the Marketplace with a Microsoft Entra ID app over GitHub OIDC
+   (`vsce publish --azure-credential`), so no token is stored and nothing expires. Global
+   Azure DevOps PATs (the old `VSCE_PAT`) are retired on 2026-12-01.
+   1. In the [Azure portal](https://portal.azure.com/), Microsoft Entra ID > App registrations >
+      New registration (single tenant). No Azure subscription is needed.
+   2. In the app, Certificates & secrets > Federated credentials > Add credential:
+      - Scenario: "GitHub Actions deploying Azure resources"
+      - Organization: `yukikotani231`, Repository: `sqlsift`
+      - Entity type: Environment, name: `vscode-marketplace`
+   3. In GitHub, Settings > Environments > `vscode-marketplace`, add the variables
+      `AZURE_CLIENT_ID` (the app's Application (client) ID) and `AZURE_TENANT_ID`
+      (Directory (tenant) ID). They are identifiers, not secrets.
+   4. Run "Publish VS Code Extension" manually with **identity** checked. The
+      "Show Marketplace identity" step prints the `id` the Marketplace knows the app by
+      (it can only be read while signed in as the app); "Verify publish rights" fails
+      until the next step is done.
+   5. On the [publisher page](https://marketplace.visualstudio.com/manage/publishers/sqlsift),
+      Members > Add, enter that `id` and give it the **Contributor** role. Run identity
+      mode again: "Verify publish rights" should pass.
+3. Add repository variable `PUBLISH_VSCODE` = `true` in Settings > Secrets and variables > Actions > Variables
+
+If the app signs in but publishing fails with `InvalidAccessException`, use a user-assigned
+managed identity (needs an Azure subscription) instead of the app registration; the steps
+are the same.
 
 ## Post-publish
 
