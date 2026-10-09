@@ -2994,3 +2994,65 @@ fn sqlc_query_names_in_sarif_output() {
         8
     );
 }
+
+#[test]
+fn typescript_tagged_templates_are_checked() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.ts"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.ts:16:28")
+        .assert_stderr_contains(
+            "16 |   return db.sql`SELECT id, titel FROM posts WHERE author_id = ${authorId} LIMIT ${limit}`;",
+        )
+        .assert_stderr_contains("queries.ts:31:10")
+        .assert_stderr_contains("Found 2 error(s)")
+        .assert_stderr_lacks("queries.ts:35");
+}
+
+#[test]
+fn typescript_and_sql_files_are_matched_by_globs() {
+    check_embedded_fixture(&["-f", "json", "tests/fixtures/embedded/*"])
+        .assert_code(1)
+        .assert_stdout_contains("queries.sql")
+        .assert_stdout_contains("queries.ts");
+}
+
+#[test]
+fn embedded_sql_tags_config_selects_the_tags() {
+    let t = TempDir::new("embedded-tags");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nembedded_sql_tags = [\"$queryRaw\"]\n",
+    );
+    t.write(
+        "src/db.ts",
+        "const a = sql`SELECT nme FROM users`;\nconst b = prisma.$queryRaw<User[]>`SELECT nme FROM users WHERE id = ${id}`;\n",
+    );
+    let run = t.run(&["check", "-f", "json", "src/db.ts"]);
+    run.assert_code(1).assert_stderr_lacks("unknown key");
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["line"], 2);
+    assert_eq!(diagnostics[0]["column"], 43);
+    // The byte offset points into the TypeScript file
+    assert_eq!(diagnostics[0]["span"]["offset"], 38 + 42);
+}
+
+#[test]
+fn stdin_filename_extension_selects_typescript() {
+    let t = with_users_schema("embedded-stdin");
+    let source = "export const q = sql`SELECT nme FROM users`;\n";
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "--stdin-filename", "q.ts", "-"],
+        source,
+    )
+    .assert_code(1)
+    .assert_stderr_contains("q.ts:1:29");
+    // Without a TypeScript name, stdin is SQL
+    t.run_stdin(&["check", "-s", "schema.sql", "-"], source)
+        .assert_code(1)
+        .assert_stderr_contains("E1000");
+}

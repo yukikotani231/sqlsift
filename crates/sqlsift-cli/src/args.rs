@@ -27,7 +27,7 @@ pub struct Args {
 pub enum Command {
     /// Check SQL files against schema definitions
     Check {
-        /// SQL files to check (supports glob patterns; `-` reads a query from stdin)
+        /// SQL, TypeScript or JavaScript files to check (supports glob patterns; `-` reads a query from stdin)
         files: Vec<PathBuf>,
 
         /// File name to report for the query read from stdin (`-`)

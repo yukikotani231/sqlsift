@@ -84,6 +84,35 @@ error[E0002]: Column 'titel' not found in table 'posts'
 
 A statement belongs to the last `-- name: <Name> :<command>` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
 
+## SQL in TypeScript and JavaScript
+
+Files ending in `.ts`, `.tsx`, `.js`, `.jsx`, `.mts` or `.cts` are checked for SQL in tagged template literals, as used by postgres.js, Slonik, `@vercel/postgres`, Prisma and others:
+
+```ts
+const posts = await sql`
+  SELECT id, titel FROM posts WHERE author_id = ${authorId}
+`;
+```
+
+```bash
+sqlsift check -s schema.sql 'src/**/*.ts'
+```
+
+Diagnostics point at the query's line and column in the source file. Which templates are SQL is decided by their tag: `embedded_sql_tags` in `sqlsift.toml` lists the tags (default `["sql"]`), and a tag matches the last identifier of the tag expression, so `"sql"` also matches `db.sql` and `Prisma.sql`, and `"$queryRaw"` matches `prisma.$queryRaw<User[]>`:
+
+```toml
+embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]
+```
+
+Each template is checked as one statement:
+
+- `${expr}` is an untyped placeholder, like `$1` (`?` for MySQL and SQLite), or a parenthesized list after `IN`.
+- `${expr}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE` or `TABLE`) is a name sqlsift can't know, so no "not found" diagnostic is reported for it, as for psql's `:"var"`.
+- Templates inside another SQL template's `${...}` are taken as query fragments and not checked on their own. A tag that is used for fragments (e.g. `sql` for `` sql`AND published` ``) reports them as parse errors; give fragments a different tag, or skip the file with `ignore`.
+- SQL built by string concatenation, and untagged templates, are not checked.
+
+`--stdin-filename` with a TypeScript or JavaScript extension checks stdin the same way. Inline `-- sqlsift:disable` comments work inside the template.
+
 ## Exit codes
 
 | Code | Meaning |

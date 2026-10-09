@@ -8,6 +8,7 @@
 
 pub mod analyzer;
 pub mod dialect;
+pub mod embedded;
 pub mod error;
 pub mod ignore;
 mod psql;

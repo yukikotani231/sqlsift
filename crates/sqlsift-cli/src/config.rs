@@ -21,6 +21,7 @@ const KNOWN_KEYS: &[&str] = &[
     "rules",
     "categories",
     "max_warnings",
+    "embedded_sql_tags",
 ];
 
 /// Configuration for sqlsift
@@ -50,6 +51,12 @@ pub struct Config {
     /// Fail the check when more than this many warnings are reported
     #[serde(default)]
     pub max_warnings: Option<usize>,
+
+    /// Tags of the template literals checked as SQL in TypeScript and JavaScript
+    /// files (default `["sql"]`); matched against the last identifier of the tag,
+    /// so `"sql"` also matches `db.sql` and `"$queryRaw"` matches `prisma.$queryRaw`
+    #[serde(default)]
+    pub embedded_sql_tags: Option<Vec<String>>,
 
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
@@ -189,6 +196,16 @@ pub struct RuleFlags<'a> {
 }
 
 impl Config {
+    /// Template literal tags whose SQL is checked in TypeScript and JavaScript files
+    pub fn embedded_sql_tags(&self) -> Vec<String> {
+        self.embedded_sql_tags.clone().unwrap_or_else(|| {
+            sqlsift_core::embedded::DEFAULT_TAGS
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+    }
+
     /// Rule levels from the config file, overridden by command line flags.
     /// A rule's own level always takes precedence over its category's.
     pub fn rule_config(&self, flags: &RuleFlags) -> Result<RuleConfig> {

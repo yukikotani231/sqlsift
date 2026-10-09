@@ -13,6 +13,12 @@ schema = [
 #     "db/queries/**/*.sql",
 # ]
 
+# Tagged template literals checked as SQL in TypeScript / JavaScript query files
+# (.ts, .tsx, .js, .jsx, .mts, .cts). A tag matches the last identifier of the
+# tag expression: "sql" matches sql`...`, db.sql`...` and Prisma.sql`...`, and
+# "$queryRaw" matches prisma.$queryRaw`...`. Default: ["sql"].
+# embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]
+
 # Query files to skip, whether they come from `files` or the command line
 # (glob patterns; `**` matches any number of directories, and a directory
 # pattern skips everything below it). `--ignore <PATTERN>` adds to this list.
