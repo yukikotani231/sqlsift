@@ -205,6 +205,37 @@ The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration 
 
 Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI.
 
+### Re-check everything when the schema changes
+
+sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
+
+```yaml
+on: pull_request
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=d "$BASE" HEAD)
+          if grep -q '^db/' <<< "$changed"; then
+            files='queries/**/*.sql'  # schema changed: check every query
+          else
+            files=$(grep '^queries/.*\.sql$' <<< "$changed" | tr '\n' ' ' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - if: steps.changed.outputs.files != ''
+        uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: ${{ steps.changed.outputs.files }}
+```
+
 ### GitHub Code Scanning (SARIF)
 
 Show errors in the Security tab and as code scanning alerts:
@@ -346,6 +377,7 @@ SELECT bad_col FROM missing_table;
 - DISTINCT ON, UNION / INTERSECT / EXCEPT
 - ORDER BY with SELECT alias support
 - Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
 
 ### DDL
 
