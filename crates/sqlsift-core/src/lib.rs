@@ -9,11 +9,13 @@
 pub mod analyzer;
 pub mod baseline;
 pub mod dialect;
+pub mod embedded;
 pub mod error;
 pub mod ignore;
 mod psql;
 pub mod rules;
 pub mod schema;
+mod sqlc;
 mod suggest;
 pub mod templating;
 pub mod types;

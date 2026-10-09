@@ -110,6 +110,10 @@ sqlsift check --dialect mysql --schema schema.sql queries/*.sql
 
 # Read a query from stdin (e.g. the staged version in a pre-commit hook)
 git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queries/users.sql -
+
+# SQL in TypeScript / JavaScript tagged templates (sql`...`; more tags with
+# `embedded_sql_tags` in sqlsift.toml)
+sqlsift check -s schema.sql 'src/**/*.ts'
 ```
 
 To avoid repeating flags, add a `sqlsift.toml` to your project root:
@@ -182,7 +186,7 @@ Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sql
 
 The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
-- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates)
+- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc query files and SQL in TypeScript tagged templates)
 - [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
 - [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
 - [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)
@@ -200,6 +204,7 @@ The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
 - [x] Per-rule and per-category levels (`off` / `warn` / `error`)
 - [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
+- [x] SQL embedded in application code (sqlc query names, TypeScript tagged templates)
 
 #### Planned
 - [ ] Custom rule plugins

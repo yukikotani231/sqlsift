@@ -219,6 +219,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ psql scripts (PostgreSQL only, `psql.rs`): meta-commands blanked out, `\g`/`\gset` end a query, `:var`/`:'var'` → `$1`, `:"var"` → identifier whose name diagnostics are dropped; the rewrite keeps every byte offset
 - ✅ Configuration file (sqlsift.toml)
 - ✅ dbt / Jinja templates in query files (`templating.rs`: tags are masked keeping locations; `--templating`, `templating = "jinja"`, auto-detected from `dbt_project.yml`)
+- ✅ SQL in application code: sqlc `-- name:` query names on diagnostics (`sqlc.rs`), SQL in TypeScript/JavaScript tagged templates (`embedded.rs`, `Analyzer::analyze_embedded`, `embedded_sql_tags`)
 - ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
 - ✅ Ignoring query files (`ignore` in sqlsift.toml, `--ignore`; `sqlsift_core::ignore`), honored by the CLI and LSP
 - ✅ Baseline of known diagnostics (`sqlsift check --write-baseline`, `--baseline`, `baseline` in sqlsift.toml; `sqlsift_core::baseline`), honored by the CLI and LSP

@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::Result;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
+use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
@@ -73,27 +74,44 @@ fn is_stdin(path: &Path) -> bool {
     path.as_os_str() == STDIN_ARG
 }
 
+/// How query files are analyzed
+struct QueryOptions<'a> {
+    catalog: &'a Catalog,
+    dialect: SqlDialect,
+    templating: Templating,
+    rules: &'a RuleConfig,
+    /// Template literal tags whose SQL is checked in TypeScript / JavaScript files
+    embedded_sql_tags: &'a [String],
+    /// `--stdin-filename`, whose extension decides how stdin is analyzed
+    stdin_filename: Option<&'a Path>,
+}
+
 /// Read and analyze each query file, in parallel across the available cores.
 /// Results are returned in the same order as `files`. The file `-` is the
-/// query read from stdin, `stdin`.
+/// query read from stdin, `stdin`. TypeScript and JavaScript files are checked
+/// for SQL in tagged template literals.
 fn analyze_files(
     files: &[PathBuf],
     stdin: Option<&str>,
-    catalog: &Catalog,
-    dialect: SqlDialect,
-    templating: Templating,
-    rules: &RuleConfig,
+    options: &QueryOptions,
 ) -> Vec<AnalyzedFile> {
     let analyze_one = |path: &PathBuf| -> AnalyzedFile {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
-        let content = match stdin {
-            Some(stdin) if is_stdin(path) => stdin.to_string(),
-            _ => read_file(path)?,
+        let (content, name) = match stdin {
+            Some(stdin) if is_stdin(path) => (
+                stdin.to_string(),
+                options.stdin_filename.unwrap_or(path.as_path()),
+            ),
+            _ => (read_file(path)?, path.as_path()),
         };
-        let diagnostics = Analyzer::with_dialect(catalog, dialect)
-            .with_rules(rules.clone())
-            .with_templating(templating)
-            .analyze(&content);
+        let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
+            .with_rules(options.rules.clone())
+            .with_templating(options.templating);
+        let diagnostics = if is_embedded_sql_file(name) {
+            analyzer.analyze_embedded(&content, options.embedded_sql_tags)
+        } else {
+            analyzer.analyze(&content)
+        };
         Ok((content, diagnostics))
     };
 
@@ -450,14 +468,16 @@ fn run(args: Args) -> Result<bool> {
 
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
-            let analyzed = analyze_files(
-                &query_files,
-                stdin.as_deref(),
-                &catalog,
+            let embedded_sql_tags = config.embedded_sql_tags();
+            let options = QueryOptions {
+                catalog: &catalog,
                 dialect,
                 templating,
-                &rules,
-            );
+                rules: &rules,
+                embedded_sql_tags: &embedded_sql_tags,
+                stdin_filename: stdin_filename.as_deref(),
+            };
+            let analyzed = analyze_files(&query_files, stdin.as_deref(), &options);
 
             if write_baseline {
                 let mut baseline = Baseline::default();

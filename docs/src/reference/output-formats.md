@@ -44,11 +44,11 @@ A single JSON document. Only files with diagnostics are listed; `files` is empty
 }
 ```
 
-`line` and `column` are 1-indexed (columns count characters); `span.offset` is the 0-indexed byte offset of the same position in the file, and `span.length` is in bytes. `severity` is `error` or `warning`.
+`line` and `column` are 1-indexed (columns count characters); `span.offset` is the 0-indexed byte offset of the same position in the file, and `span.length` is in bytes. `severity` is `error` or `warning`. In [sqlc query files](../guide/queries.md#sqlc-query-files), diagnostics also have a `query_name` field with the name from the query's `-- name:` comment; it is absent otherwise.
 
 ## `sarif`
 
-A [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log with a single run containing the results for all files and a `tool.driver.rules` entry for every rule. Upload it to GitHub Code Scanning as shown in [CI and GitHub Actions](../integrations/ci.md#github-code-scanning-sarif).
+A [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log with a single run containing the results for all files and a `tool.driver.rules` entry for every rule. A diagnostic in a named sqlc query has the query name as a `logicalLocations` entry (kind `function`) and at the end of its message text, as in `(in query 'ListPosts')`. Upload it to GitHub Code Scanning as shown in [CI and GitHub Actions](../integrations/ci.md#github-code-scanning-sarif).
 
 ## `github`
 

@@ -82,6 +82,10 @@ pub struct Diagnostic {
     pub span: Option<Span>,
     pub help: Option<String>,
     pub labels: Vec<Label>,
+    /// Name of the query the diagnostic is in, from a sqlc-style
+    /// `-- name: GetPost :one` comment before its statement
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_name: Option<String>,
 }
 
 /// Label for source annotations
@@ -100,6 +104,7 @@ impl Diagnostic {
             span: None,
             help: None,
             labels: Vec::new(),
+            query_name: None,
         }
     }
 
@@ -111,6 +116,7 @@ impl Diagnostic {
             span: None,
             help: None,
             labels: Vec::new(),
+            query_name: None,
         }
     }
 

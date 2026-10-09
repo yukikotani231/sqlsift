@@ -117,10 +117,12 @@ impl OutputFormatter {
                 }
             }
 
-            // Print help if available, aligned with the source gutter
+            // Print the sqlc query name and help, aligned with the source gutter
+            let width = location(diag, source).map_or(3, |(line, _)| line.to_string().len().max(3));
+            if let Some(name) = &diag.query_name {
+                writeln!(out, "{} = note: in query '{}'", " ".repeat(width), name)?;
+            }
             if let Some(help) = &diag.help {
-                let width =
-                    location(diag, source).map_or(3, |(line, _)| line.to_string().len().max(3));
                 writeln!(out, "{} = help: {}", " ".repeat(width), help)?;
             }
 
@@ -199,6 +201,18 @@ fn print_sarif(files: &[&FileDiagnostics]) {
                 });
             }
 
+            let mut location = serde_json::json!({ "physicalLocation": physical });
+            let mut message = d.message.clone();
+            // The sqlc query (`-- name: GetPost :one`), also in the message as code
+            // scanning UIs don't show logical locations
+            if let Some(name) = &d.query_name {
+                location["logicalLocations"] = serde_json::json!([{
+                    "name": name,
+                    "kind": "function"
+                }]);
+                message = format!("{message} (in query '{name}')");
+            }
+
             results.push(serde_json::json!({
                 "ruleId": d.code(),
                 "ruleIndex": rule_index,
@@ -208,11 +222,9 @@ fn print_sarif(files: &[&FileDiagnostics]) {
                     Severity::Info => "note",
                 },
                 "message": {
-                    "text": d.message
+                    "text": message
                 },
-                "locations": [{
-                    "physicalLocation": physical
-                }]
+                "locations": [location]
             }));
         }
     }
@@ -271,6 +283,9 @@ fn github_command(file: &str, source: &str, d: &Diagnostic) -> String {
         .collect();
 
     let mut message = d.message.clone();
+    if let Some(name) = &d.query_name {
+        message = format!("{message} (in query '{name}')");
+    }
     if let Some(help) = &d.help {
         message.push_str("\nhelp: ");
         message.push_str(help);

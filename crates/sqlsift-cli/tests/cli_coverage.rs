@@ -3285,3 +3285,141 @@ fn dbt_project_next_to_config_file_enables_jinja() {
     ])
     .assert_code(0);
 }
+
+// ---------------------------------------------------------------------------
+// SQL embedded in application code (tests/fixtures/embedded)
+// ---------------------------------------------------------------------------
+
+/// The repository root, where the `tests/fixtures` paths below are relative to
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repository root")
+}
+
+/// Run `sqlsift check` on embedded-SQL fixtures, with their schema
+fn check_embedded_fixture(extra: &[&str]) -> Run {
+    let t = TempDir::new("embedded");
+    let mut args = vec!["check", "-s", "tests/fixtures/embedded/schema.sql"];
+    args.extend_from_slice(extra);
+    t.run_in(&repository_root(), &args)
+}
+
+#[test]
+fn sqlc_query_names_in_human_output() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.sql:8:12")
+        .assert_stderr_contains("= note: in query 'ListPosts'")
+        .assert_stderr_contains("queries.sql:18:22")
+        .assert_stderr_contains("= note: in query 'GetAuthor'")
+        .assert_stderr_lacks("'GetPost'");
+}
+
+#[test]
+fn sqlc_query_names_in_json_output() {
+    let run = check_embedded_fixture(&["-f", "json", "tests/fixtures/embedded/queries.sql"]);
+    run.assert_code(1);
+    let json = run.json();
+    let names: Vec<&str> = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|d| d["query_name"].as_str().expect("query_name"))
+        .collect();
+    assert_eq!(names, ["ListPosts", "GetAuthor"]);
+}
+
+#[test]
+fn json_output_has_no_query_name_outside_sqlc_queries() {
+    let t = with_users_schema("no-query-name");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "q.sql"]);
+    let json = run.json();
+    assert!(json["files"][0]["diagnostics"][0]
+        .get("query_name")
+        .is_none());
+}
+
+#[test]
+fn sqlc_query_names_in_sarif_output() {
+    let run = check_embedded_fixture(&["-f", "sarif", "tests/fixtures/embedded/queries.sql"]);
+    run.assert_code(1);
+    let json = run.json();
+    let result = &json["runs"][0]["results"][0];
+    assert_eq!(
+        result["message"]["text"],
+        "Column 'titel' not found in table 'posts' (in query 'ListPosts')"
+    );
+    assert_eq!(
+        result["locations"][0]["logicalLocations"][0]["name"],
+        "ListPosts"
+    );
+    assert_eq!(
+        result["locations"][0]["physicalLocation"]["region"]["startLine"],
+        8
+    );
+}
+
+#[test]
+fn typescript_tagged_templates_are_checked() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.ts"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.ts:16:28")
+        .assert_stderr_contains(
+            "16 |   return db.sql`SELECT id, titel FROM posts WHERE author_id = ${authorId} LIMIT ${limit}`;",
+        )
+        .assert_stderr_contains("queries.ts:31:10")
+        .assert_stderr_contains("Found 2 error(s)")
+        .assert_stderr_lacks("queries.ts:35");
+}
+
+#[test]
+fn typescript_and_sql_files_are_matched_by_globs() {
+    check_embedded_fixture(&["-f", "json", "tests/fixtures/embedded/*"])
+        .assert_code(1)
+        .assert_stdout_contains("queries.sql")
+        .assert_stdout_contains("queries.ts");
+}
+
+#[test]
+fn embedded_sql_tags_config_selects_the_tags() {
+    let t = TempDir::new("embedded-tags");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nembedded_sql_tags = [\"$queryRaw\"]\n",
+    );
+    t.write(
+        "src/db.ts",
+        "const a = sql`SELECT nme FROM users`;\nconst b = prisma.$queryRaw<User[]>`SELECT nme FROM users WHERE id = ${id}`;\n",
+    );
+    let run = t.run(&["check", "-f", "json", "src/db.ts"]);
+    run.assert_code(1).assert_stderr_lacks("unknown key");
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["line"], 2);
+    assert_eq!(diagnostics[0]["column"], 43);
+    // The byte offset points into the TypeScript file
+    assert_eq!(diagnostics[0]["span"]["offset"], 38 + 42);
+}
+
+#[test]
+fn stdin_filename_extension_selects_typescript() {
+    let t = with_users_schema("embedded-stdin");
+    let source = "export const q = sql`SELECT nme FROM users`;\n";
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "--stdin-filename", "q.ts", "-"],
+        source,
+    )
+    .assert_code(1)
+    .assert_stderr_contains("q.ts:1:29");
+    // Without a TypeScript name, stdin is SQL
+    t.run_stdin(&["check", "-s", "schema.sql", "-"], source)
+        .assert_code(1)
+        .assert_stderr_contains("E1000");
+}

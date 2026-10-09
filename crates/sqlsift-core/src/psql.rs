@@ -46,17 +46,23 @@ impl<'a> Preprocessed<'a> {
     /// Whether `line`/`column` is inside an identifier substituted from a psql
     /// variable or a template expression
     pub fn is_substituted(&self, line: usize, column: usize) -> bool {
-        self.identifiers
-            .iter()
-            .any(|&(l, start, end)| l == line && (start..end).contains(&column))
+        is_within(&self.identifiers, line, column)
     }
+}
+
+/// Whether `line`/`column` is inside one of `ranges` ((line, first column, end
+/// column), 1-indexed and end-exclusive)
+pub(crate) fn is_within(ranges: &[(usize, usize, usize)], line: usize, column: usize) -> bool {
+    ranges
+        .iter()
+        .any(|&(l, start, end)| l == line && (start..end).contains(&column))
 }
 
 /// Meta-commands that send the query buffer to the server, ending the query
 const QUERY_TERMINATORS: &[&str] = &["g", "gx", "gset", "gexec", "gdesc", "crosstabview", "watch"];
 
 /// Keywords after which a bare `:var` names a table
-const TABLE_KEYWORDS: &[&str] = &["from", "join", "into", "update", "table"];
+pub(crate) const TABLE_KEYWORDS: &[&str] = &["from", "join", "into", "update", "table"];
 
 /// Rewrite psql meta-commands and variable interpolations (see the module docs)
 pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {

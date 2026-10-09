@@ -16,6 +16,7 @@ templating = "jinja"              # jinja (dbt models) or none
 format = "human"                  # human, json, sarif or github
 max_warnings = 0                  # fail when more than this many warnings are reported
 baseline = "sqlsift-baseline.json"  # known diagnostics that are not reported
+embedded_sql_tags = ["sql", "$queryRaw"]  # template literal tags checked in .ts/.js files
 
 # Rules
 disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
@@ -41,6 +42,7 @@ correctness = "error"
 | `format` | string | `"human"` | `human`, `json`, `sarif` or `github` |
 | `max_warnings` | integer | none | Fail when more than this many warnings are reported |
 | `baseline` | path | none | Baseline file of known diagnostics, hidden by `sqlsift check` and the language server; `--baseline` overrides it. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline) |
+| `embedded_sql_tags` | list of strings | `["sql"]` | Tags of the template literals checked as SQL in TypeScript and JavaScript files, matched against the tag's last identifier (see [SQL in TypeScript and JavaScript](../guide/queries.md#sql-in-typescript-and-javascript)) |
 | `disable` | list of rules | `[]` | Rules (codes or names) to turn off |
 | `[rules]` | table | | Level per rule: `"off"`, `"warn"` or `"error"` |
 | `[categories]` | table | | Level per category: `correctness`, `suspicious`, `pedantic`, `style`, `restriction` |

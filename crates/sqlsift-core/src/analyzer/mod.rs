@@ -17,6 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
+use crate::sqlc::QueryNames;
 use crate::templating::{self, Templating};
 
 use comment_directives::InlineDirectives;
@@ -136,10 +137,48 @@ impl<'a> Analyzer<'a> {
     /// assert!(diagnostics.is_empty());
     /// ```
     pub fn analyze(&mut self, sql: &str) -> Vec<Diagnostic> {
+        self.analyze_text(sql, sql, &[])
+    }
+
+    /// Analyze the SQL in a TypeScript or JavaScript file: the tagged template
+    /// literals whose tag is one of `tags` (see [`crate::embedded`]). Diagnostics
+    /// point at the query's location in `source`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = "const user = await sql`SELECT nme FROM users WHERE id = ${id}`;";
+    /// let diagnostics = Analyzer::new(&catalog).analyze_embedded(source, &["sql"]);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// assert_eq!(diagnostics[0].span.unwrap().column, 31);
+    /// ```
+    pub fn analyze_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Vec<Diagnostic> {
+        let extracted = crate::embedded::extract(source, tags, self.dialect);
+        self.analyze_text(&extracted.text, source, &extracted.identifiers)
+    }
+
+    /// Analyze `sql`, which has the same lines and character columns as `original`
+    /// (where byte offsets point). Name diagnostics on the `substituted` identifiers
+    /// ((line, first column, end column)) are dropped.
+    fn analyze_text(
+        &mut self,
+        sql: &str,
+        original: &str,
+        substituted: &[(usize, usize, usize)],
+    ) -> Vec<Diagnostic> {
         self.diagnostics.clear();
 
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
+        // sqlc query names (`-- name: GetPost :one`)
+        let query_names = QueryNames::parse(sql);
 
         // Template tags, then psql meta-commands and variables (the rewrites keep
         // every line and character column)
@@ -193,18 +232,15 @@ impl<'a> Analyzer<'a> {
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
         // Spans are built from line/column locations: add their byte offsets in the
-        // input (masking a template may change byte lengths, never columns)
-        let original_lines;
-        let lines = if template.text.len() == sql.len() {
-            &lines
-        } else {
-            original_lines = LineIndex::new(sql);
-            &original_lines
-        };
+        // original input (extracting embedded SQL or masking a template may change
+        // byte lengths, never lines or character columns)
+        let original_lines = (!std::ptr::eq(original, sql) || template.text.len() != sql.len())
+            .then(|| LineIndex::new(original));
+        let offsets = original_lines.as_ref().unwrap_or(&lines);
         for diagnostic in &mut self.diagnostics {
             let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
             for span in diagnostic.span.iter_mut().chain(labels) {
-                lines.fill_offset(span);
+                offsets.fill_offset(span);
             }
         }
 
@@ -217,18 +253,21 @@ impl<'a> Analyzer<'a> {
                 let Some(span) = d.span else {
                     return (!directives.is_suppressed_in_file(d.kind)).then_some(d);
                 };
-                // A table or column name interpolated by psql (`FROM :"tbl"`) or a
-                // template (`FROM {{ ref('tbl') }}`) is unknown
+                // A table or column name interpolated by psql (`FROM :"tbl"`), a
+                // template (`FROM {{ ref('tbl') }}`) or a template literal
+                // (`FROM ${tbl}`) is unknown
                 let substituted = matches!(
                     d.kind,
                     DiagnosticKind::TableNotFound
                         | DiagnosticKind::ColumnNotFound
                         | DiagnosticKind::AmbiguousColumn
                 ) && (source.is_substituted(span.line, span.column)
-                    || template.is_substituted(span.line, span.column));
+                    || template.is_substituted(span.line, span.column)
+                    || psql::is_within(substituted, span.line, span.column));
                 if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }
+                d.query_name = query_names.at(span.line).map(str::to_string);
                 if let Some(note) = directives.unknown_id_help(span.line) {
                     d.help = Some(match d.help.take() {
                         Some(help) => format!("{help}\n{note}"),

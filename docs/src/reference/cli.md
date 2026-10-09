@@ -22,7 +22,7 @@ Global options:
 sqlsift check [OPTIONS] [FILES]...
 
 Arguments:
-  [FILES]...                SQL files to check (glob patterns supported; `-` reads stdin).
+  [FILES]...                SQL, TypeScript or JavaScript files to check (glob patterns supported; `-` reads stdin).
                             Defaults to `files` in sqlsift.toml.
 
 Options:

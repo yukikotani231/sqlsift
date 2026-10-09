@@ -62,10 +62,14 @@ fn to_lsp_severity(severity: Severity) -> lsp_types::DiagnosticSeverity {
 }
 
 fn format_message(diag: &Diagnostic) -> String {
-    match &diag.help {
-        Some(help) => format!("{}\n\nHelp: {}", diag.message, help),
-        None => diag.message.clone(),
+    let mut message = diag.message.clone();
+    if let Some(name) = &diag.query_name {
+        message = format!("{message} (in query '{name}')");
     }
+    if let Some(help) = &diag.help {
+        message = format!("{message}\n\nHelp: {help}");
+    }
+    message
 }
 
 #[cfg(test)]
@@ -127,6 +131,18 @@ mod tests {
             .with_help("Did you mean 'bar'?");
         let msg = format_message(&diag);
         assert_eq!(msg, "Table 'foo' not found\n\nHelp: Did you mean 'bar'?");
+    }
+
+    #[test]
+    fn test_format_message_with_query_name() {
+        let mut diag = Diagnostic::error(DiagnosticKind::TableNotFound, "Table 'foo' not found")
+            .with_help("Did you mean 'bar'?");
+        diag.query_name = Some("GetFoo".to_string());
+        let msg = format_message(&diag);
+        assert_eq!(
+            msg,
+            "Table 'foo' not found (in query 'GetFoo')\n\nHelp: Did you mean 'bar'?"
+        );
     }
 
     #[test]
