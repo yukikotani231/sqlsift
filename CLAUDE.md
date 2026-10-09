@@ -154,7 +154,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 ## Style Guidelines
 
 - Follow Rust standard formatting (`cargo fmt`)
-- Use `cargo clippy` for linting
+- Use `cargo clippy` for linting. Lints are set in `[workspace.lints]` in the root `Cargo.toml` (`clippy::pedantic` minus a few noisy lints); `sqlsift-core` also warns on `unwrap()` / `expect()` outside tests
 - Prefer explicit error handling over `.unwrap()` in library code
 - Document public APIs with doc comments
 - Error messages should be actionable (include suggestions when possible)

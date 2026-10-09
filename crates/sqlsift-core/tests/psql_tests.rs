@@ -6,7 +6,7 @@ use sqlsift_core::schema::{Catalog, SchemaBuilder};
 
 const PAGILA: &str = include_str!("../../../tests/fixtures/real-world/pagila-schema.sql");
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
     CREATE TABLE users (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -14,7 +14,7 @@ const SCHEMA: &str = r#"
         created_at DATE
     );
     CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, total NUMERIC);
-"#;
+";
 
 fn catalog(schema: &str, dialect: SqlDialect) -> Catalog {
     let mut builder = SchemaBuilder::with_dialect(dialect);
@@ -63,7 +63,7 @@ fn issue_94_repro() {
 #[test]
 fn meta_command_lines_are_ignored() {
     assert_valid(
-        r#"\set ON_ERROR_STOP on
+        r"\set ON_ERROR_STOP on
 \timing on
 \pset format csv
   \echo 'listing users' :foo
@@ -81,7 +81,7 @@ SELECT 1;
 \endif
 \restrict abc123
 \unrestrict abc123
-"#,
+",
     );
 }
 
@@ -194,7 +194,7 @@ fn mysql_and_sqlite_are_unaffected() {
 
 #[test]
 fn schema_with_pg_dump_meta_commands() {
-    let schema = r#"\restrict 4fNyJtSKHvHLBBfmgV3hZZ
+    let schema = r"\restrict 4fNyJtSKHvHLBBfmgV3hZZ
 --
 -- PostgreSQL database dump
 --
@@ -203,7 +203,7 @@ SET statement_timeout = 0;
 CREATE TABLE public.users (id integer NOT NULL, name text);
 \unrestrict 4fNyJtSKHvHLBBfmgV3hZZ
 CREATE TABLE public.orders (id integer NOT NULL, user_id integer);
-"#;
+";
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
     builder.parse(schema).unwrap();
     let (catalog, diagnostics) = builder.build();

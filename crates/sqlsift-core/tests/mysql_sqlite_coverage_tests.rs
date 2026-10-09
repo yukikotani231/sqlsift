@@ -158,7 +158,7 @@ fn col_type(catalog: &Catalog, table_name: &str, column: &str) -> SqlType {
 // MySQL schema (mysqldump style)
 // =====================================================================
 
-const MYSQL_SCHEMA: &str = r#"
+const MYSQL_SCHEMA: &str = r"
 -- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)
 --
 -- Host: localhost    Database: shop
@@ -280,7 +280,7 @@ CREATE TABLE IF NOT EXISTS `audit_log` (
 /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
 /*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
 -- Dump completed on 2024-05-01 12:00:00
-"#;
+";
 
 fn mysql_catalog() -> Catalog {
     build_catalog(SqlDialect::MySQL, MYSQL_SCHEMA)
@@ -924,7 +924,7 @@ fn mysql_invalid_reports_every_error() {
 // SQLite schema
 // =====================================================================
 
-const SQLITE_SCHEMA: &str = r#"
+const SQLITE_SCHEMA: &str = r"
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 BEGIN TRANSACTION;
@@ -987,7 +987,7 @@ CREATE VIEW published_posts AS
     SELECT id, author_id, title FROM posts WHERE status = 'published';
 
 COMMIT;
-"#;
+";
 
 fn sqlite_catalog() -> Catalog {
     build_catalog(SqlDialect::SQLite, SQLITE_SCHEMA)
@@ -1367,13 +1367,13 @@ fn sqlite_invalid_type_count_ambiguity_null() {
 fn mysql_schema_resilient_to_dump_noise() {
     // Triggers with DELIMITER, mysqldump-style views and escaped string data
     // must not prevent the surrounding tables from being registered.
-    let ddl = r#"
+    let ddl = r"
 CREATE TABLE `a` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;
 DELIMITER ;;
 /*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `a_bi` BEFORE INSERT ON `a` FOR EACH ROW SET NEW.id = NEW.id + 1 */;;
 DELIMITER ;
 CREATE TABLE `b` (`id` int NOT NULL, `a_id` int DEFAULT NULL) ENGINE=InnoDB;
-"#;
+";
     let catalog = build_catalog(SqlDialect::MySQL, ddl);
     for name in ["a", "b"] {
         assert!(
@@ -1386,14 +1386,14 @@ CREATE TABLE `b` (`id` int NOT NULL, `a_id` int DEFAULT NULL) ENGINE=InnoDB;
 
 #[test]
 fn sqlite_schema_resilient_to_unsupported_statements() {
-    let ddl = r#"
+    let ddl = r"
 PRAGMA foreign_keys=OFF;
 CREATE TABLE a (id INTEGER PRIMARY KEY, n INT);
 CREATE VIRTUAL TABLE docs USING fts5(title, body);
 ATTACH DATABASE 'other.db' AS other;
 CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id));
 VACUUM;
-"#;
+";
     let catalog = build_catalog(SqlDialect::SQLite, ddl);
     for name in ["a", "b"] {
         assert!(

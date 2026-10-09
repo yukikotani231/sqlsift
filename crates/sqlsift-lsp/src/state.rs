@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
@@ -125,12 +126,13 @@ impl ServerState {
             md.push_str("|--------|------|----------|\n");
             for col in table.columns.values() {
                 let nullable = if col.nullable { "NULL" } else { "NOT NULL" };
-                md.push_str(&format!(
-                    "| {} | {} | {} |\n",
+                let _ = writeln!(
+                    md,
+                    "| {} | {} | {} |",
                     col.name,
                     col.data_type.display_name(),
                     nullable
-                ));
+                );
             }
             return Some(md);
         }
@@ -251,18 +253,15 @@ fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
             base_dir.join(pattern).display().to_string()
         };
 
-        match glob::glob(&abs_pattern) {
-            Ok(paths) => {
-                for path in paths.flatten() {
-                    files.push(path);
-                }
+        if let Ok(paths) = glob::glob(&abs_pattern) {
+            for path in paths.flatten() {
+                files.push(path);
             }
-            Err(_) => {
-                // If glob fails, try as literal path
-                let path = base_dir.join(pattern);
-                if path.exists() {
-                    files.push(path);
-                }
+        } else {
+            // If glob fails, try as literal path
+            let path = base_dir.join(pattern);
+            if path.exists() {
+                files.push(path);
             }
         }
     }

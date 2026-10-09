@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Rules to disable (e.g., ["E0001", "E0002"])
+    /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
     pub disable: Vec<String>,
 
@@ -112,18 +112,18 @@ impl Config {
     pub fn merge_with_args(
         mut self,
         schema: &[PathBuf],
-        schema_dir: &Option<PathBuf>,
+        schema_dir: Option<&Path>,
         files: &[PathBuf],
-        format: &Option<crate::args::OutputFormat>,
-        dialect: &Option<String>,
+        format: Option<crate::args::OutputFormat>,
+        dialect: Option<&str>,
     ) -> Self {
         // CLI args override config file
         if !schema.is_empty() {
             self.schema = schema.iter().map(|p| p.display().to_string()).collect();
         }
 
-        if schema_dir.is_some() {
-            self.schema_dir = schema_dir.as_ref().map(|p| p.display().to_string());
+        if let Some(dir) = schema_dir {
+            self.schema_dir = Some(dir.display().to_string());
         }
 
         if !files.is_empty() {
@@ -131,11 +131,11 @@ impl Config {
         }
 
         if let Some(fmt) = format {
-            self.format = Some(format!("{:?}", fmt).to_lowercase());
+            self.format = Some(format!("{fmt:?}").to_lowercase());
         }
 
-        if dialect.is_some() {
-            self.dialect = dialect.clone();
+        if let Some(dialect) = dialect {
+            self.dialect = Some(dialect.to_string());
         }
 
         self
@@ -164,7 +164,7 @@ impl Config {
         for (name, level) in &self.categories {
             if find_category(name).is_none() {
                 let hint = match similar_category_name(name) {
-                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    Some(suggestion) => format!(". Did you mean '{suggestion}'?"),
                     None => String::new(),
                 };
                 miette::bail!(
@@ -179,7 +179,7 @@ impl Config {
         for (id, level) in &self.rules {
             if find_rule(id).is_none() {
                 let hint = match similar_rule_name(id) {
-                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    Some(suggestion) => format!(". Did you mean '{suggestion}'?"),
                     None => String::new(),
                 };
                 miette::bail!(

@@ -88,7 +88,7 @@ fn nullable(catalog: &Catalog, table_name: &str, column: &str) -> bool {
 }
 
 fn codes(diags: &[Diagnostic]) -> Vec<&'static str> {
-    diags.iter().map(|d| d.code()).collect()
+    diags.iter().map(sqlsift_core::Diagnostic::code).collect()
 }
 
 #[track_caller]
@@ -709,7 +709,7 @@ fn mysql_prefix_index_warns() {
         SqlDialect::MySQL,
         "CREATE TABLE `t` (`name` VARCHAR(100), KEY `idx` (`name`(50)));",
     );
-    assert!(w.message.contains("t"), "{}", w.message);
+    assert!(w.message.contains('t'), "{}", w.message);
 }
 
 #[test]

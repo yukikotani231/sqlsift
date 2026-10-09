@@ -24,8 +24,7 @@ fn catalog(schema: &str) -> Catalog {
     let (catalog, warnings) = catalog_with_warnings(schema);
     assert!(
         warnings.is_empty(),
-        "expected no schema warnings, got: {:?}",
-        warnings
+        "expected no schema warnings, got: {warnings:?}"
     );
     catalog
 }
@@ -47,7 +46,7 @@ fn catalog_from_files(files: &[&str]) -> (Catalog, Vec<Diagnostic>) {
     let mut builder = SchemaBuilder::new();
     for (i, file) in files.iter().enumerate() {
         let result = builder.parse(file);
-        assert!(result.is_ok(), "file #{} returned errors: {:?}", i, result);
+        assert!(result.is_ok(), "file #{i} returned errors: {result:?}");
     }
     builder.build()
 }
@@ -61,14 +60,12 @@ fn assert_clean(catalog: &Catalog, sql: &str) {
     let diags = analyze(catalog, sql);
     assert!(
         diags.is_empty(),
-        "expected no diagnostics for {:?}, got: {:#?}",
-        sql,
-        diags
+        "expected no diagnostics for {sql:?}, got: {diags:#?}"
     );
 }
 
 fn codes(diags: &[Diagnostic]) -> Vec<&'static str> {
-    diags.iter().map(|d| d.code()).collect()
+    diags.iter().map(sqlsift_core::Diagnostic::code).collect()
 }
 
 #[track_caller]
@@ -77,9 +74,7 @@ fn assert_codes(catalog: &Catalog, sql: &str, expected: &[&str]) -> Vec<Diagnost
     assert_eq!(
         codes(&diags),
         expected,
-        "unexpected diagnostic codes for {:?}: {:#?}",
-        sql,
-        diags
+        "unexpected diagnostic codes for {sql:?}: {diags:#?}"
     );
     diags
 }
@@ -91,9 +86,7 @@ fn single(catalog: &Catalog, sql: &str) -> Diagnostic {
     assert_eq!(
         diags.len(),
         1,
-        "expected exactly one diagnostic for {:?}, got: {:#?}",
-        sql,
-        diags
+        "expected exactly one diagnostic for {sql:?}, got: {diags:#?}"
     );
     diags.remove(0)
 }
@@ -103,7 +96,7 @@ fn single(catalog: &Catalog, sql: &str) -> Diagnostic {
 fn loc(d: &Diagnostic) -> (usize, usize, usize) {
     let span = d
         .span
-        .unwrap_or_else(|| panic!("diagnostic has no span: {:?}", d));
+        .unwrap_or_else(|| panic!("diagnostic has no span: {d:?}"));
     (span.line, span.column, span.length)
 }
 
@@ -124,7 +117,7 @@ fn table<'a>(catalog: &'a Catalog, name: &str) -> &'a TableDef {
 fn col_type(catalog: &Catalog, tbl: &str, col: &str) -> SqlType {
     table(catalog, tbl)
         .get_column(col)
-        .unwrap_or_else(|| panic!("column {}.{} missing", tbl, col))
+        .unwrap_or_else(|| panic!("column {tbl}.{col} missing"))
         .data_type
         .clone()
 }
@@ -133,7 +126,7 @@ fn col_type(catalog: &Catalog, tbl: &str, col: &str) -> SqlType {
 fn nullable(catalog: &Catalog, tbl: &str, col: &str) -> bool {
     table(catalog, tbl)
         .get_column(col)
-        .unwrap_or_else(|| panic!("column {}.{} missing", tbl, col))
+        .unwrap_or_else(|| panic!("column {tbl}.{col} missing"))
         .nullable
 }
 
@@ -145,7 +138,7 @@ fn has_table(catalog: &Catalog, name: &str) -> bool {
 fn view_columns(catalog: &Catalog, name: &str) -> Vec<String> {
     catalog
         .get_view(&QualifiedName::parse(name))
-        .unwrap_or_else(|| panic!("view {:?} missing", name))
+        .unwrap_or_else(|| panic!("view {name:?} missing"))
         .columns
         .clone()
 }
@@ -153,7 +146,7 @@ fn view_columns(catalog: &Catalog, name: &str) -> Vec<String> {
 /// Shared catalog for diagnostic-quality tests.
 fn diag_catalog() -> Catalog {
     catalog(
-        r#"
+        r"
         CREATE TABLE users (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
@@ -165,7 +158,7 @@ fn diag_catalog() -> Catalog {
             total NUMERIC(10, 2),
             note TEXT
         );
-        "#,
+        ",
     )
 }
 
@@ -289,10 +282,10 @@ fn quoted_table_not_found_message_has_no_quotes() {
 #[test]
 fn create_schema_and_schema_qualified_table() {
     let c = catalog(
-        r#"
+        r"
         CREATE SCHEMA app;
         CREATE TABLE app.accounts (id bigint, owner text);
-        "#,
+        ",
     );
     assert!(c
         .get_table(&QualifiedName::with_schema("app", "accounts"))
@@ -346,10 +339,10 @@ fn explicit_public_schema_is_same_as_unqualified() {
 #[test]
 fn same_table_name_in_two_schemas_is_distinct() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE public.items (id int, price numeric);
         CREATE TABLE archive.items (id int, archived_at timestamp);
-        "#,
+        ",
     );
     assert_clean(&c, "SELECT price FROM items");
     assert_clean(&c, "SELECT archived_at FROM archive.items");
@@ -452,7 +445,7 @@ fn types_varchar_with_collation() {
 #[test]
 fn types_date_time() {
     let c = catalog(
-        r#"CREATE TABLE t (
+        r"CREATE TABLE t (
             a timestamp(3) with time zone,
             b timestamp without time zone,
             c timestamp(6),
@@ -460,7 +453,7 @@ fn types_date_time() {
             e time(3),
             f date,
             g interval
-        );"#,
+        );",
     );
     assert_eq!(
         col_type(&c, "t", "a"),
@@ -532,8 +525,7 @@ fn types_extension_and_special_types_are_custom() {
         assert_eq!(
             col_type(&c, "t", col),
             SqlType::Custom(name.to_string()),
-            "column {}",
-            col
+            "column {col}"
         );
     }
     // Queries selecting these columns resolve fine.
@@ -611,11 +603,11 @@ fn types_display_names() {
 #[test]
 fn types_domain_and_composite_columns_are_custom() {
     let c = catalog(
-        r#"
+        r"
         CREATE DOMAIN posint AS integer CHECK (VALUE > 0);
         CREATE TYPE address AS (street text, city text);
         CREATE TABLE t (id posint, addr address);
-        "#,
+        ",
     );
     assert_eq!(col_type(&c, "t", "id"), SqlType::Custom("posint".into()));
     assert_eq!(col_type(&c, "t", "addr"), SqlType::Custom("address".into()));
@@ -629,11 +621,11 @@ fn types_domain_and_composite_columns_are_custom() {
 #[test]
 fn identity_always_and_by_default() {
     let c = catalog(
-        r#"CREATE TABLE t (
+        r"CREATE TABLE t (
             a int GENERATED ALWAYS AS IDENTITY,
             b bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
             c int
-        );"#,
+        );",
     );
     let t = table(&c, "t");
     assert!(matches!(
@@ -655,10 +647,10 @@ fn identity_always_and_by_default() {
 #[test]
 fn identity_added_via_alter_table() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE t (name text);
         ALTER TABLE t ADD COLUMN id bigint GENERATED BY DEFAULT AS IDENTITY;
-        "#,
+        ",
     );
     let col = table(&c, "t").get_column("id").unwrap();
     assert!(matches!(col.identity, Some(IdentityKind::ByDefault)));
@@ -669,11 +661,11 @@ fn identity_added_via_alter_table() {
 #[test]
 fn generated_stored_column_is_not_identity() {
     let c = catalog(
-        r#"CREATE TABLE t (
+        r"CREATE TABLE t (
             price numeric(10,2),
             qty int,
             total numeric GENERATED ALWAYS AS (price * qty) STORED
-        );"#,
+        );",
     );
     let col = table(&c, "t").get_column("total").unwrap();
     assert!(col.identity.is_none(), "computed column is not IDENTITY");
@@ -686,7 +678,7 @@ fn generated_stored_column_is_not_identity() {
 #[test]
 fn default_value_classification() {
     let c = catalog(
-        r#"CREATE TABLE t (
+        r"CREATE TABLE t (
             a timestamptz DEFAULT now(),
             b timestamp DEFAULT CURRENT_TIMESTAMP,
             c int DEFAULT nextval('t_c_seq'::regclass),
@@ -698,7 +690,7 @@ fn default_value_classification() {
             i jsonb DEFAULT '{}'::jsonb,
             j date DEFAULT CURRENT_DATE,
             k int
-        );"#,
+        );",
     );
     let t = table(&c, "t");
     let d = |n: &str| t.get_column(n).unwrap().default.clone();
@@ -731,12 +723,12 @@ fn default_with_semicolon_in_string_literal() {
 #[test]
 fn check_constraints_column_and_table_level() {
     let c = catalog(
-        r#"CREATE TABLE t (
+        r"CREATE TABLE t (
             id int CONSTRAINT positive_id CHECK (id > 0),
             status text CHECK (status IN ('a', 'b')),
             lo int, hi int,
             CONSTRAINT lo_le_hi CHECK (lo <= hi)
-        );"#,
+        );",
     );
     let t = table(&c, "t");
     assert_eq!(t.check_constraints.len(), 3);
@@ -766,7 +758,7 @@ fn table_level_composite_primary_key() {
 #[test]
 fn table_level_unique_and_foreign_keys() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE parent (id int PRIMARY KEY, code text);
         CREATE TABLE child (
             id int,
@@ -776,7 +768,7 @@ fn table_level_unique_and_foreign_keys() {
             CONSTRAINT child_parent_fk FOREIGN KEY (parent_id) REFERENCES parent (id) ON DELETE CASCADE,
             FOREIGN KEY (code) REFERENCES app.codes (code)
         );
-        "#,
+        ",
     );
     let t = table(&c, "child");
     assert_eq!(t.unique_constraints.len(), 1);
@@ -806,11 +798,11 @@ fn inline_primary_key_marks_column() {
 #[test]
 fn partitioned_parent_tables() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE m1 (id int, created date) PARTITION BY RANGE (created);
         CREATE TABLE m2 (id int, k text) PARTITION BY LIST (k);
         CREATE TABLE m3 (id int, k text) PARTITION BY HASH (id);
-        "#,
+        ",
     );
     assert_eq!(table(&c, "m1").column_names(), vec!["id", "created"]);
     assert_clean(&c, "SELECT k FROM m2");
@@ -827,12 +819,12 @@ fn temp_tables() {
 #[test]
 fn comment_on_is_ignored() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE t (id int);
         COMMENT ON TABLE t IS 'has; semicolon';
         COMMENT ON COLUMN t.id IS 'identifier';
         CREATE TABLE u (id int);
-        "#,
+        ",
     );
     assert!(has_table(&c, "t"));
     assert!(has_table(&c, "u"));
@@ -878,13 +870,13 @@ fn alter_add_column_with_check_records_constraint() {
 #[test]
 fn alter_multiple_operations_in_one_statement() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE u (id int, a int);
         ALTER TABLE u
             ADD COLUMN b int REFERENCES u(id),
             ADD COLUMN c text NOT NULL DEFAULT 'x',
             DROP COLUMN a;
-        "#,
+        ",
     );
     assert_eq!(table(&c, "u").column_names(), vec!["id", "b", "c"]);
     assert_clean(&c, "SELECT b, c FROM u");
@@ -895,11 +887,11 @@ fn alter_multiple_operations_in_one_statement() {
 #[test]
 fn alter_drop_column_if_exists() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE u (id int, a int);
         ALTER TABLE u DROP COLUMN IF EXISTS a;
         ALTER TABLE u DROP COLUMN IF EXISTS never_existed;
-        "#,
+        ",
     );
     assert_eq!(table(&c, "u").column_names(), vec!["id"]);
     assert_codes(&c, "SELECT a FROM u", &["E0002"]);
@@ -914,12 +906,12 @@ fn alter_drop_column_cascade() {
 #[test]
 fn alter_re_add_column_replaces_type() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE u (id int);
         ALTER TABLE u ADD COLUMN x int;
         ALTER TABLE u DROP COLUMN x;
         ALTER TABLE u ADD COLUMN x text;
-        "#,
+        ",
     );
     assert_eq!(col_type(&c, "u", "x"), SqlType::Text);
     assert_clean(&c, "UPDATE u SET x = 'a'");
@@ -974,11 +966,11 @@ fn alter_rename_to_schema_qualified_name() {
 #[test]
 fn alter_rename_then_alter_new_name() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE u (id int);
         ALTER TABLE u RENAME TO people;
         ALTER TABLE people ADD COLUMN full_name text;
-        "#,
+        ",
     );
     assert_eq!(table(&c, "people").column_names(), vec!["id", "full_name"]);
 }
@@ -986,11 +978,11 @@ fn alter_rename_then_alter_new_name() {
 #[test]
 fn alter_schema_qualified_table() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE app.u (id int);
         ALTER TABLE app.u ADD COLUMN n text;
         ALTER TABLE app.u RENAME TO w;
-        "#,
+        ",
     );
     assert_clean(&c, "SELECT n FROM app.w");
     assert_eq!(
@@ -1010,14 +1002,14 @@ fn alter_public_qualified_matches_unqualified_table() {
 #[test]
 fn alter_add_constraints() {
     let c = catalog(
-        r#"
+        r"
         CREATE TABLE p (id int);
         CREATE TABLE u (id int, p_id int, email text, age int);
         ALTER TABLE u ADD CONSTRAINT u_pkey PRIMARY KEY (id);
         ALTER TABLE ONLY u ADD CONSTRAINT u_email_key UNIQUE (email);
         ALTER TABLE ONLY u ADD CONSTRAINT u_p_fk FOREIGN KEY (p_id) REFERENCES p(id);
         ALTER TABLE u ADD CONSTRAINT u_age_ck CHECK (age > 0);
-        "#,
+        ",
     );
     let t = table(&c, "u");
     let pk = t.primary_key.as_ref().unwrap();
@@ -1053,7 +1045,7 @@ fn alter_non_schema_operations_on_unknown_table_do_not_warn() {
     let (_, warnings) = catalog_with_warnings(
         "ALTER TABLE nope OWNER TO bob; ALTER TABLE nope ENABLE ROW LEVEL SECURITY;",
     );
-    assert!(warnings.is_empty(), "{:?}", warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -1117,7 +1109,7 @@ fn multiple_files_applied_in_order() {
         // A file that needs the resilient fallback path still applies its statements.
         "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; ALTER TABLE a ADD COLUMN z int;",
     ]);
-    assert!(warnings.is_empty(), "{:?}", warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(table(&c, "a").column_names(), vec!["id", "title", "z"]);
     assert!(!has_table(&c, "b"));
 }
@@ -1159,7 +1151,7 @@ fn prisma_style_migration_sequence() {
         ALTER TABLE "Post" ADD CONSTRAINT "Post_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
         "#,
     ]);
-    assert!(warnings.is_empty(), "{:?}", warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
         table(&c, "User").column_names(),
         vec!["id", "email", "name", "createdAt"]
@@ -1175,13 +1167,13 @@ fn prisma_style_migration_sequence() {
 // 4. Views
 // =====================================================================
 
-const VIEW_BASE: &str = r#"
+const VIEW_BASE: &str = r"
     CREATE TABLE u (id int, n text);
     CREATE TABLE o (id int, uid int, amount numeric);
-"#;
+";
 
 fn view_catalog(extra: &str) -> Catalog {
-    catalog(&format!("{}\n{}", VIEW_BASE, extra))
+    catalog(&format!("{VIEW_BASE}\n{extra}"))
 }
 
 #[test]
@@ -1227,11 +1219,11 @@ fn view_qualified_star_with_join() {
 #[test]
 fn view_on_view() {
     let c = view_catalog(
-        r#"
+        r"
         CREATE VIEW v1 AS SELECT id, n AS name FROM u;
         CREATE VIEW v2 AS SELECT * FROM v1;
         CREATE VIEW v3 AS SELECT name FROM v2 WHERE id > 0;
-        "#,
+        ",
     );
     assert_eq!(view_columns(&c, "v2"), vec!["id", "name"]);
     assert_eq!(view_columns(&c, "v3"), vec!["name"]);
@@ -1282,10 +1274,10 @@ fn regular_view_is_not_materialized() {
 #[test]
 fn create_or_replace_view_updates_columns() {
     let c = view_catalog(
-        r#"
+        r"
         CREATE VIEW v AS SELECT id FROM u;
         CREATE OR REPLACE VIEW v AS SELECT id, n FROM u;
-        "#,
+        ",
     );
     assert_eq!(view_columns(&c, "v"), vec!["id", "n"]);
     assert_clean(&c, "SELECT n FROM v");
@@ -1326,10 +1318,10 @@ fn view_joined_with_table() {
 #[test]
 fn views_with_same_column_are_ambiguous() {
     let c = view_catalog(
-        r#"
+        r"
         CREATE VIEW v5 AS SELECT id FROM u;
         CREATE VIEW v6 AS SELECT id FROM v5;
-        "#,
+        ",
     );
     assert_clean(&c, "SELECT v5.id FROM v5 JOIN v6 ON v5.id = v6.id");
     let d = single(&c, "SELECT id FROM v5 JOIN v6 ON v5.id = v6.id");
@@ -1364,20 +1356,20 @@ fn whitespace_and_comment_only_input() {
 #[test]
 fn comments_inside_create_table() {
     let c = catalog(
-        r#"
+        r"
         -- leading comment; with semicolon
         CREATE TABLE u (
             id int, -- trailing comment; with semicolon
             /* block; comment */ n text
         ); /* trailing */
-        "#,
+        ",
     );
     assert_eq!(table(&c, "u").column_names(), vec!["id", "n"]);
 }
 
 #[test]
 fn pg_dump_schema_only_preamble_and_objects() {
-    let schema = r#"
+    let schema = r"
 --
 -- PostgreSQL database dump
 --
@@ -1437,7 +1429,7 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 --
 -- PostgreSQL database dump complete
 --
-"#;
+";
     let c = catalog(schema);
     let accounts = table(&c, "accounts");
     assert_eq!(accounts.column_names(), vec!["id", "email", "created_at"]);
@@ -1455,7 +1447,7 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 #[test]
 fn create_function_with_dollar_body_and_semicolons() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE before_fn (id int);
 CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -1465,7 +1457,7 @@ BEGIN
 END;
 $$;
 CREATE TABLE after_fn (id int);
-"#,
+",
     );
     assert!(has_table(&c, "before_fn"));
     assert!(has_table(&c, "after_fn"));
@@ -1474,11 +1466,11 @@ CREATE TABLE after_fn (id int);
 #[test]
 fn create_function_with_tagged_dollar_quote() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 CREATE OR REPLACE FUNCTION inc(x int) RETURNS int AS $fn$ SELECT x + 1; $fn$ LANGUAGE sql IMMUTABLE;
 CREATE TABLE b (id int);
-"#,
+",
     );
     assert!(has_table(&c, "a"));
     assert!(has_table(&c, "b"));
@@ -1496,12 +1488,12 @@ fn create_function_with_single_quoted_body() {
 #[test]
 fn create_trigger_is_skipped() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 CREATE TRIGGER trg BEFORE UPDATE ON a FOR EACH ROW EXECUTE FUNCTION touch();
 CREATE TRIGGER trg2 AFTER INSERT OR DELETE ON a FOR EACH STATEMENT EXECUTE PROCEDURE audit();
 CREATE TABLE b (id int);
-"#,
+",
     );
     assert!(has_table(&c, "a"));
     assert!(has_table(&c, "b"));
@@ -1510,12 +1502,12 @@ CREATE TABLE b (id int);
 #[test]
 fn do_blocks_are_skipped() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 DO $$ BEGIN RAISE NOTICE 'x;y'; END $$;
 DO $body$ BEGIN PERFORM 1; END; $body$ LANGUAGE plpgsql;
 CREATE TABLE b (id int);
-"#,
+",
     );
     assert!(has_table(&c, "a"));
     assert!(has_table(&c, "b"));
@@ -1524,13 +1516,13 @@ CREATE TABLE b (id int);
 #[test]
 fn create_index_variants_are_skipped() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int, email text);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS a_id_idx ON a (id);
 CREATE UNIQUE INDEX a_email_lower ON a USING btree (lower(email)) WHERE id > 0;
 CREATE INDEX a_gin ON a USING gin (to_tsvector('english', email));
 CREATE TABLE b (id int);
-"#,
+",
     );
     assert!(has_table(&c, "a"));
     assert!(has_table(&c, "b"));
@@ -1539,7 +1531,7 @@ CREATE TABLE b (id int);
 #[test]
 fn grant_revoke_policy_and_rls_are_skipped() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 GRANT SELECT, INSERT ON a TO reader;
 REVOKE ALL ON a FROM PUBLIC;
@@ -1547,7 +1539,7 @@ CREATE POLICY p ON a USING (true);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE a OWNER TO bob;
 CREATE TABLE b (id int);
-"#,
+",
     );
     assert!(has_table(&c, "a"));
     assert!(has_table(&c, "b"));
@@ -1580,12 +1572,12 @@ fn unparseable_garbage_statement_is_skipped() {
 #[test]
 fn unsupported_statement_between_alters_still_applies_both() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 ALTER TABLE a ADD COLUMN x int;
 CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
 ALTER TABLE a ADD COLUMN y int;
-"#,
+",
     );
     assert_eq!(table(&c, "a").column_names(), vec!["id", "x", "y"]);
 }
@@ -1593,14 +1585,14 @@ ALTER TABLE a ADD COLUMN y int;
 #[test]
 fn enum_types_in_pg_dump_style() {
     let c = catalog(
-        r#"
+        r"
 CREATE TYPE public.mood AS ENUM (
     'happy',
     'sad'
 );
 ALTER TYPE public.mood OWNER TO app;
 CREATE TABLE public.people (id int, current_mood public.mood);
-"#,
+",
     );
     // Enums are keyed by unqualified name.
     assert_eq!(c.get_enum("mood").unwrap().values, vec!["happy", "sad"]);
@@ -1619,12 +1611,12 @@ fn enum_with_quoted_values_and_escapes() {
 #[test]
 fn fallback_parsing_preserves_order_of_create_and_drop() {
     let c = catalog(
-        r#"
+        r"
 CREATE TABLE a (id int);
 CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;
 DROP TABLE a;
 CREATE TABLE a (renamed int);
-"#,
+",
     );
     assert_eq!(table(&c, "a").column_names(), vec!["renamed"]);
 }
@@ -1637,7 +1629,7 @@ CREATE TABLE a (renamed int);
 fn e0001_message_help_and_span() {
     let c = diag_catalog();
     let diags = analyze(&c, "SELECT 1 FROM userz");
-    assert_eq!(diags.len(), 1, "{:?}", diags);
+    assert_eq!(diags.len(), 1, "{diags:?}");
     let d = &diags[0];
     assert_eq!(d.kind, DiagnosticKind::TableNotFound);
     assert_eq!(d.code(), "E0001");
@@ -2037,8 +2029,7 @@ fn e0006_message_help_and_span() {
     assert!(
         help == "Qualify the column with a table name: u.id"
             || help == "Qualify the column with a table name: o.id",
-        "unexpected help: {}",
-        help
+        "unexpected help: {help}"
     );
     assert_eq!(loc(&d), (1, 8, 2));
 }
@@ -2110,12 +2101,7 @@ fn e1000_parse_error_in_one_statement_does_not_hide_other_diagnostics() {
         &c,
         "SELECT naem FROM users;\nSELECT FROM WHERE;\nSELECT id FROM userz;",
     );
-    assert_eq!(
-        codes(&diags),
-        vec!["E0002", "E1000", "E0001"],
-        "{:?}",
-        diags
-    );
+    assert_eq!(codes(&diags), vec!["E0002", "E1000", "E0001"], "{diags:?}");
     let span = diags[1].span.unwrap();
     assert_eq!((span.line, span.column), (2, 13));
 }
@@ -2188,7 +2174,7 @@ fn repeated_analysis_is_stable() {
             .collect()
     };
     let first = render(analyze(&c, sql));
-    assert_eq!(first.len(), 5, "{:#?}", first);
+    assert_eq!(first.len(), 5, "{first:#?}");
     for _ in 0..20 {
         assert_eq!(render(analyze(&c, sql)), first);
     }
@@ -2208,10 +2194,10 @@ fn name_resolution_spans_are_one_indexed() {
     let c = diag_catalog();
     let sql = "SELECT naem FROM users;\nSELECT u.x FROM users u;\nSELECT * FROM nope;\nSELECT id FROM users, orders;\nSELECT 1 FROM users WHERE name + 1 = 2;";
     let diags = analyze(&c, sql);
-    assert!(diags.len() >= 5, "{:?}", diags);
+    assert!(diags.len() >= 5, "{diags:?}");
     for d in &diags {
         let s = d.span.expect("span");
-        assert!(s.line >= 1 && s.column >= 1, "bad span for {:?}", d);
+        assert!(s.line >= 1 && s.column >= 1, "bad span for {d:?}");
         assert!(s.length >= 1);
     }
 }

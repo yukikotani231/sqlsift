@@ -218,11 +218,10 @@ impl<'a> Resolver<'a> {
                     )
                     .with_help(if insert.columns.is_empty() {
                         format!(
-                            "Table '{}' has {} columns. Specify columns explicitly or provide {} values",
-                            table_name, expected_count, expected_count
+                            "Table '{table_name}' has {expected_count} columns. Specify columns explicitly or provide {expected_count} values"
                         )
                     } else {
-                        format!("Provide {} value(s) to match the column list", expected_count)
+                        format!("Provide {expected_count} value(s) to match the column list")
                     });
                     diag.span = table_span;
                     self.diagnostics.push(diag);
@@ -243,8 +242,7 @@ impl<'a> Resolver<'a> {
                     ),
                 )
                 .with_help(format!(
-                    "Select {} column(s) to match the column list",
-                    expected_count
+                    "Select {expected_count} column(s) to match the column list"
                 ));
                 diag.span = table_span;
                 self.diagnostics.push(diag);
@@ -312,7 +310,7 @@ impl<'a> Resolver<'a> {
         }
         let list = missing
             .iter()
-            .map(|c| format!("'{}'", c))
+            .map(|c| format!("'{c}'"))
             .collect::<Vec<_>>()
             .join(", ");
         let mut diag = Diagnostic::error(
@@ -327,9 +325,9 @@ impl<'a> Resolver<'a> {
         .with_help(format!(
             "{} NOT NULL without a default. Provide a value, or add a DEFAULT to the schema",
             if missing.len() == 1 {
-                format!("{} is", list)
+                format!("{list} is")
             } else {
-                format!("{} are", list)
+                format!("{list} are")
             }
         ));
         diag.span = span;
@@ -615,7 +613,7 @@ impl<'a> Resolver<'a> {
             }
             SetExpr::Values(values) => self.values(values),
             SetExpr::Insert(stmt) | SetExpr::Update(stmt) => self.statement(stmt),
-            _ => None,
+            SetExpr::Table(_) => None,
         }
     }
 
@@ -702,13 +700,13 @@ impl<'a> Resolver<'a> {
         }
 
         // GROUP BY can reference output column aliases, like ORDER BY
-        let aliases = projection_aliases(&select.projection);
+        let mut aliases = projection_aliases(&select.projection);
         if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
-            self.scope.current().select_aliases = aliases.clone();
+            self.scope.current().select_aliases = aliases;
             for expr in exprs {
                 self.expr(expr);
             }
-            self.scope.current().select_aliases.clear();
+            aliases = std::mem::take(&mut self.scope.current().select_aliases);
         }
 
         if let Some(having) = &select.having {
@@ -908,20 +906,17 @@ impl<'a> Resolver<'a> {
                 // Non-LATERAL subqueries can't reference the FROM clause they appear in.
                 // LATERAL subqueries can, with lower precedence than their own tables.
                 let columns = self.query(subquery, !*lateral);
-                let (key, columns) = match alias {
-                    Some(a) => {
-                        let names: Vec<String> =
-                            a.columns.iter().map(|c| c.name.value.clone()).collect();
-                        (
-                            a.name.value.clone(),
-                            Relation::rename_columns(columns, &names),
-                        )
-                    }
-                    None => {
-                        // Unaliased derived table: its columns are still visible unqualified
-                        self.unaliased_subqueries += 1;
-                        (format!("?subquery{}", self.unaliased_subqueries), columns)
-                    }
+                let (key, columns) = if let Some(a) = alias {
+                    let names: Vec<String> =
+                        a.columns.iter().map(|c| c.name.value.clone()).collect();
+                    (
+                        a.name.value.clone(),
+                        Relation::rename_columns(columns, &names),
+                    )
+                } else {
+                    // Unaliased derived table: its columns are still visible unqualified
+                    self.unaliased_subqueries += 1;
+                    (format!("?subquery{}", self.unaliased_subqueries), columns)
                 };
                 self.scope.current().relations.insert(
                     key.clone(),
@@ -982,7 +977,7 @@ impl<'a> Resolver<'a> {
     fn select_item(&mut self, item: &SelectItem, select_span: &Span) {
         match item {
             SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                self.expr(expr)
+                self.expr(expr);
             }
             SelectItem::QualifiedWildcard(name, _) => {
                 // table.*
@@ -1375,7 +1370,7 @@ impl<'a> Resolver<'a> {
                         only.kind_name(),
                         only.name
                     ),
-                    _ => format!("Column '{}' not found", column_name),
+                    _ => format!("Column '{column_name}' not found"),
                 };
                 let former = relations.iter().find_map(|r| r.former_column(column_name));
                 let candidates = relations.iter().flat_map(|r| r.column_names());
@@ -1406,12 +1401,12 @@ impl<'a> Resolver<'a> {
     /// CTE, or else a likely reason why the table is missing
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
         let help = match self.similar_table(table_name) {
-            Some(suggestion) => format!("Did you mean '{}'?", suggestion),
+            Some(suggestion) => format!("Did you mean '{suggestion}'?"),
             None => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
-            format!("Table '{}' not found", table_name),
+            format!("Table '{table_name}' not found"),
         )
         .with_help(help);
         if let Some(span) = span {
@@ -1490,8 +1485,7 @@ impl<'a> Resolver<'a> {
                 .any(|s| self.catalog.names_match(s, schema));
             if !schema_known {
                 return format!(
-                    "Schema '{}' has no tables in the schema input; check that the schema files that define it are included",
-                    schema
+                    "Schema '{schema}' has no tables in the schema input; check that the schema files that define it are included"
                 );
             }
         }
@@ -1502,10 +1496,7 @@ impl<'a> Resolver<'a> {
                 LIST_TABLES
             );
         }
-        format!(
-            "Check that the table exists in your schema definition; {}",
-            LIST_TABLES
-        )
+        format!("Check that the table exists in your schema definition; {LIST_TABLES}")
     }
 }
 
@@ -1627,15 +1618,11 @@ fn missing_column_help(
             renamed_to: Some(new_name),
             ..
         }) => Some(format!(
-            "'{}' was renamed to '{}' by ALTER TABLE in the schema",
-            name, new_name
+            "'{name}' was renamed to '{new_name}' by ALTER TABLE in the schema"
         )),
         Some(FormerColumn {
             renamed_to: None, ..
-        }) => Some(format!(
-            "'{}' was dropped by ALTER TABLE in the schema",
-            name
-        )),
-        None => find_similar_name(candidates, name).map(|s| format!("Did you mean '{}'?", s)),
+        }) => Some(format!("'{name}' was dropped by ALTER TABLE in the schema")),
+        None => find_similar_name(candidates, name).map(|s| format!("Did you mean '{s}'?")),
     }
 }

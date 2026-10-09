@@ -3,6 +3,7 @@
 //! Every test runs the compiled binary (`CARGO_BIN_EXE_sqlsift`) inside its own
 //! temporary directory so that tests are hermetic and can run in parallel.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -67,6 +68,8 @@ impl TempDir {
         self.run_in(&self.path, args)
     }
 
+    // A method like `run`, though it runs in `cwd` instead of the project directory
+    #[allow(clippy::unused_self)]
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Run {
         let output = Command::new(env!("CARGO_BIN_EXE_sqlsift"))
             .current_dir(cwd)
@@ -429,9 +432,11 @@ fn query_parse_error_reports_e1000() {
 // ---------------------------------------------------------------------------
 
 fn many_errors(n: usize) -> String {
-    (0..n)
-        .map(|i| format!("SELECT missing_{i} FROM users;\n"))
-        .collect()
+    let mut sql = String::new();
+    for i in 0..n {
+        let _ = writeln!(sql, "SELECT missing_{i} FROM users;");
+    }
+    sql
 }
 
 #[test]

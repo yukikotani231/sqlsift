@@ -6,7 +6,7 @@ use sqlsift_core::schema::{Catalog, IdentityKind, QualifiedName, SchemaBuilder};
 use sqlsift_core::types::SqlType;
 
 fn setup_catalog() -> Catalog {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -18,7 +18,7 @@ fn setup_catalog() -> Catalog {
                 user_id INTEGER NOT NULL,
                 total DECIMAL(10, 2)
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -34,8 +34,7 @@ fn test_valid_select() {
     let diagnostics = analyzer.analyze("SELECT id, name FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Expected no errors: {:?}",
-        diagnostics
+        "Expected no errors: {diagnostics:?}"
     );
 }
 
@@ -107,8 +106,7 @@ fn test_ambiguous_column_resolved_with_qualifier() {
         analyzer.analyze("SELECT users.id FROM users JOIN orders ON users.id = orders.user_id");
     assert!(
         diagnostics.is_empty(),
-        "Expected no errors when column is qualified: {:?}",
-        diagnostics
+        "Expected no errors when column is qualified: {diagnostics:?}"
     );
 }
 
@@ -146,8 +144,7 @@ fn test_valid_join() {
         .analyze("SELECT u.id, u.name, o.total FROM users u JOIN orders o ON o.user_id = u.id");
     assert!(
         diagnostics.is_empty(),
-        "Expected no errors for valid JOIN: {:?}",
-        diagnostics
+        "Expected no errors for valid JOIN: {diagnostics:?}"
     );
 }
 
@@ -178,8 +175,7 @@ fn test_insert_valid() {
         analyzer.analyze("INSERT INTO users (id, name, email) VALUES (1, 'test', 'a@b.com')");
     assert!(
         diagnostics.is_empty(),
-        "Valid INSERT should have no errors: {:?}",
-        diagnostics
+        "Valid INSERT should have no errors: {diagnostics:?}"
     );
 }
 
@@ -237,8 +233,7 @@ fn test_update_valid() {
     let diagnostics = analyzer.analyze("UPDATE users SET name = 'new' WHERE id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid UPDATE should have no errors: {:?}",
-        diagnostics
+        "Valid UPDATE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -284,8 +279,7 @@ fn test_delete_valid() {
     let diagnostics = analyzer.analyze("DELETE FROM users WHERE id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid DELETE should have no errors: {:?}",
-        diagnostics
+        "Valid DELETE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -323,8 +317,7 @@ fn test_subquery_in_where_valid() {
         analyzer.analyze("SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)");
     assert!(
         diagnostics.is_empty(),
-        "Valid subquery should have no errors: {:?}",
-        diagnostics
+        "Valid subquery should have no errors: {diagnostics:?}"
     );
 }
 
@@ -339,8 +332,7 @@ fn test_correlated_subquery_valid() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Valid correlated subquery should have no errors: {:?}",
-        diagnostics
+        "Valid correlated subquery should have no errors: {diagnostics:?}"
     );
 }
 
@@ -368,8 +360,7 @@ fn test_scalar_subquery_valid() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Valid scalar subquery should have no errors: {:?}",
-        diagnostics
+        "Valid scalar subquery should have no errors: {diagnostics:?}"
     );
 }
 
@@ -385,8 +376,7 @@ fn test_cte_valid() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Valid CTE should have no errors: {:?}",
-        diagnostics
+        "Valid CTE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -407,14 +397,14 @@ fn test_cte_column_not_found() {
 
 #[test]
 fn test_check_constraint_table_level() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE products (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 price DECIMAL(10, 2) NOT NULL,
                 CONSTRAINT price_positive CHECK (price > 0)
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -433,20 +423,19 @@ fn test_check_constraint_table_level() {
     let diagnostics = analyzer.analyze("SELECT id, name, price FROM products");
     assert!(
         diagnostics.is_empty(),
-        "Valid query on table with CHECK constraint should have no errors: {:?}",
-        diagnostics
+        "Valid query on table with CHECK constraint should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_check_constraint_column_level() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE employees (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 age INTEGER CHECK (age >= 18)
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -461,7 +450,7 @@ fn test_check_constraint_column_level() {
 
 #[test]
 fn test_enum_type_definition() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TYPE status AS ENUM ('active', 'inactive', 'pending');
 
             CREATE TABLE users (
@@ -469,7 +458,7 @@ fn test_enum_type_definition() {
                 name TEXT NOT NULL,
                 status status NOT NULL
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -484,16 +473,15 @@ fn test_enum_type_definition() {
     let diagnostics = analyzer.analyze("SELECT id, name, status FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Valid query on table with enum column should have no errors: {:?}",
-        diagnostics
+        "Valid query on table with enum column should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_enum_type_exists() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TYPE priority AS ENUM ('low', 'medium', 'high', 'critical');
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -510,12 +498,12 @@ fn test_enum_type_exists() {
 
 #[test]
 fn test_identity_column_always() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE accounts (
                 id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name TEXT NOT NULL
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -532,12 +520,12 @@ fn test_identity_column_always() {
 
 #[test]
 fn test_identity_column_by_default() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE logs (
                 id BIGINT GENERATED BY DEFAULT AS IDENTITY,
                 message TEXT NOT NULL
             );
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -556,8 +544,7 @@ fn test_identity_column_by_default() {
     let diagnostics = analyzer.analyze("SELECT id, message FROM logs");
     assert!(
         diagnostics.is_empty(),
-        "Valid query on table with IDENTITY column should have no errors: {:?}",
-        diagnostics
+        "Valid query on table with IDENTITY column should have no errors: {diagnostics:?}"
     );
 }
 
@@ -565,7 +552,7 @@ fn test_identity_column_by_default() {
 
 #[test]
 fn test_view_definition_and_query() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -575,7 +562,7 @@ fn test_view_definition_and_query() {
 
             CREATE VIEW active_users AS
                 SELECT id, name, email FROM users WHERE active = true;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -593,14 +580,13 @@ fn test_view_definition_and_query() {
     let diagnostics = analyzer.analyze("SELECT id, name FROM active_users");
     assert!(
         diagnostics.is_empty(),
-        "Valid query on VIEW should have no errors: {:?}",
-        diagnostics
+        "Valid query on VIEW should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_view_column_not_found() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -609,7 +595,7 @@ fn test_view_column_not_found() {
 
             CREATE VIEW user_names AS
                 SELECT id, name FROM users;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -625,7 +611,7 @@ fn test_view_column_not_found() {
 
 #[test]
 fn test_view_with_alias() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -634,7 +620,7 @@ fn test_view_with_alias() {
 
             CREATE VIEW user_emails AS
                 SELECT id, name, email FROM users;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -645,14 +631,13 @@ fn test_view_with_alias() {
     let diagnostics = analyzer.analyze("SELECT ue.id, ue.name FROM user_emails ue");
     assert!(
         diagnostics.is_empty(),
-        "Valid query on VIEW with alias should have no errors: {:?}",
-        diagnostics
+        "Valid query on VIEW with alias should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_view_with_explicit_columns() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -661,7 +646,7 @@ fn test_view_with_explicit_columns() {
 
             CREATE VIEW user_info (user_id, user_name) AS
                 SELECT id, name FROM users;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -675,8 +660,7 @@ fn test_view_with_explicit_columns() {
     let diagnostics = analyzer.analyze("SELECT user_id, user_name FROM user_info");
     assert!(
         diagnostics.is_empty(),
-        "Query with explicit view columns should have no errors: {:?}",
-        diagnostics
+        "Query with explicit view columns should have no errors: {diagnostics:?}"
     );
 
     // Original column name should not work
@@ -687,7 +671,7 @@ fn test_view_with_explicit_columns() {
 
 #[test]
 fn test_view_join_with_table() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL
@@ -702,7 +686,7 @@ fn test_view_join_with_table() {
             CREATE VIEW user_orders AS
                 SELECT u.id AS user_id, u.name, o.total
                 FROM users u JOIN orders o ON o.user_id = u.id;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -712,8 +696,7 @@ fn test_view_join_with_table() {
     let diagnostics = analyzer.analyze("SELECT user_id, name, total FROM user_orders");
     assert!(
         diagnostics.is_empty(),
-        "Query on VIEW with JOIN should have no errors: {:?}",
-        diagnostics
+        "Query on VIEW with JOIN should have no errors: {diagnostics:?}"
     );
 }
 
@@ -721,14 +704,14 @@ fn test_view_join_with_table() {
 
 #[test]
 fn test_alter_table_add_column() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL
             );
 
             ALTER TABLE users ADD COLUMN email TEXT;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -743,14 +726,13 @@ fn test_alter_table_add_column() {
     let diagnostics = analyzer.analyze("SELECT id, name, email FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Query with ALTER TABLE added column should have no errors: {:?}",
-        diagnostics
+        "Query with ALTER TABLE added column should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_alter_table_drop_column() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -759,7 +741,7 @@ fn test_alter_table_drop_column() {
             );
 
             ALTER TABLE users DROP COLUMN obsolete;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -778,7 +760,7 @@ fn test_alter_table_drop_column() {
 
 #[test]
 fn test_alter_table_rename_column() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
@@ -786,7 +768,7 @@ fn test_alter_table_rename_column() {
             );
 
             ALTER TABLE users RENAME COLUMN email TO email_address;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -801,8 +783,7 @@ fn test_alter_table_rename_column() {
     let diagnostics = analyzer.analyze("SELECT id, name, email_address FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Renamed column query should work: {:?}",
-        diagnostics
+        "Renamed column query should work: {diagnostics:?}"
     );
 
     // Old column name should error
@@ -813,14 +794,14 @@ fn test_alter_table_rename_column() {
 
 #[test]
 fn test_alter_table_rename_table() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL
             );
 
             ALTER TABLE users RENAME TO people;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -833,8 +814,7 @@ fn test_alter_table_rename_table() {
     let diagnostics = analyzer.analyze("SELECT id, name FROM people");
     assert!(
         diagnostics.is_empty(),
-        "Query on renamed table should work: {:?}",
-        diagnostics
+        "Query on renamed table should work: {diagnostics:?}"
     );
 
     let diagnostics = analyzer.analyze("SELECT id, name FROM users");
@@ -844,7 +824,7 @@ fn test_alter_table_rename_table() {
 
 #[test]
 fn test_alter_table_add_constraint() {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL
@@ -857,7 +837,7 @@ fn test_alter_table_add_constraint() {
 
             ALTER TABLE orders ADD CONSTRAINT fk_user
                 FOREIGN KEY (user_id) REFERENCES users(id);
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
@@ -870,9 +850,9 @@ fn test_alter_table_add_constraint() {
 
 #[test]
 fn test_alter_table_nonexistent_warns() {
-    let schema_sql = r#"
+    let schema_sql = r"
             ALTER TABLE nonexistent ADD COLUMN foo TEXT;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     // parse returns Ok because warnings don't cause failure
@@ -882,8 +862,7 @@ fn test_alter_table_nonexistent_warns() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TableNotFound),
-        "Should warn about nonexistent table: {:?}",
-        diagnostics
+        "Should warn about nonexistent table: {diagnostics:?}"
     );
 }
 
@@ -909,8 +888,7 @@ fn test_derived_table_valid() {
         analyzer.analyze("SELECT sub.id, sub.name FROM (SELECT id, name FROM users) AS sub");
     assert!(
         diagnostics.is_empty(),
-        "Derived table query should have no errors: {:?}",
-        diagnostics
+        "Derived table query should have no errors: {diagnostics:?}"
     );
 }
 
@@ -935,8 +913,7 @@ fn test_derived_table_join() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Derived table in JOIN should work: {:?}",
-        diagnostics
+        "Derived table in JOIN should work: {diagnostics:?}"
     );
 }
 
@@ -949,15 +926,14 @@ fn test_derived_table_with_alias_expression() {
         .analyze("SELECT sub.user_count FROM (SELECT COUNT(*) AS user_count FROM users) AS sub");
     assert!(
         diagnostics.is_empty(),
-        "Derived table with aliased expression should work: {:?}",
-        diagnostics
+        "Derived table with aliased expression should work: {diagnostics:?}"
     );
 }
 
 // ========== MySQL Dialect Tests ==========
 
 fn setup_mysql_catalog() -> Catalog {
-    let schema_sql = r#"
+    let schema_sql = r"
             CREATE TABLE users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 username VARCHAR(50) NOT NULL,
@@ -979,7 +955,7 @@ fn setup_mysql_catalog() -> Catalog {
                 published_at DATETIME,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             ) ENGINE=InnoDB;
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
     builder.parse(schema_sql).unwrap();
@@ -1023,8 +999,7 @@ fn test_mysql_valid_select() {
     let diagnostics = analyzer.analyze("SELECT id, username, email, age, status FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL SELECT should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL SELECT should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1038,8 +1013,7 @@ fn test_mysql_join() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL JOIN should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL JOIN should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1053,8 +1027,7 @@ fn test_mysql_insert() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL INSERT should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL INSERT should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1089,8 +1062,7 @@ fn test_mysql_subquery() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL subquery should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL subquery should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1104,8 +1076,7 @@ fn test_mysql_cte() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL CTE should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL CTE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1117,8 +1088,7 @@ fn test_mysql_update() {
     let diagnostics = analyzer.analyze("UPDATE posts SET is_published = 1 WHERE id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL UPDATE should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL UPDATE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1130,8 +1100,7 @@ fn test_mysql_delete() {
     let diagnostics = analyzer.analyze("DELETE FROM posts WHERE user_id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid MySQL DELETE should have no errors: {:?}",
-        diagnostics
+        "Valid MySQL DELETE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1154,8 +1123,7 @@ fn test_deeply_nested_subquery() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Deeply nested subquery should work: {:?}",
-        diagnostics
+        "Deeply nested subquery should work: {diagnostics:?}"
     );
 }
 
@@ -1176,8 +1144,7 @@ fn test_multiple_ctes_with_dependencies() {
         );
     assert!(
         diagnostics.is_empty(),
-        "Multiple dependent CTEs should work: {:?}",
-        diagnostics
+        "Multiple dependent CTEs should work: {diagnostics:?}"
     );
 }
 
@@ -1201,12 +1168,12 @@ fn test_multiple_ctes_invalid_reference() {
 #[test]
 fn test_large_join_four_tables() {
     // Create extended schema
-    let extended_schema = r#"
+    let extended_schema = r"
             CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));
             CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER);
             CREATE TABLE products (id SERIAL PRIMARY KEY, name TEXT);
             CREATE TABLE order_items (order_id INTEGER, product_id INTEGER, quantity INTEGER);
-        "#;
+        ";
 
     let mut builder = SchemaBuilder::new();
     builder.parse(extended_schema).unwrap();
@@ -1222,8 +1189,7 @@ fn test_large_join_four_tables() {
     );
     assert!(
         diagnostics.is_empty(),
-        "4-table JOIN should work: {:?}",
-        diagnostics
+        "4-table JOIN should work: {diagnostics:?}"
     );
 }
 
@@ -1242,7 +1208,7 @@ fn test_error_message_suggestion_typo() {
         "Should provide typo suggestion"
     );
     if let Some(ref help) = diagnostics[0].help {
-        assert!(help.contains("name"), "Should suggest 'name': {}", help);
+        assert!(help.contains("name"), "Should suggest 'name': {help}");
     }
 }
 
@@ -1286,8 +1252,7 @@ fn test_subquery_scope_isolation() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Correlated subquery should work: {:?}",
-        diagnostics
+        "Correlated subquery should work: {diagnostics:?}"
     );
 }
 
@@ -1305,8 +1270,7 @@ fn test_derived_table_scope_isolation() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Derived table with proper reference should work: {:?}",
-        diagnostics
+        "Derived table with proper reference should work: {diagnostics:?}"
     );
 }
 
@@ -1339,8 +1303,7 @@ fn test_union_column_count_validation() {
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch
                 && d.message.contains("column count mismatch")),
-        "Expected set-operation column count mismatch diagnostic, got: {:?}",
-        diagnostics
+        "Expected set-operation column count mismatch diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1358,8 +1321,7 @@ fn test_union_type_mismatch_validation() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
-        "Expected set-operation type mismatch diagnostic, got: {:?}",
-        diagnostics
+        "Expected set-operation type mismatch diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1377,8 +1339,7 @@ fn test_intersect_type_mismatch_validation() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
-        "Expected INTERSECT type mismatch diagnostic, got: {:?}",
-        diagnostics
+        "Expected INTERSECT type mismatch diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1396,8 +1357,7 @@ fn test_except_type_mismatch_validation() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch && d.message.contains("type mismatch")),
-        "Expected EXCEPT type mismatch diagnostic, got: {:?}",
-        diagnostics
+        "Expected EXCEPT type mismatch diagnostic, got: {diagnostics:?}"
     );
 }
 
@@ -1413,8 +1373,7 @@ fn test_union_type_compatible_validation() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Compatible UNION should not produce diagnostics: {:?}",
-        diagnostics
+        "Compatible UNION should not produce diagnostics: {diagnostics:?}"
     );
 }
 
@@ -1454,8 +1413,7 @@ fn test_union_with_unexpandable_wildcard_no_set_op_diagnostic() {
         diagnostics
             .iter()
             .all(|d| !d.message.contains("Set operation")),
-        "Unexpandable wildcard UNION should not emit set-operation diagnostics: {:?}",
-        diagnostics
+        "Unexpandable wildcard UNION should not emit set-operation diagnostics: {diagnostics:?}"
     );
 }
 
@@ -1471,8 +1429,7 @@ fn test_self_join_with_aliases() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Self-join should work with aliases: {:?}",
-        diagnostics
+        "Self-join should work with aliases: {diagnostics:?}"
     );
 }
 
@@ -1484,8 +1441,7 @@ fn test_cross_join() {
     let diagnostics = analyzer.analyze("SELECT u.name, o.id FROM users u CROSS JOIN orders o");
     assert!(
         diagnostics.is_empty(),
-        "CROSS JOIN should work: {:?}",
-        diagnostics
+        "CROSS JOIN should work: {diagnostics:?}"
     );
 }
 
@@ -1500,8 +1456,7 @@ fn test_natural_join() {
     // Even if 'id' exists in both tables, NATURAL JOIN is a valid construct
     assert!(
         diagnostics.is_empty() || diagnostics[0].kind != DiagnosticKind::ParseError,
-        "NATURAL JOIN should be parseable: {:?}",
-        diagnostics
+        "NATURAL JOIN should be parseable: {diagnostics:?}"
     );
 }
 
@@ -1518,8 +1473,7 @@ fn test_unnest_with_ordinality_column_alias() {
     );
     assert!(
         diagnostics.is_empty(),
-        "unnest WITH ORDINALITY columns should be resolvable: {:?}",
-        diagnostics
+        "unnest WITH ORDINALITY columns should be resolvable: {diagnostics:?}"
     );
 }
 
@@ -1534,8 +1488,7 @@ fn test_unnest_with_ordinality_qualified_columns() {
     );
     assert!(
         diagnostics.is_empty(),
-        "Qualified unnest columns should be resolvable: {:?}",
-        diagnostics
+        "Qualified unnest columns should be resolvable: {diagnostics:?}"
     );
 }
 
@@ -1553,8 +1506,7 @@ fn test_unnest_with_ordinality_in_cte() {
     );
     assert!(
         diagnostics.is_empty(),
-        "unnest WITH ORDINALITY in CTE should work: {:?}",
-        diagnostics
+        "unnest WITH ORDINALITY in CTE should work: {diagnostics:?}"
     );
 }
 
@@ -1572,8 +1524,7 @@ fn test_unnest_with_ordinality_join() {
     );
     assert!(
         diagnostics.is_empty(),
-        "unnest WITH ORDINALITY in JOIN should work: {:?}",
-        diagnostics
+        "unnest WITH ORDINALITY in JOIN should work: {diagnostics:?}"
     );
 }
 
@@ -1590,8 +1541,7 @@ fn test_unnest_without_alias_columns() {
         assert_ne!(
             d.kind,
             DiagnosticKind::ParseError,
-            "Should not produce parse errors: {:?}",
-            d
+            "Should not produce parse errors: {d:?}"
         );
     }
 }
@@ -1599,12 +1549,12 @@ fn test_unnest_without_alias_columns() {
 // ==================== Issue #15: UUID string literal compatibility ====================
 
 fn setup_uuid_catalog() -> Catalog {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE users (
             id UUID PRIMARY KEY,
             name VARCHAR(256)
         );
-    "#;
+    ";
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
     let (catalog, _) = builder.build();
@@ -1621,17 +1571,16 @@ fn test_uuid_string_literal_comparison() {
         analyzer.analyze("SELECT * FROM users WHERE id = '123e4567-e89b-12d3-a456-426614174000'");
     assert!(
         diagnostics.is_empty(),
-        "UUID column compared with string literal should not error: {:?}",
-        diagnostics
+        "UUID column compared with string literal should not error: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_uuid_string_literal_in_join() {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE users (id UUID PRIMARY KEY, name VARCHAR(256));
         CREATE TABLE sessions (id SERIAL, user_id UUID);
-    "#;
+    ";
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
     let (catalog, _) = builder.build();
@@ -1642,8 +1591,7 @@ fn test_uuid_string_literal_in_join() {
         analyzer.analyze("SELECT u.name FROM users u JOIN sessions s ON u.id = s.user_id");
     assert!(
         diagnostics.is_empty(),
-        "JOIN on UUID columns should work: {:?}",
-        diagnostics
+        "JOIN on UUID columns should work: {diagnostics:?}"
     );
 }
 
@@ -1673,8 +1621,7 @@ fn test_insert_type_mismatch() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "Should detect type mismatch in INSERT VALUES: {:?}",
-        diagnostics
+        "Should detect type mismatch in INSERT VALUES: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
     assert!(diagnostics[0].message.contains("id"));
@@ -1689,8 +1636,7 @@ fn test_insert_type_compatible() {
     let diagnostics = analyzer.analyze("INSERT INTO users (id, name) VALUES (42, 'a')");
     assert!(
         diagnostics.is_empty(),
-        "Compatible INSERT should have no errors: {:?}",
-        diagnostics
+        "Compatible INSERT should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1705,8 +1651,7 @@ fn test_insert_null_not_null_violation() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::PotentialNullViolation),
-        "Expected NOT NULL violation for INSERT NULL into NOT NULL column: {:?}",
-        diagnostics
+        "Expected NOT NULL violation for INSERT NULL into NOT NULL column: {diagnostics:?}"
     );
 }
 
@@ -1719,8 +1664,7 @@ fn test_insert_null_nullable_compatible() {
     let diagnostics = analyzer.analyze("INSERT INTO users (name, email) VALUES ('a', NULL)");
     assert!(
         diagnostics.is_empty(),
-        "NULL INSERT into nullable column should have no errors: {:?}",
-        diagnostics
+        "NULL INSERT into nullable column should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1734,8 +1678,7 @@ fn test_update_type_mismatch() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "Should detect type mismatch in UPDATE SET: {:?}",
-        diagnostics
+        "Should detect type mismatch in UPDATE SET: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
     assert!(diagnostics[0].message.contains("id"));
@@ -1750,8 +1693,7 @@ fn test_update_type_compatible() {
     let diagnostics = analyzer.analyze("UPDATE users SET name = 'new_name'");
     assert!(
         diagnostics.is_empty(),
-        "Compatible UPDATE should have no errors: {:?}",
-        diagnostics
+        "Compatible UPDATE should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1766,8 +1708,7 @@ fn test_update_null_not_null_violation() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::PotentialNullViolation),
-        "Expected NOT NULL violation for UPDATE NULL into NOT NULL column: {:?}",
-        diagnostics
+        "Expected NOT NULL violation for UPDATE NULL into NOT NULL column: {diagnostics:?}"
     );
 }
 
@@ -1780,8 +1721,7 @@ fn test_update_null_nullable_compatible() {
     let diagnostics = analyzer.analyze("UPDATE users SET email = NULL");
     assert!(
         diagnostics.is_empty(),
-        "NULL UPDATE into nullable column should have no errors: {:?}",
-        diagnostics
+        "NULL UPDATE into nullable column should have no errors: {diagnostics:?}"
     );
 }
 
@@ -1795,8 +1735,7 @@ fn test_update_multiple_type_errors() {
     assert_eq!(
         diagnostics.len(),
         2,
-        "Should detect multiple type mismatches in UPDATE: {:?}",
-        diagnostics
+        "Should detect multiple type mismatches in UPDATE: {diagnostics:?}"
     );
     assert!(diagnostics
         .iter()
@@ -1814,8 +1753,7 @@ fn test_cast_type_inference_no_false_positive() {
     let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER)");
     assert!(
         diagnostics.is_empty(),
-        "CAST to INTEGER should be compatible with INTEGER column: {:?}",
-        diagnostics
+        "CAST to INTEGER should be compatible with INTEGER column: {diagnostics:?}"
     );
 }
 
@@ -1829,8 +1767,7 @@ fn test_cast_type_inference_detects_mismatch() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "Should detect type mismatch: {:?}",
-        diagnostics
+        "Should detect type mismatch: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
 }
@@ -1845,8 +1782,7 @@ fn test_cast_in_insert_compatible() {
         analyzer.analyze("INSERT INTO orders (user_id) VALUES (CAST('123' AS INTEGER))");
     assert!(
         diagnostics.is_empty(),
-        "CAST to INTEGER should be compatible with INTEGER column in INSERT: {:?}",
-        diagnostics
+        "CAST to INTEGER should be compatible with INTEGER column in INSERT: {diagnostics:?}"
     );
 }
 
@@ -1859,15 +1795,14 @@ fn test_cast_in_arithmetic() {
     let diagnostics = analyzer.analyze("SELECT * FROM users WHERE id = CAST(name AS INTEGER) + 1");
     assert!(
         diagnostics.is_empty(),
-        "CAST to INTEGER in arithmetic should be compatible: {:?}",
-        diagnostics
+        "CAST to INTEGER in arithmetic should be compatible: {diagnostics:?}"
     );
 }
 
 // ========== SQLite Dialect Tests ==========
 
 fn setup_sqlite_catalog() -> Catalog {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -1882,7 +1817,7 @@ fn setup_sqlite_catalog() -> Catalog {
             body TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
-    "#;
+    ";
 
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::SQLite);
     builder.parse(schema_sql).unwrap();
@@ -1902,8 +1837,7 @@ fn test_function_count_returns_bigint() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch),
-        "COUNT() (bigint) compared with TEXT column should produce type mismatch: {:?}",
-        diagnostics
+        "COUNT() (bigint) compared with TEXT column should produce type mismatch: {diagnostics:?}"
     );
 }
 
@@ -1919,8 +1853,7 @@ fn test_function_count_compatible_with_integer() {
         .collect();
     assert!(
         type_errors.is_empty(),
-        "COUNT() (bigint) compared with INTEGER should be compatible: {:?}",
-        type_errors
+        "COUNT() (bigint) compared with INTEGER should be compatible: {type_errors:?}"
     );
 }
 
@@ -1934,8 +1867,7 @@ fn test_function_sum_returns_numeric() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch),
-        "SUM() compared with TEXT should produce type mismatch: {:?}",
-        diagnostics
+        "SUM() compared with TEXT should produce type mismatch: {diagnostics:?}"
     );
 }
 
@@ -1949,8 +1881,7 @@ fn test_function_upper_returns_text() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch),
-        "UPPER() (text) compared with INTEGER should produce type mismatch: {:?}",
-        diagnostics
+        "UPPER() (text) compared with INTEGER should produce type mismatch: {diagnostics:?}"
     );
 }
 
@@ -1966,8 +1897,7 @@ fn test_function_upper_compatible_with_text() {
         .collect();
     assert!(
         type_errors.is_empty(),
-        "UPPER() (text) compared with TEXT should be compatible: {:?}",
-        type_errors
+        "UPPER() (text) compared with TEXT should be compatible: {type_errors:?}"
     );
 }
 
@@ -1981,8 +1911,7 @@ fn test_function_length_returns_integer() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch),
-        "LENGTH() (integer) compared with TEXT should produce type mismatch: {:?}",
-        diagnostics
+        "LENGTH() (integer) compared with TEXT should produce type mismatch: {diagnostics:?}"
     );
 }
 
@@ -1996,8 +1925,7 @@ fn test_function_coalesce_inherits_arg_type() {
         diagnostics
             .iter()
             .any(|d| d.kind == DiagnosticKind::TypeMismatch),
-        "COALESCE(integer) compared with TEXT should produce type mismatch: {:?}",
-        diagnostics
+        "COALESCE(integer) compared with TEXT should produce type mismatch: {diagnostics:?}"
     );
 }
 
@@ -2014,8 +1942,7 @@ fn test_function_in_insert_type_check() {
         .collect();
     assert!(
         type_errors.is_empty(),
-        "LENGTH() returns INTEGER, compatible with INTEGER column: {:?}",
-        type_errors
+        "LENGTH() returns INTEGER, compatible with INTEGER column: {type_errors:?}"
     );
 }
 
@@ -2048,19 +1975,18 @@ fn test_sqlite_valid_select() {
     let diagnostics = analyzer.analyze("SELECT id, name, email FROM users");
     assert!(
         diagnostics.is_empty(),
-        "Valid SQLite SELECT should have no errors: {:?}",
-        diagnostics
+        "Valid SQLite SELECT should have no errors: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_sqlite_autoincrement() {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE counters (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             value INTEGER NOT NULL
         );
-    "#;
+    ";
 
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::SQLite);
     builder.parse(schema_sql).unwrap();
@@ -2082,8 +2008,7 @@ fn test_sqlite_insert() {
         analyzer.analyze("INSERT INTO users (name, email, age) VALUES ('Alice', 'a@b.com', 30)");
     assert!(
         diagnostics.is_empty(),
-        "Valid SQLite INSERT should have no errors: {:?}",
-        diagnostics
+        "Valid SQLite INSERT should have no errors: {diagnostics:?}"
     );
 
     // Type mismatch: age is INTEGER, inserting TEXT
@@ -2092,8 +2017,7 @@ fn test_sqlite_insert() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "SQLite INSERT type mismatch should be detected: {:?}",
-        diagnostics
+        "SQLite INSERT type mismatch should be detected: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
 }
@@ -2107,8 +2031,7 @@ fn test_sqlite_update() {
     let diagnostics = analyzer.analyze("UPDATE users SET name = 'Bob' WHERE id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid SQLite UPDATE should have no errors: {:?}",
-        diagnostics
+        "Valid SQLite UPDATE should have no errors: {diagnostics:?}"
     );
 
     // Type mismatch: age is INTEGER, setting to TEXT
@@ -2116,8 +2039,7 @@ fn test_sqlite_update() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "SQLite UPDATE type mismatch should be detected: {:?}",
-        diagnostics
+        "SQLite UPDATE type mismatch should be detected: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
 }
@@ -2130,8 +2052,7 @@ fn test_sqlite_delete() {
     let diagnostics = analyzer.analyze("DELETE FROM users WHERE id = 1");
     assert!(
         diagnostics.is_empty(),
-        "Valid SQLite DELETE should have no errors: {:?}",
-        diagnostics
+        "Valid SQLite DELETE should have no errors: {diagnostics:?}"
     );
 
     // Column not found
@@ -2158,8 +2079,7 @@ fn test_inline_disable_same_line() {
     let diagnostics = analyzer.analyze("SELECT bad_col FROM users -- sqlsift:disable E0002");
     assert!(
         diagnostics.is_empty(),
-        "Inline disable should suppress E0002: {:?}",
-        diagnostics
+        "Inline disable should suppress E0002: {diagnostics:?}"
     );
 }
 
@@ -2172,8 +2092,7 @@ fn test_inline_disable_next_line() {
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "Standalone disable should suppress next line: {:?}",
-        diagnostics
+        "Standalone disable should suppress next line: {diagnostics:?}"
     );
 }
 
@@ -2186,8 +2105,7 @@ fn test_inline_disable_multiple_codes() {
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "Should suppress both E0001 and E0002: {:?}",
-        diagnostics
+        "Should suppress both E0001 and E0002: {diagnostics:?}"
     );
 }
 
@@ -2200,8 +2118,7 @@ fn test_inline_disable_all() {
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "Disable all should suppress everything: {:?}",
-        diagnostics
+        "Disable all should suppress everything: {diagnostics:?}"
     );
 }
 
@@ -2216,8 +2133,7 @@ fn test_inline_disable_only_affects_specified_line() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "Only line 2 should be suppressed: {:?}",
-        diagnostics
+        "Only line 2 should be suppressed: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
     assert!(diagnostics[0].message.contains("another_bad"));
@@ -2234,8 +2150,7 @@ fn test_inline_disable_wrong_code_not_suppressed() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "E0001 directive should not suppress E0002: {:?}",
-        diagnostics
+        "E0001 directive should not suppress E0002: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
 }
@@ -2250,8 +2165,7 @@ fn test_inline_disable_in_string_not_treated_as_directive() {
     assert_eq!(
         diagnostics.len(),
         1,
-        "Directive inside string should be ignored: {:?}",
-        diagnostics
+        "Directive inside string should be ignored: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
 }
@@ -2264,19 +2178,18 @@ fn test_inline_disable_in_string_not_treated_as_directive() {
 fn test_cte_insert_returning_columns() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
-    let sql = r#"
+    let sql = r"
         WITH new_user AS (
             INSERT INTO users (name, email)
             VALUES ('Alice', 'alice@example.com')
             RETURNING id, name, email
         )
         SELECT new_user.id, new_user.name, new_user.email FROM new_user
-    "#;
+    ";
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "INSERT RETURNING columns should be accessible in subsequent queries: {:?}",
-        diagnostics
+        "INSERT RETURNING columns should be accessible in subsequent queries: {diagnostics:?}"
     );
 }
 
@@ -2284,7 +2197,7 @@ fn test_cte_insert_returning_columns() {
 fn test_cte_insert_returning_used_in_join() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
-    let sql = r#"
+    let sql = r"
         WITH new_user AS (
             INSERT INTO users (name, email)
             VALUES ('Bob', 'bob@example.com')
@@ -2295,12 +2208,11 @@ fn test_cte_insert_returning_used_in_join() {
             FROM new_user nu
         )
         SELECT up.id, up.name FROM user_posts up
-    "#;
+    ";
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "INSERT RETURNING columns should be usable in subsequent CTEs: {:?}",
-        diagnostics
+        "INSERT RETURNING columns should be usable in subsequent CTEs: {diagnostics:?}"
     );
 }
 
@@ -2310,7 +2222,7 @@ fn test_cte_insert_returning_used_in_join() {
 
 #[test]
 fn test_subquery_in_update_no_false_ambiguity() {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE purchases (
             id UUID PRIMARY KEY,
             latest_purchase_ref_id UUID
@@ -2319,46 +2231,44 @@ fn test_subquery_in_update_no_false_ambiguity() {
             id UUID PRIMARY KEY,
             latest_purchase_id UUID
         );
-    "#;
+    ";
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
     let (catalog, _) = builder.build();
     let mut analyzer = Analyzer::new(&catalog);
-    let sql = r#"
+    let sql = r"
         UPDATE purchases
         SET latest_purchase_ref_id = NULL
         WHERE latest_purchase_ref_id IN (
             SELECT id FROM latest_purchase_refs
             WHERE latest_purchase_id = '00000000-0000-0000-0000-000000000000'
         )
-    "#;
+    ";
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "Subquery columns should not be ambiguous with outer table: {:?}",
-        diagnostics
+        "Subquery columns should not be ambiguous with outer table: {diagnostics:?}"
     );
 }
 
 #[test]
 fn test_subquery_in_delete_no_false_ambiguity() {
-    let schema_sql = r#"
+    let schema_sql = r"
         CREATE TABLE orders (id SERIAL PRIMARY KEY, status TEXT);
         CREATE TABLE archived_orders (id SERIAL PRIMARY KEY, reason TEXT);
-    "#;
+    ";
     let mut builder = SchemaBuilder::new();
     builder.parse(schema_sql).unwrap();
     let (catalog, _) = builder.build();
     let mut analyzer = Analyzer::new(&catalog);
-    let sql = r#"
+    let sql = r"
         DELETE FROM orders
         WHERE id IN (SELECT id FROM archived_orders)
-    "#;
+    ";
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "Subquery in DELETE should have isolated scope: {:?}",
-        diagnostics
+        "Subquery in DELETE should have isolated scope: {diagnostics:?}"
     );
 }
 
@@ -2366,14 +2276,13 @@ fn test_subquery_in_delete_no_false_ambiguity() {
 fn test_exists_subquery_no_false_ambiguity() {
     let catalog = setup_catalog();
     let mut analyzer = Analyzer::new(&catalog);
-    let sql = r#"
+    let sql = r"
         SELECT u.id FROM users u
         WHERE EXISTS (SELECT id FROM orders WHERE user_id = 1)
-    "#;
+    ";
     let diagnostics = analyzer.analyze(sql);
     assert!(
         diagnostics.is_empty(),
-        "EXISTS subquery should have isolated scope: {:?}",
-        diagnostics
+        "EXISTS subquery should have isolated scope: {diagnostics:?}"
     );
 }

@@ -119,8 +119,7 @@ impl FromStr for RuleLevel {
             "warn" | "warning" => Ok(RuleLevel::Warn),
             "error" | "deny" => Ok(RuleLevel::Error),
             _ => Err(format!(
-                "invalid rule level '{}' (expected 'off', 'warn' or 'error')",
-                s
+                "invalid rule level '{s}' (expected 'off', 'warn' or 'error')"
             )),
         }
     }

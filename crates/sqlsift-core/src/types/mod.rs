@@ -129,12 +129,12 @@ impl SqlType {
 
             DataType::Time(precision, tz) => SqlType::Time {
                 precision: *precision,
-                with_timezone: has_time_zone(tz),
+                with_timezone: has_time_zone(*tz),
             },
 
             DataType::Timestamp(precision, tz) => SqlType::Timestamp {
                 precision: *precision,
-                with_timezone: has_time_zone(tz),
+                with_timezone: has_time_zone(*tz),
             },
 
             DataType::Datetime(precision) => SqlType::Timestamp {
@@ -198,11 +198,12 @@ impl SqlType {
 
     /// Check if this type is compatible with another type
     pub fn is_compatible_with(&self, other: &SqlType) -> TypeCompatibility {
+        use SqlType::*;
+
         if self == other {
             return TypeCompatibility::Exact;
         }
 
-        use SqlType::*;
         match (self, other) {
             // Numeric type coercion
             (TinyInt, SmallInt | MediumInt | Integer | BigInt) => TypeCompatibility::ImplicitCast,
@@ -399,7 +400,7 @@ impl SqlType {
 }
 
 /// Whether a TIME/TIMESTAMP type carries a time zone (`WITH TIME ZONE`, or the `TIMESTAMPTZ` / `TIMETZ` shorthand)
-fn has_time_zone(tz: &sqlparser::ast::TimezoneInfo) -> bool {
+fn has_time_zone(tz: sqlparser::ast::TimezoneInfo) -> bool {
     matches!(
         tz,
         sqlparser::ast::TimezoneInfo::WithTimeZone | sqlparser::ast::TimezoneInfo::Tz

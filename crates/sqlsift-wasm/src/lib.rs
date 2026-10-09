@@ -186,7 +186,7 @@ fn parse_error_location(message: &str) -> Option<(usize, usize)> {
     let idx = message.rfind("Line: ")?;
     let rest = &message[idx + "Line: ".len()..];
     let (line, rest) = rest.split_once(", Column: ")?;
-    let column: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let column: String = rest.chars().take_while(char::is_ascii_digit).collect();
     let line = line.trim().parse().ok()?;
     let column = column.parse().ok()?;
     (line > 0).then_some((line, column))

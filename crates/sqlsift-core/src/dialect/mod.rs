@@ -40,8 +40,7 @@ impl FromStr for SqlDialect {
             "mysql" | "mysql8" => Ok(SqlDialect::MySQL),
             "sqlite" | "sqlite3" => Ok(SqlDialect::SQLite),
             _ => Err(format!(
-                "Unknown dialect: '{}'. Supported dialects: postgresql, mysql, sqlite.",
-                s
+                "Unknown dialect: '{s}'. Supported dialects: postgresql, mysql, sqlite."
             )),
         }
     }
