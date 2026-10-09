@@ -13,12 +13,14 @@ use sqlsift_core::rules::{
 const KNOWN_KEYS: &[&str] = &[
     "schema",
     "files",
+    "ignore",
     "dialect",
     "format",
     "disable",
     "schema_dir",
     "rules",
     "categories",
+    "max_warnings",
 ];
 
 /// Configuration for sqlsift
@@ -32,13 +34,22 @@ pub struct Config {
     #[serde(default)]
     pub files: Vec<String>,
 
+    /// Glob patterns of query files to skip (applied to `files` and to files
+    /// given on the command line)
+    #[serde(default)]
+    pub ignore: Vec<String>,
+
     /// SQL dialect ("postgresql", "mysql", "sqlite")
     #[serde(default)]
     pub dialect: Option<String>,
 
-    /// Output format (human, json, sarif)
+    /// Output format (human, json, sarif, github)
     #[serde(default)]
     pub format: Option<String>,
+
+    /// Fail the check when more than this many warnings are reported
+    #[serde(default)]
+    pub max_warnings: Option<usize>,
 
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
@@ -59,8 +70,8 @@ pub struct Config {
 impl Config {
     /// Load configuration from a TOML file.
     ///
-    /// Relative paths in `schema`, `files` and `schema_dir` are resolved
-    /// against the directory containing the configuration file.
+    /// Relative paths in `schema`, `files`, `ignore` and `schema_dir` are
+    /// resolved against the directory containing the configuration file.
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| miette::miette!("Failed to read config file {}: {}", path.display(), e))?;
@@ -85,6 +96,23 @@ impl Config {
         config.schema = config.schema.iter().map(resolve).collect();
         config.files = config.files.iter().map(resolve).collect();
         config.schema_dir = config.schema_dir.as_ref().map(resolve);
+        // Ignore patterns are matched later; the base directory is literal text
+        for pattern in &config.ignore {
+            glob::Pattern::new(pattern).map_err(|e| {
+                miette::miette!(
+                    "{}: invalid ignore pattern '{}': {}",
+                    path.display(),
+                    pattern,
+                    e
+                )
+            })?;
+        }
+        let escaped_base = PathBuf::from(glob::Pattern::escape(&base.to_string_lossy()));
+        config.ignore = config
+            .ignore
+            .iter()
+            .map(|p| resolve_path(&escaped_base, p))
+            .collect();
         Ok(config)
     }
 
@@ -108,15 +136,21 @@ impl Config {
     }
 
     /// Merge CLI arguments into configuration
-    /// CLI arguments take precedence over config file values
+    /// CLI arguments take precedence over config file values; `--ignore`
+    /// patterns are added to the config file's `ignore`
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_with_args(
         mut self,
         schema: &[PathBuf],
         schema_dir: Option<&Path>,
         files: &[PathBuf],
+        ignore: &[String],
         format: Option<crate::args::OutputFormat>,
         dialect: Option<&str>,
+        max_warnings: Option<usize>,
     ) -> Self {
+        self.ignore.extend(ignore.iter().cloned());
+
         // CLI args override config file
         if !schema.is_empty() {
             self.schema = schema.iter().map(|p| p.display().to_string()).collect();
@@ -136,6 +170,10 @@ impl Config {
 
         if let Some(dialect) = dialect {
             self.dialect = Some(dialect.to_string());
+        }
+
+        if max_warnings.is_some() {
+            self.max_warnings = max_warnings;
         }
 
         self

@@ -124,7 +124,8 @@ impl<'a> Analyzer<'a> {
         };
 
         // Parse the SQL
-        let statements = self.parse_statements(&source.text);
+        let lines = LineIndex::new(&source.text);
+        let statements = self.parse_statements(&source.text, &lines);
 
         // Tables, views and types created, altered or dropped by the file's own
         // statements, applied to a copy of the catalog made on the first such
@@ -162,14 +163,22 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline directives, then apply rule levels.
+        // Spans are built from line/column locations: add their byte offsets
+        for diagnostic in &mut self.diagnostics {
+            let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+            for span in diagnostic.span.iter_mut().chain(labels) {
+                lines.fill_offset(span);
+            }
+        }
+
+        // Filter out diagnostics suppressed by inline or file directives, then apply rule levels.
         // A diagnostic that a directive meant to suppress but misspelled the rule of
         // says so.
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
             .filter_map(|mut d| {
                 let Some(span) = d.span else {
-                    return Some(d);
+                    return (!directives.is_suppressed_in_file(d.kind)).then_some(d);
                 };
                 // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
                 let substituted = matches!(
@@ -199,18 +208,17 @@ impl<'a> Analyzer<'a> {
     /// a syntax error is reported where it occurs and doesn't hide diagnostics in the
     /// other statements. Only the statement's own text is parsed (keeping this linear
     /// in the input size); its locations are shifted by its [`Origin`] afterwards.
-    fn parse_statements(&mut self, sql: &str) -> Vec<(Statement, Origin)> {
+    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> Vec<(Statement, Origin)> {
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => return statements.into_iter().map(|s| (s, Origin::START)).collect(),
             Err(error) => error,
         };
 
-        let lines = LineIndex::new(sql);
-        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, &lines) else {
+        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, lines) else {
             // Tokenizer error: nothing can be parsed reliably
             self.diagnostics
-                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), &lines));
+                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), lines));
             return Vec::new();
         };
 
@@ -222,7 +230,7 @@ impl<'a> Analyzer<'a> {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
                 Err(error) => self
                     .diagnostics
-                    .push(parse_error_diagnostic(&error, sql, range, &lines)),
+                    .push(parse_error_diagnostic(&error, sql, range, lines)),
             }
         }
         statements
@@ -274,6 +282,13 @@ impl<'a> LineIndex<'a> {
             .char_indices()
             .nth(column.saturating_sub(1) as usize)
             .map_or(self.sql.len(), |(i, _)| line_start + i)
+    }
+
+    /// Set the byte offset of a span that has a line/column location
+    fn fill_offset(&self, span: &mut Span) {
+        if span.line > 0 {
+            span.offset = self.byte_offset(span.line as u64, span.column as u64);
+        }
     }
 
     /// 1-indexed line / character column of a byte offset

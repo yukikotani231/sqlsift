@@ -17,6 +17,7 @@ miette.workspace = true
 serde.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
+glob.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4"

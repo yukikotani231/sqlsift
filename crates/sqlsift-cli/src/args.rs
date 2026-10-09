@@ -21,12 +21,18 @@ pub struct Args {
     pub quiet: bool,
 }
 
+// Parsed once per run, so the size difference between variants doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Command {
     /// Check SQL files against schema definitions
     Check {
-        /// SQL files to check (supports glob patterns)
+        /// SQL files to check (supports glob patterns; `-` reads a query from stdin)
         files: Vec<PathBuf>,
+
+        /// File name to report for the query read from stdin (`-`)
+        #[arg(long = "stdin-filename", value_name = "PATH")]
+        stdin_filename: Option<PathBuf>,
 
         /// Schema definition files
         #[arg(short, long = "schema", value_name = "FILE")]
@@ -35,6 +41,10 @@ pub enum Command {
         /// Directory containing schema files
         #[arg(long = "schema-dir", value_name = "DIR")]
         schema_dir: Option<PathBuf>,
+
+        /// Skip query files matching a glob pattern (repeatable, e.g. `--ignore 'sql/archive/**'`)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
 
         /// Path to configuration file (default: sqlsift.toml in current or parent directory)
         #[arg(short, long = "config", value_name = "FILE")]
@@ -68,6 +78,10 @@ pub enum Command {
         /// Maximum number of errors before stopping
         #[arg(long, default_value = "100")]
         max_errors: usize,
+
+        /// Fail (exit 1) when more than N warnings are reported
+        #[arg(long, value_name = "N")]
+        max_warnings: Option<usize>,
     },
 
     /// List all rules with their category and default level
@@ -117,6 +131,8 @@ pub enum OutputFormat {
     Json,
     /// SARIF output (for GitHub Code Scanning)
     Sarif,
+    /// GitHub Actions workflow commands (annotations on pull requests)
+    Github,
 }
 
 /// Output format of `sqlsift schema`

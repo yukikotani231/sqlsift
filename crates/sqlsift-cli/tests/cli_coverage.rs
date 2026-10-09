@@ -80,6 +80,31 @@ impl TempDir {
             .expect("failed to execute sqlsift");
         Run::from(output)
     }
+
+    /// Run `sqlsift` with the temp dir as the working directory, writing `input` to stdin.
+    fn run_stdin(&self, args: &[&str], input: &str) -> Run {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sqlsift"))
+            .current_dir(&self.path)
+            .args(args)
+            .env("NO_COLOR", "1")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to execute sqlsift");
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        // sqlsift may exit without reading stdin (e.g. on a usage error)
+        let _ = stdin.write_all(input.as_bytes());
+        drop(stdin);
+        Run::from(
+            child
+                .wait_with_output()
+                .expect("failed to wait for sqlsift"),
+        )
+    }
 }
 
 impl Drop for TempDir {
@@ -350,7 +375,38 @@ fn glob_matching_nothing_exits_two() {
     let t = with_users_schema("glob-none");
     t.run(&["check", "--schema", "schema.sql", "queries/*.sql"])
         .assert_code(2)
-        .assert_stderr_contains("No query files specified");
+        .assert_stderr_contains("No files match 'queries/*.sql'")
+        .assert_stderr_lacks("No query files specified");
+}
+
+#[test]
+fn glob_matching_nothing_names_every_pattern() {
+    let t = with_users_schema("glob-none-multi");
+    t.run(&["check", "-s", "schema.sql", "a/*.sql", "b/**/*.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("No files match 'a/*.sql', 'b/**/*.sql'");
+}
+
+#[test]
+fn config_files_glob_matching_nothing_names_the_pattern() {
+    let t = with_users_schema("glob-none-cfg");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"sql/none/*.sql\"]\n",
+    );
+    t.run(&["check"])
+        .assert_code(2)
+        .assert_stderr_contains("No files match 'sql/none/*.sql'");
+}
+
+#[test]
+fn glob_matching_nothing_warns_when_other_patterns_match() {
+    let t = with_users_schema("glob-some");
+    t.write("queries/a.sql", "SELECT id FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "queries/*.sql", "typo/*.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Warning: no files match 'typo/*.sql'")
+        .assert_stderr_contains("All 1 file(s) passed validation");
 }
 
 #[test]
@@ -2357,4 +2413,508 @@ fn config_invalid_format_exits_two() {
         .assert_code(2)
         .assert_stderr_contains("Invalid format 'xml'")
         .assert_stderr_contains("human, json, sarif");
+}
+
+// ---------------------------------------------------------------------------
+// JSON span offsets (#85)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_span_offset_is_the_byte_offset_of_the_location() {
+    let t = with_users_schema("json-offset");
+    let sql = "SELECT id FROM users;\n-- é\nSELECT 'ü', nme FROM users;\n";
+    t.write("q.sql", sql);
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "q.sql"]);
+    run.assert_code(1);
+    let v = run.json();
+    let span = &v["files"][0]["diagnostics"][0]["span"];
+    assert_eq!(span["line"], 3);
+    assert_eq!(span["column"], 13);
+    let offset = span["offset"].as_u64().expect("offset") as usize;
+    assert_eq!(offset, sql.find("nme").unwrap());
+    assert_eq!(&sql[offset..offset + 3], "nme");
+}
+
+// ---------------------------------------------------------------------------
+// Reading a query from stdin (#91)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stdin_dash_reads_query_from_stdin() {
+    let t = with_users_schema("stdin");
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "-"],
+        "SELECT\n  nme FROM users;\n",
+    )
+    .assert_code(1)
+    .assert_stderr_contains("error[E0002]")
+    .assert_stderr_contains("--> <stdin>:2:3")
+    .assert_stderr_contains("in 1 file(s)");
+}
+
+#[test]
+fn stdin_valid_query_passes() {
+    let t = with_users_schema("stdin-ok");
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "-"],
+        "SELECT id FROM users;\n",
+    )
+    .assert_code(0)
+    .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn stdin_filename_is_used_in_diagnostics() {
+    let t = with_users_schema("stdin-name");
+    let run = t.run_stdin(
+        &[
+            "check",
+            "-s",
+            "schema.sql",
+            "-f",
+            "json",
+            "--stdin-filename",
+            "sql/users.sql",
+            "-",
+        ],
+        "SELECT nme FROM users;\n",
+    );
+    run.assert_code(1);
+    assert_eq!(run.json()["files"][0]["file"], "sql/users.sql");
+}
+
+#[test]
+fn stdin_honors_inline_suppression() {
+    let t = with_users_schema("stdin-suppress");
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "-"],
+        "SELECT nme FROM users; -- sqlsift:disable E0002\n",
+    )
+    .assert_code(0);
+}
+
+#[test]
+fn stdin_can_be_combined_with_files() {
+    let t = with_users_schema("stdin-mixed");
+    t.write("bad.sql", "SELECT x FROM users;\n");
+    t.run_stdin(
+        &["check", "-s", "schema.sql", "bad.sql", "-"],
+        "SELECT y FROM users;\n",
+    )
+    .assert_code(1)
+    .assert_stderr_contains("bad.sql:1:8")
+    .assert_stderr_contains("<stdin>:1:8")
+    .assert_stderr_contains("Found 2 error(s), 0 warning(s) in 2 file(s)");
+}
+
+#[test]
+fn stdin_given_twice_exits_two() {
+    let t = with_users_schema("stdin-twice");
+    t.run_stdin(&["check", "-s", "schema.sql", "-", "-"], "SELECT 1;\n")
+        .assert_code(2)
+        .assert_stderr_contains("'-' (stdin) can only be given once");
+}
+
+#[test]
+fn stdin_filename_without_dash_exits_two() {
+    let t = with_users_schema("stdin-name-nodash");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--stdin-filename",
+        "x.sql",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("--stdin-filename requires '-'");
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Actions output (#92)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn github_format_prints_one_workflow_command_per_diagnostic() {
+    let t = with_users_schema("github");
+    t.write(
+        "sql/q.sql",
+        "SELECT nme FROM users;\nSELECT id FROM users WHERE id = 'x';\n",
+    );
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "github", "sql/q.sql"]);
+    run.assert_code(1)
+        .assert_stderr_contains("Found 2 error(s)");
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "::error file=sql/q.sql,line=1,col=8,endLine=1,endColumn=11,title=E0002 column-not-found::Column 'nme' not found in table 'users'%0Ahelp: Did you mean 'name'?",
+            "::error file=sql/q.sql,line=2,col=28,endLine=2,endColumn=30,title=E0003 type-mismatch::Type mismatch: cannot compare integer with text%0Ahelp: Types are not implicitly compatible. Consider using explicit CAST.",
+        ],
+        "stdout:\n{}",
+        run.stdout
+    );
+    // The human-readable diagnostics are not printed as well
+    run.assert_stderr_lacks("-->");
+}
+
+#[test]
+fn github_format_reports_warnings_as_warning_commands() {
+    let t = with_users_schema("github-warn");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-f",
+        "github",
+        "-W",
+        "E0002",
+        "q.sql",
+    ]);
+    run.assert_code(0);
+    assert!(
+        run.stdout.starts_with("::warning file=q.sql,line=1,col=8,"),
+        "stdout:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn github_format_escapes_properties_and_data() {
+    let t = with_users_schema("github-escape");
+    // (`:` isn't allowed in Windows file names, so the name comes from --stdin-filename)
+    let run = t.run_stdin(
+        &[
+            "check",
+            "-s",
+            "schema.sql",
+            "-f",
+            "github",
+            "--stdin-filename",
+            "a,b:c%.sql",
+            "-",
+        ],
+        "SELECT nme FROM users;\n",
+    );
+    run.assert_code(1);
+    assert!(
+        run.stdout
+            .starts_with("::error file=a%2Cb%3Ac%25.sql,line=1,col=8,"),
+        "stdout:\n{}",
+        run.stdout
+    );
+    // The title has nothing to escape; the message follows the `::` separator
+    assert!(run.stdout.contains("title=E0002 column-not-found::"));
+}
+
+#[test]
+fn github_format_with_no_diagnostics_prints_nothing() {
+    let t = with_users_schema("github-clean");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "github", "q.sql"]);
+    run.assert_code(0);
+    assert_eq!(run.stdout, "");
+}
+
+#[test]
+fn github_format_from_config() {
+    let t = with_users_schema("github-cfg");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nformat = \"github\"\n",
+    );
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "q.sql"])
+        .assert_code(1)
+        .assert_stdout_contains("::error file=q.sql,line=1,col=8,");
+}
+
+// ---------------------------------------------------------------------------
+// --max-warnings (#93)
+// ---------------------------------------------------------------------------
+
+/// Temp dir with a query that produces two warnings when E0002 is set to warn
+fn two_warnings(prefix: &str) -> TempDir {
+    let t = with_users_schema(prefix);
+    t.write("q.sql", "SELECT a FROM users;\nSELECT b FROM users;\n");
+    t
+}
+
+#[test]
+fn warnings_do_not_fail_without_max_warnings() {
+    let t = two_warnings("maxw-none");
+    t.run(&["check", "-s", "schema.sql", "-W", "E0002", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Found 0 error(s), 2 warning(s) in 1 file(s)");
+}
+
+#[test]
+fn max_warnings_exceeded_exits_one_with_reason() {
+    let t = two_warnings("maxw-exceeded");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--max-warnings",
+        "1",
+        "q.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("warning[E0002]")
+    .assert_stderr_contains("Found 0 error(s), 2 warning(s) in 1 file(s)")
+    .assert_stderr_contains("Too many warnings: 2 found, the maximum is 1 (--max-warnings)");
+}
+
+#[test]
+fn max_warnings_equal_to_count_passes() {
+    let t = two_warnings("maxw-equal");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--max-warnings",
+        "2",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_lacks("Too many warnings");
+}
+
+#[test]
+fn max_warnings_zero_fails_on_any_warning() {
+    let t = two_warnings("maxw-zero");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--max-warnings",
+        "0",
+        "q.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("Too many warnings: 2 found, the maximum is 0");
+}
+
+#[test]
+fn max_warnings_reason_is_printed_even_when_quiet() {
+    let t = two_warnings("maxw-quiet");
+    t.run(&[
+        "check",
+        "-q",
+        "-s",
+        "schema.sql",
+        "-W",
+        "E0002",
+        "--max-warnings",
+        "1",
+        "q.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_lacks("Found 0 error(s)")
+    .assert_stderr_contains("Too many warnings");
+}
+
+#[test]
+fn max_warnings_from_config() {
+    let t = two_warnings("maxw-cfg");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nmax_warnings = 1\n\n[rules]\nE0002 = \"warn\"\n",
+    );
+    t.run(&["check", "q.sql"])
+        .assert_code(1)
+        .assert_stderr_lacks("unknown key")
+        .assert_stderr_contains("Too many warnings: 2 found, the maximum is 1");
+}
+
+#[test]
+fn max_warnings_cli_overrides_config() {
+    let t = two_warnings("maxw-cfg-override");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nmax_warnings = 0\n\n[rules]\nE0002 = \"warn\"\n",
+    );
+    t.run(&["check", "--max-warnings", "5", "q.sql"])
+        .assert_code(0);
+}
+
+#[test]
+fn max_warnings_invalid_config_value_exits_two() {
+    let t = two_warnings("maxw-cfg-bad");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nmax_warnings = -1\n",
+    );
+    t.run(&["check", "q.sql"]).assert_code(2);
+}
+
+// ---------------------------------------------------------------------------
+// Ignoring files (`ignore`, `--ignore`) and `-- sqlsift:disable-file`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_ignore_skips_matching_files_from_config_files() {
+    let t = with_users_schema("ignore-cfg");
+    t.write("sql/a.sql", "SELECT id FROM users;\n");
+    t.write("sql/archive/old.sql", "SELECT nme FROM users;\n");
+    t.write("sql/archive/2020/older.sql", "SELECT nme FROM users;\n");
+    t.write("sql/users.generated.sql", "SELECT nme FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"sql/**/*.sql\"]\n\
+         ignore = [\"sql/archive/**\", \"**/*.generated.sql\"]\n",
+    );
+    t.run(&["check"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn config_ignore_applies_to_positional_arguments() {
+    let t = with_users_schema("ignore-positional");
+    t.write("ok.sql", "SELECT id FROM users;\n");
+    t.write("gen/bad.sql", "SELECT nme FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"gen\"]\n",
+    );
+    t.run(&["check", "ok.sql", "./gen/bad.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    t.run(&["check", "gen/*.sql", "ok.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("nme");
+}
+
+#[test]
+fn config_ignore_is_relative_to_config_dir() {
+    let t = TempDir::new("ignore-rel");
+    t.write("proj/schema.sql", USERS_SCHEMA);
+    t.write("proj/gen/bad.sql", "SELECT nme FROM users;\n");
+    t.write("proj/ok.sql", "SELECT id FROM users;\n");
+    t.write(
+        "proj/sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"**/*.sql\"]\nignore = [\"gen/**\", \"schema.sql\"]\n",
+    );
+    // Discovered from a subdirectory
+    t.run_in(&t.path().join("proj/gen"), &["check"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    // Given with --config from outside the project
+    t.run(&["check", "--config", "proj/sqlsift.toml"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn cli_ignore_flag_is_repeatable_and_adds_to_config() {
+    let t = with_users_schema("ignore-cli");
+    t.write("a.sql", "SELECT nme FROM users;\n");
+    t.write("b.sql", "SELECT nme FROM users;\n");
+    t.write("c.sql", "SELECT nme FROM users;\n");
+    t.write("ok.sql", "SELECT id FROM users;\n");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"a.sql\"]\n",
+    );
+    let files = ["a.sql", "b.sql", "c.sql", "ok.sql"];
+    let mut args = vec!["check", "--ignore", "b.sql", "--ignore", "c.sql"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+    // Without the flags only the config's pattern applies
+    let mut args = vec!["check"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(1)
+        .assert_stderr_contains("Found 2 error(s), 0 warning(s) in 3 file(s)");
+    // Glob syntax in the flag
+    let mut args = vec!["check", "--ignore", "[bc].sql"];
+    args.extend(files);
+    t.run(&args)
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn all_files_ignored_is_not_an_error() {
+    let t = with_users_schema("ignore-all");
+    t.write("gen/bad.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--ignore",
+        "gen/**",
+        "gen/bad.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("No files to check (1 ignored)");
+}
+
+#[test]
+fn invalid_ignore_pattern_exits_two() {
+    let t = with_users_schema("ignore-invalid");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "--ignore", "[x.sql", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("invalid ignore pattern '[x.sql'");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nignore = [\"[x.sql\"]\n",
+    );
+    t.run(&["check", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("invalid ignore pattern '[x.sql'");
+}
+
+#[test]
+fn ignore_is_a_known_config_key() {
+    let t = with_users_schema("ignore-known");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    t.write("sqlsift.toml", "schema = [\"schema.sql\"]\nignore = []\n");
+    t.run(&["check", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_lacks("unknown key");
+}
+
+#[test]
+fn disable_file_directive_suppresses_rules_for_the_whole_file() {
+    let t = with_users_schema("disable-file");
+    t.write(
+        "q.sql",
+        "SELECT nme FROM users;\n-- sqlsift:disable-file column-not-found\nSELECT other FROM users;\nSELECT id FROM nope;\n",
+    );
+    t.write("other.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "q.sql", "other.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Found 2 error(s)")
+        .assert_stderr_contains("q.sql:4:16")
+        .assert_stderr_contains("other.sql:1:8")
+        .assert_stderr_lacks("q.sql:1:8");
+}
+
+#[test]
+fn disable_file_directive_suppresses_parse_errors_and_everything() {
+    let t = with_users_schema("disable-file-all");
+    t.write(
+        "q.sql",
+        "-- sqlsift:disable-file\nSELECT nme FROM users;\nSELEC broken;\n",
+    );
+    t.write(
+        "p.sql",
+        "-- sqlsift:disable-file E1000\nSELECT id FROM users;\nSELEC broken;\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "q.sql", "p.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("All 2 file(s) passed validation");
 }

@@ -951,6 +951,7 @@ dependencies = [
 name = "sqlsift-core"
 version = "0.1.4"
 dependencies = [
+ "glob",
  "indexmap",
  "miette",
  "pretty_assertions",
