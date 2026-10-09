@@ -24,7 +24,12 @@ impl Backend {
     /// Analyze a document and publish diagnostics
     async fn publish_diagnostics_for(&self, uri: Url, text: &str) {
         let state = self.state.read().await;
-        let diagnostics = state.analyze_document(text);
+        // Ignored files (`ignore` in sqlsift.toml) get no diagnostics
+        let diagnostics = if state.is_ignored(&uri) {
+            Vec::new()
+        } else {
+            state.analyze_document(text)
+        };
         let lsp_diagnostics = to_lsp_diagnostics(&diagnostics, text);
         self.client
             .publish_diagnostics(uri, lsp_diagnostics, None)

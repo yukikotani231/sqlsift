@@ -5,6 +5,11 @@
 //! - `-- sqlsift:disable E0002, E0003` (multiple rules)
 //! - `-- sqlsift:disable column-not-found` (rule names work too)
 //! - `-- sqlsift:disable` (suppress all rules)
+//! - `-- sqlsift:disable-file E0002, ambiguous-column` (suppress rules in the whole file)
+//! - `-- sqlsift:disable-file` (suppress all rules in the whole file)
+//!
+//! A `disable-file` directive may appear on any line of the file, as a standalone
+//! comment or after SQL, and applies to every line (before and after it).
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +21,18 @@ pub struct InlineDirectives {
     /// Map from line number (1-indexed) to disabled rule codes.
     /// `None` means all rules are disabled on that line.
     disabled_lines: HashMap<usize, Option<HashSet<String>>>,
+    /// Rules disabled for the whole file by `-- sqlsift:disable-file`.
+    /// `None`: no file directive; `Some(None)`: all rules are disabled.
+    disabled_file: Option<Option<HashSet<String>>>,
+}
+
+/// The kind of a `sqlsift:` comment directive
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectiveScope {
+    /// `sqlsift:disable`: this line (inline) or the next SQL line (standalone)
+    Line,
+    /// `sqlsift:disable-file`: the whole file
+    File,
 }
 
 impl InlineDirectives {
@@ -23,12 +40,25 @@ impl InlineDirectives {
     pub fn parse(sql: &str) -> Self {
         let mut disabled_lines: HashMap<usize, Option<HashSet<String>>> = HashMap::new();
         let mut pending_codes: Option<Option<HashSet<String>>> = None;
+        let mut disabled_file: Option<Option<HashSet<String>>> = None;
 
         for (idx, line) in sql.lines().enumerate() {
             let line_num = idx + 1; // 1-indexed to match sqlparser Span
             let trimmed = line.trim();
 
-            if let Some(codes) = parse_directive_from_line(line) {
+            let directive = parse_directive_from_line(line);
+            if let Some((DirectiveScope::File, codes)) = directive {
+                match &mut disabled_file {
+                    Some(existing) => merge_codes(existing, codes),
+                    None => disabled_file = Some(codes),
+                }
+                // Inline after SQL: the line still consumes a pending line directive
+                if !trimmed.starts_with("--") {
+                    if let Some(codes) = pending_codes.take() {
+                        merge_into_map(&mut disabled_lines, line_num, codes);
+                    }
+                }
+            } else if let Some((DirectiveScope::Line, codes)) = directive {
                 if trimmed.starts_with("--") {
                     // Standalone comment line: accumulate and apply to next SQL line
                     match &mut pending_codes {
@@ -50,12 +80,30 @@ impl InlineDirectives {
             }
         }
 
-        Self { disabled_lines }
+        Self {
+            disabled_lines,
+            disabled_file,
+        }
     }
 
     /// Check if a diagnostic of the given kind on the given line should be suppressed
+    /// (by a line directive or a file directive)
     pub fn is_suppressed(&self, kind: DiagnosticKind, line: usize) -> bool {
-        self.suppresses(kind.code(), line) || self.suppresses(kind.name(), line)
+        self.is_suppressed_in_file(kind)
+            || self.suppresses(kind.code(), line)
+            || self.suppresses(kind.name(), line)
+    }
+
+    /// Check if a diagnostic of the given kind is suppressed for the whole file
+    /// (by `-- sqlsift:disable-file`), regardless of where it is reported
+    pub fn is_suppressed_in_file(&self, kind: DiagnosticKind) -> bool {
+        match &self.disabled_file {
+            None => false,
+            Some(None) => true,
+            Some(Some(ids)) => ids.iter().any(|i| {
+                i.eq_ignore_ascii_case(kind.code()) || i.eq_ignore_ascii_case(kind.name())
+            }),
+        }
     }
 
     /// Whether the rule code or name `id` is disabled on the given line
@@ -103,10 +151,10 @@ impl InlineDirectives {
     }
 }
 
-/// Parse a `-- sqlsift:disable ...` directive from a line.
-/// Returns `Some(None)` for "disable all", `Some(Some(set))` for specific codes.
-/// Returns `None` if no directive is found.
-fn parse_directive_from_line(line: &str) -> Option<Option<HashSet<String>>> {
+/// Parse a `-- sqlsift:disable ...` or `-- sqlsift:disable-file ...` directive from a line.
+/// Returns the directive's scope with `None` for "disable all" or `Some(set)` for
+/// specific codes. Returns `None` if no directive is found.
+fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Option<HashSet<String>>)> {
     // Find `--` that's not inside a string literal
     let comment_start = find_line_comment(line)?;
     let comment = &line[comment_start + 2..]; // skip "--"
@@ -114,10 +162,14 @@ fn parse_directive_from_line(line: &str) -> Option<Option<HashSet<String>>> {
     // Look for "sqlsift:disable"
     let trimmed = comment.trim();
     let rest = trimmed.strip_prefix("sqlsift:disable")?;
+    let (scope, rest) = match rest.strip_prefix("-file") {
+        Some(rest) => (DirectiveScope::File, rest),
+        None => (DirectiveScope::Line, rest),
+    };
 
     if rest.is_empty() {
         // `-- sqlsift:disable` (no codes = disable all)
-        return Some(None);
+        return Some((scope, None));
     }
 
     // Must be followed by whitespace or comma
@@ -133,9 +185,9 @@ fn parse_directive_from_line(line: &str) -> Option<Option<HashSet<String>>> {
         .collect();
 
     if codes.is_empty() {
-        Some(None)
+        Some((scope, None))
     } else {
-        Some(Some(codes))
+        Some((scope, Some(codes)))
     }
 }
 
@@ -348,5 +400,71 @@ mod tests {
         assert!(!directives.is_suppressed(DiagnosticKind::TableNotFound, 1));
         let directives = InlineDirectives::parse("SELECT nme FROM users; -- sqlsift:disable E0002");
         assert!(directives.is_suppressed(DiagnosticKind::ColumnNotFound, 1));
+    }
+
+    #[test]
+    fn test_disable_file_specific_rules_anywhere() {
+        let sql = "SELECT nme FROM users;\nSELECT 1;\n-- sqlsift:disable-file E0002, ambiguous-column\nSELECT x FROM t;";
+        let directives = InlineDirectives::parse(sql);
+        // Applies to lines before and after the directive
+        for line in 1..=4 {
+            assert!(directives.is_suppressed(DiagnosticKind::ColumnNotFound, line));
+            assert!(directives.is_suppressed(DiagnosticKind::AmbiguousColumn, line));
+            assert!(!directives.is_suppressed(DiagnosticKind::TableNotFound, line));
+        }
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::ColumnNotFound));
+        assert!(!directives.is_suppressed_in_file(DiagnosticKind::TableNotFound));
+    }
+
+    #[test]
+    fn test_disable_file_all_rules() {
+        let directives = InlineDirectives::parse("-- sqlsift:disable-file\nSELECT x FROM t;");
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::TableNotFound));
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::ParseError));
+        assert!(directives.is_suppressed(DiagnosticKind::ColumnNotFound, 99));
+    }
+
+    #[test]
+    fn test_disable_file_is_not_a_line_directive() {
+        // A file directive must not also act as a next-line directive...
+        let directives = InlineDirectives::parse("-- sqlsift:disable-file E0001\nSELECT x FROM t;");
+        assert!(!directives.suppresses("E0002", 2));
+        assert!(!directives.is_suppressed(DiagnosticKind::ColumnNotFound, 2));
+        // ...and a line directive must not disable rules for the whole file
+        let directives =
+            InlineDirectives::parse("-- sqlsift:disable E0002\nSELECT x FROM t;\nSELECT y FROM t;");
+        assert!(!directives.is_suppressed_in_file(DiagnosticKind::ColumnNotFound));
+        assert!(!directives.is_suppressed(DiagnosticKind::ColumnNotFound, 3));
+    }
+
+    #[test]
+    fn test_disable_file_lookalikes_are_ignored() {
+        for sql in [
+            "SELECT 1; -- sqlsift:disable-files E0002",
+            "SELECT 1; -- sqlsift:disable-fileE0002",
+            "SELECT '-- sqlsift:disable-file' FROM t",
+        ] {
+            let directives = InlineDirectives::parse(sql);
+            assert!(
+                !directives.is_suppressed_in_file(DiagnosticKind::ColumnNotFound),
+                "{sql}"
+            );
+            assert!(
+                !directives.is_suppressed(DiagnosticKind::ColumnNotFound, 1),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_disable_file_inline_after_sql_and_merging() {
+        let sql = "-- sqlsift:disable E0003\nSELECT 1; -- sqlsift:disable-file e0001\n-- sqlsift:disable-file column-not-found";
+        let directives = InlineDirectives::parse(sql);
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::TableNotFound));
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::ColumnNotFound));
+        assert!(!directives.is_suppressed_in_file(DiagnosticKind::TypeMismatch));
+        // The pending line directive still applies to the SQL on line 2
+        assert!(directives.is_suppressed(DiagnosticKind::TypeMismatch, 2));
+        assert!(!directives.is_suppressed(DiagnosticKind::TypeMismatch, 3));
     }
 }

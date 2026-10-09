@@ -42,6 +42,10 @@ pub enum Command {
         #[arg(long = "schema-dir", value_name = "DIR")]
         schema_dir: Option<PathBuf>,
 
+        /// Skip query files matching a glob pattern (repeatable, e.g. `--ignore 'sql/archive/**'`)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
+
         /// Path to configuration file (default: sqlsift.toml in current or parent directory)
         #[arg(short, long = "config", value_name = "FILE")]
         config: Option<PathBuf>,

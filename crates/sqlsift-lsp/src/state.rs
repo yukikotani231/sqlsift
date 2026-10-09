@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
 
+use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
@@ -15,6 +16,8 @@ pub struct ServerState {
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
+    /// `ignore` patterns from sqlsift.toml: matching documents get no diagnostics
+    pub ignore: IgnorePatterns,
     pub workspace_root: Option<PathBuf>,
     /// Problems found while loading sqlsift.toml, to be shown to the user
     pub config_warnings: Vec<String>,
@@ -28,6 +31,7 @@ impl ServerState {
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             schema_files: Vec::new(),
+            ignore: IgnorePatterns::default(),
             workspace_root: None,
             config_warnings: Vec::new(),
         }
@@ -67,9 +71,16 @@ impl ServerState {
                 .map(|p| format!("{}: {}", config_path.display(), p)),
         );
 
-        // Resolve schema files relative to the directory containing sqlsift.toml
+        // Resolve schema files and ignore patterns relative to the directory
+        // containing sqlsift.toml
         let config_dir = config_path.parent().unwrap_or(workspace_root);
         self.schema_files = resolve_schema_files(&config, config_dir);
+        match IgnorePatterns::new(config_dir, &config.ignore) {
+            Ok(ignore) => self.ignore = ignore,
+            Err(e) => self
+                .config_warnings
+                .push(format!("{}: {}", config_path.display(), e)),
+        }
     }
 
     /// Rebuild the catalog from schema files
@@ -107,6 +118,13 @@ impl ServerState {
         let mut analyzer =
             Analyzer::with_dialect(&self.catalog, self.dialect).with_rules(self.rules.clone());
         analyzer.analyze(text)
+    }
+
+    /// Whether the document at `uri` matches an `ignore` pattern (only `file:`
+    /// URIs can match)
+    pub fn is_ignored(&self, uri: &Url) -> bool {
+        uri.to_file_path()
+            .is_ok_and(|path| self.ignore.is_ignored(&path))
     }
 
     /// Check if a file path is one of the schema files
@@ -364,6 +382,17 @@ mod tests {
         state.schema_files.push(PathBuf::from("/tmp/schema.sql"));
         assert!(state.is_schema_file(Path::new("/tmp/schema.sql")));
         assert!(!state.is_schema_file(Path::new("/tmp/other.sql")));
+    }
+
+    #[test]
+    fn test_is_ignored_uses_config_patterns() {
+        let mut state = ServerState::new();
+        let root = std::env::temp_dir().join("sqlsift-ignore-test");
+        state.ignore = IgnorePatterns::new(&root, ["gen/**"]).unwrap();
+        let uri = |p: &str| Url::from_file_path(root.join(p)).unwrap();
+        assert!(state.is_ignored(&uri("gen/a.sql")));
+        assert!(!state.is_ignored(&uri("src/a.sql")));
+        assert!(!state.is_ignored(&Url::parse("untitled:Untitled-1").unwrap()));
     }
 
     #[test]

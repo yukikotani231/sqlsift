@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
+use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
@@ -262,6 +263,7 @@ fn run(args: Args) -> Result<bool> {
             files,
             schema,
             schema_dir,
+            ignore,
             config: config_path,
             allow,
             warn,
@@ -277,6 +279,7 @@ fn run(args: Args) -> Result<bool> {
                 &schema,
                 &schema_dir,
                 &files,
+                &ignore,
                 &format,
                 &dialect,
                 max_warnings,
@@ -373,6 +376,27 @@ fn run(args: Args) -> Result<bool> {
                     path.display().to_string()
                 }
             };
+
+            // Skip ignored files (`ignore` in sqlsift.toml and `--ignore`); patterns
+            // from the config file were already made relative to the current directory
+            let ignore_patterns = IgnorePatterns::new(Path::new(""), &config.ignore)
+                .map_err(|e| miette::miette!(e))?;
+            let found = query_files.len();
+            query_files.retain(|path| {
+                let ignored = ignore_patterns.is_ignored(path);
+                if ignored {
+                    tracing::debug!(file = %path.display(), "Ignoring file");
+                }
+                !ignored
+            });
+            let ignored_count = found - query_files.len();
+            if query_files.is_empty() {
+                if !quiet {
+                    eprintln!("No files to check ({ignored_count} ignored)");
+                }
+                formatter.print(&[]);
+                return Ok(false);
+            }
 
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
@@ -487,6 +511,7 @@ fn run(args: Args) -> Result<bool> {
             let config = load_config(config_path.as_deref())?.merge_with_args(
                 &schema,
                 &schema_dir,
+                &[],
                 &[],
                 &None,
                 &dialect,

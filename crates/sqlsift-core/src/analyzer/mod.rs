@@ -170,14 +170,14 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        // Filter out diagnostics suppressed by inline directives, then apply rule levels.
+        // Filter out diagnostics suppressed by inline or file directives, then apply rule levels.
         // A diagnostic that a directive meant to suppress but misspelled the rule of
         // says so.
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
             .filter_map(|mut d| {
                 let Some(span) = d.span else {
-                    return Some(d);
+                    return (!directives.is_suppressed_in_file(d.kind)).then_some(d);
                 };
                 // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
                 let substituted = matches!(

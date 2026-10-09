@@ -215,7 +215,8 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ DDL in query files (CREATE [TEMP] TABLE, CTAS, CREATE VIEW, ALTER TABLE, DROP) is applied by `Analyzer::analyze` to a file-local copy of the catalog via `SchemaBuilder::from_catalog`, visible to later statements of that file only
 - ✅ psql scripts (PostgreSQL only, `psql.rs`): meta-commands blanked out, `\g`/`\gset` end a query, `:var`/`:'var'` → `$1`, `:"var"` → identifier whose name diagnostics are dropped; the rewrite keeps every byte offset
 - ✅ Configuration file (sqlsift.toml)
-- ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable`), `sqlsift rules` lists the registry
+- ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
+- ✅ Ignoring query files (`ignore` in sqlsift.toml, `--ignore`; `sqlsift_core::ignore`), honored by the CLI and LSP
 - ✅ Multiple output formats (human, JSON, SARIF, GitHub Actions workflow commands)
 - ✅ Type inference for expressions (WHERE, JOIN, INSERT VALUES, UPDATE SET, binary operators, nested expressions)
   - Detects type mismatches in comparisons (E0003)

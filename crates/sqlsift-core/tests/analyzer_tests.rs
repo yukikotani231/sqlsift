@@ -2256,6 +2256,71 @@ fn test_inline_disable_in_string_not_treated_as_directive() {
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
 }
 
+#[test]
+fn test_disable_file_suppresses_listed_rules_everywhere() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "SELECT bad_col FROM users;\n\
+               -- sqlsift:disable-file column-not-found\n\
+               SELECT other_bad FROM users;\n\
+               SELECT * FROM missing_table;";
+    let diagnostics = analyzer.analyze(sql);
+    let kinds: Vec<_> = diagnostics.iter().map(|d| d.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![DiagnosticKind::TableNotFound],
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn test_disable_file_without_rules_suppresses_everything() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "-- sqlsift:disable-file\n\
+               SELECT bad_col FROM users;\n\
+               SELECT * FROM missing_table;\n\
+               SELECT FROM WHERE;";
+    let diagnostics = analyzer.analyze(sql);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn test_disable_file_suppresses_parse_errors() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    let sql = "-- sqlsift:disable-file E1000\nSELECT id FROM users;\nSELEC broken;";
+    assert!(analyzer.analyze(sql).is_empty());
+
+    // Even a tokenizer error, which is reported for the whole input
+    let sql = "-- sqlsift:disable-file E1000\nSELECT 'unterminated FROM users;";
+    assert!(analyzer.analyze(sql).is_empty());
+
+    // Without the directive the parse error is reported
+    let diagnostics = analyzer.analyze("SELECT id FROM users;\nSELEC broken;");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ParseError);
+}
+
+#[test]
+fn test_disable_file_and_line_directives_are_distinct() {
+    let catalog = setup_catalog();
+    let mut analyzer = Analyzer::new(&catalog);
+
+    // A line directive only covers the next line
+    let sql = "-- sqlsift:disable E0002\nSELECT bad_col FROM users;\nSELECT other_bad FROM users;";
+    assert_eq!(analyzer.analyze(sql).len(), 1);
+
+    // A file directive doesn't also act as a next-line "disable all"
+    let sql = "-- sqlsift:disable-file E0001\nSELECT bad_col FROM users;";
+    let diagnostics = analyzer.analyze(sql);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ColumnNotFound);
+}
+
 // ============================================================
 // Issue #56: INSERT ... RETURNING columns in CTEs
 // ============================================================
