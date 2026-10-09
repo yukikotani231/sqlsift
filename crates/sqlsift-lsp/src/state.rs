@@ -256,15 +256,18 @@ impl ServerState {
         if self.is_ignored(uri) {
             return Vec::new();
         }
-        let diagnostics = self.analyze_with(
-            text,
-            self.document_templating(uri),
-            self.is_embedded_sql_document(uri),
-        );
+        let embedded = self.is_embedded_sql_document(uri);
+        let diagnostics = self.analyze_with(text, self.document_templating(uri), embedded);
         match (&self.baseline, uri.to_file_path()) {
             (Some((filter, dir)), Ok(path)) => {
                 let key = baseline::file_key(&path, dir);
-                filter.filter(&key, text, diagnostics).kept
+                // The SQL the diagnostics are reported on, as in `sqlsift check`
+                let sql = if embedded {
+                    baseline::sql_text(&path, text, &self.embedded_sql_tags, self.dialect)
+                } else {
+                    text.to_string()
+                };
+                filter.filter(&key, &sql, diagnostics).kept
             }
             _ => diagnostics,
         }

@@ -958,14 +958,12 @@ fn ranges_use_utf16_code_units() {
 /// A baseline file with one E0002 entry for `file`, in the statement `statement`
 fn baseline_json(file: &str, statement: &str) -> String {
     json!({
-        "version": 1,
+        "version": 2,
         "entries": [{
             "file": file,
             "code": "E0002",
             "statement_hash": sqlsift_core::baseline::statement_hash(statement),
-            "occurrence": 0,
-            "line": 1,
-            "message": "Column 'nme' not found in table 'users'"
+            "message": "Column 'nme' not found"
         }]
     })
     .to_string()
@@ -999,6 +997,33 @@ fn baselined_diagnostics_are_hidden() {
     let other = t.uri("sql/other.sql");
     lsp.open(&other, "SELECT nme FROM users;");
     assert_eq!(codes(&lsp.diagnostics_for(&other)), vec!["E0002"]);
+}
+
+#[test]
+fn baselined_diagnostics_are_hidden_in_typescript_documents() {
+    let t = workspace("baseline-ts", "baseline = \"baseline.json\"\n");
+    t.write(
+        "baseline.json",
+        &baseline_json("src/q.ts", "SELECT nme FROM users;"),
+    );
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.ts");
+    // Only the SQL is matched, not the TypeScript around it
+    lsp.open_as(
+        &uri,
+        "typescript",
+        "const renamed = sql`SELECT nme FROM users`;\nconst b = sql`SELECT bad FROM users`;\n",
+    );
+    let diagnostics = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diagnostics), vec!["E0002"], "{diagnostics:#?}");
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'bad'"),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

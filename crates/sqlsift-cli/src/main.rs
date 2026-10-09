@@ -180,6 +180,31 @@ fn load_baseline(path: &Path) -> Result<BaselineFilter> {
     Ok(BaselineFilter::new(&baseline))
 }
 
+/// The baseline file that `--write-baseline` replaces, if there is a valid one
+fn previous_baseline(path: &Path) -> Option<Baseline> {
+    let json = fs::read_to_string(path).ok()?;
+    match Baseline::from_json(&json) {
+        Ok(baseline) => Some(baseline),
+        Err(e) => {
+            eprintln!(
+                "Warning: {}: {}; its entries are not kept",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+/// "entry" or "entries"
+fn entries_word(n: usize) -> &'static str {
+    if n == 1 {
+        "entry"
+    } else {
+        "entries"
+    }
+}
+
 /// Print the rule registry as a table
 fn print_rules() {
     use sqlsift_core::rules::RULES;
@@ -506,12 +531,37 @@ fn run(args: Args) -> Result<bool> {
             };
             let analyzed = analyze_files(&query_files, stdin.as_deref(), &options);
 
+            // The SQL a file's diagnostics are reported on, for the baseline (the
+            // tagged templates of TypeScript / JavaScript files)
+            let baseline_sql = |path: &Path, content: &str| -> String {
+                let name = match (&stdin, stdin_filename.as_deref()) {
+                    (Some(_), Some(name)) if is_stdin(path) => name,
+                    _ => path,
+                };
+                baseline::sql_text(name, content, &embedded_sql_tags, dialect)
+            };
+            // Whether a baseline entry's file (not checked in this run) no longer
+            // exists or is ignored: its entries are stale
+            let baseline_file_gone = |file: &str| -> bool {
+                let path = baseline_dir.join(file);
+                !path.is_file() || ignore_patterns.is_ignored(&path)
+            };
+
             if write_baseline {
                 let mut baseline = Baseline::default();
+                let mut checked_keys = HashSet::new();
                 for (query_file, analyzed) in query_files.iter().zip(analyzed) {
                     let (content, diagnostics) = analyzed?;
-                    baseline.add_file(&file_key(query_file), &content, &diagnostics);
+                    let key = file_key(query_file);
+                    baseline.add_file(&key, &baseline_sql(query_file, &content), &diagnostics);
+                    checked_keys.insert(key);
                 }
+                let written = baseline.entries.len();
+                // Entries of files not checked in this run are kept, unless the
+                // file is gone
+                let kept = previous_baseline(&baseline_target).map(|previous| {
+                    baseline.keep_unchecked(&previous, &checked_keys, baseline_file_gone)
+                });
                 fs::write(&baseline_target, baseline.to_json()).map_err(|e| {
                     miette::miette!(
                         "Failed to write baseline {}: {}",
@@ -521,16 +571,36 @@ fn run(args: Args) -> Result<bool> {
                 })?;
                 if !quiet {
                     eprintln!(
-                        "Wrote {} baseline entr{} for {} file(s) to {}",
-                        baseline.entries.len(),
-                        if baseline.entries.len() == 1 {
-                            "y"
-                        } else {
-                            "ies"
-                        },
+                        "Wrote {written} baseline {} for {} file(s) to {}",
+                        entries_word(written),
                         query_files.len(),
                         baseline_target.display()
                     );
+                    if let Some(kept) = kept {
+                        if kept.kept > 0 {
+                            eprintln!(
+                                "Kept {} {} for {} file(s) not checked in this run",
+                                kept.kept,
+                                entries_word(kept.kept),
+                                kept.kept_files
+                            );
+                        }
+                        if kept.removed > 0 {
+                            eprintln!(
+                                "Removed {} {} for {} file(s) that no longer exist or are ignored",
+                                kept.removed,
+                                entries_word(kept.removed),
+                                kept.removed_files
+                            );
+                        }
+                        if kept.old_format > 0 {
+                            eprintln!(
+                                "Note: {} kept {} from an old baseline format only match by message; re-run --write-baseline over all files to update them",
+                                kept.old_format,
+                                entries_word(kept.old_format)
+                            );
+                        }
+                    }
                     if baseline_path.is_none() {
                         eprintln!(
                             "Use it with `--baseline {0}`, or add `baseline = \"{0}\"` to sqlsift.toml",
@@ -554,7 +624,7 @@ fn run(args: Args) -> Result<bool> {
             // Diagnostics hidden by the baseline, the entries they matched and the
             // files they were looked up in
             let mut baselined = 0;
-            let mut matched = HashSet::new();
+            let mut stale = 0;
             let mut checked_keys = HashSet::new();
 
             for (query_file, analyzed) in query_files.iter().zip(analyzed) {
@@ -569,9 +639,10 @@ fn run(args: Args) -> Result<bool> {
                 let diagnostics = match &baseline_filter {
                     Some(filter) => {
                         let key = file_key(query_file);
-                        let filtered = filter.filter(&key, &content, diagnostics);
+                        let sql = baseline_sql(query_file, &content);
+                        let filtered = filter.filter(&key, &sql, diagnostics);
                         baselined += filtered.suppressed.len();
-                        matched.extend(filtered.suppressed);
+                        stale += filtered.stale.len();
                         checked_keys.insert(key);
                         filtered.kept
                     }
@@ -633,11 +704,18 @@ fn run(args: Args) -> Result<bool> {
                 if baselined > 0 {
                     eprintln!("{baselined} known diagnostic(s) hidden by the baseline");
                 }
-                // Entries of a file that was only partly checked can't be stale
-                let stale = baseline_filter
-                    .as_ref()
-                    .filter(|_| !limit_reached)
-                    .map_or(0, |filter| filter.stale(&checked_keys, &matched));
+                // Entries of a file that was only partly checked can't be stale;
+                // those of files not checked are when the file is gone
+                let stale =
+                    baseline_filter
+                        .as_ref()
+                        .filter(|_| !limit_reached)
+                        .map_or(0, |filter| {
+                            stale
+                                + filter
+                                    .stale_unchecked(&checked_keys, baseline_file_gone)
+                                    .len()
+                        });
                 if stale > 0 {
                     eprintln!(
                         "Note: {stale} baseline entr{} no longer occur{}; re-run with --write-baseline to remove {}",

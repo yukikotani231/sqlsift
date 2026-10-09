@@ -3,7 +3,7 @@
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sqlsift_core::rules::{
     find_category, find_rule, similar_category_name, similar_rule_name, RuleConfig, RuleLevel,
@@ -338,6 +338,32 @@ fn resolve_path(base: &Path, path: &str) -> String {
     if base.as_os_str().is_empty() || Path::new(path).is_absolute() {
         path.to_string()
     } else {
-        base.join(path).display().to_string()
+        clean_parent_dirs(&base.join(path)).display().to_string()
     }
+}
+
+/// `path` with each `dir/..` removed (`ci/../queries/*.sql` is
+/// `queries/*.sql`), so that reported paths are what the user expects; a `..`
+/// after a glob component (`**/..`) is kept
+fn clean_parent_dirs(path: &Path) -> PathBuf {
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir if !parts.is_empty() => {}
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(name))
+                    if !name.to_string_lossy().contains(['*', '?', '[']) =>
+                {
+                    parts.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => parts.push(component),
+            },
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        return PathBuf::from(".");
+    }
+    parts.iter().collect()
 }
