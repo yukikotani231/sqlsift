@@ -128,8 +128,17 @@ pub struct KeptEntries {
 impl Baseline {
     /// Parse a baseline file
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let baseline: Self =
-            serde_json::from_str(json).map_err(|e| format!("invalid baseline file: {e}"))?;
+        let baseline: Self = match serde_json::from_str(json) {
+            Ok(baseline) => baseline,
+            Err(e) => {
+                if let Some(line) = find_conflict_marker_line(json) {
+                    return Err(format!(
+                        "the baseline has merge conflict markers (line {line}). Take either side (e.g. `git checkout --theirs {DEFAULT_BASELINE_FILE}`) and re-run `sqlsift check --write-baseline`"
+                    ));
+                }
+                return Err(format!("invalid baseline file: {e}"));
+            }
+        };
         if !(OLDEST_VERSION..=BASELINE_VERSION).contains(&baseline.version) {
             return Err(format!(
                 "unsupported baseline version {} (expected {BASELINE_VERSION}); re-create it with --write-baseline",
@@ -797,6 +806,21 @@ fn end_of_dollar_quoted(sql: &str, start: usize) -> Option<usize> {
     )
 }
 
+/// If `json` contains Git merge conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`, `|||||||`),
+/// return the 1-indexed line number of the first marker.
+fn find_conflict_marker_line(json: &str) -> Option<usize> {
+    for (idx, line) in json.lines().enumerate() {
+        if line.starts_with("<<<<<<<")
+            || line.starts_with("=======")
+            || line.starts_with(">>>>>>>")
+            || line.starts_with("|||||||")
+        {
+            return Some(idx + 1);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,6 +1171,36 @@ mod tests {
             .unwrap_err()
             .contains("unsupported baseline version"));
         assert!(Baseline::from_json("not json").is_err());
+    }
+
+    #[test]
+    fn baseline_with_conflict_markers_gives_clear_error() {
+        let conflicted = r#"{
+  "version": 2,
+<<<<<<< HEAD
+  "entries": [
+    { "file": "a.sql", "code": "E0001", "statement_hash": "abc", "message": "msg" }
+  ]
+=======
+  "entries": [
+    { "file": "b.sql", "code": "E0001", "statement_hash": "def", "message": "msg" }
+  ]
+>>>>>>> feature
+}"#;
+        let err = Baseline::from_json(conflicted).unwrap_err();
+        assert!(
+            err.contains("the baseline has merge conflict markers (line 3)"),
+            "{err}"
+        );
+        assert!(err.contains("Take either side"), "{err}");
+        assert!(err.contains("--write-baseline"), "{err}");
+
+        // Other invalid JSON keeps standard error message
+        let regular_err = Baseline::from_json("not json").unwrap_err();
+        assert!(
+            regular_err.starts_with("invalid baseline file: "),
+            "{regular_err}"
+        );
     }
 
     #[test]
