@@ -241,6 +241,35 @@ fn invalid_query_exits_one_with_error_summary() {
 }
 
 #[test]
+fn tables_created_in_a_query_file_are_local_to_that_file() {
+    let t = with_users_schema("file-local-tables");
+    t.write(
+        "a.sql",
+        "CREATE TEMP TABLE tmp_names AS SELECT id, name FROM users;\n\
+         SELECT name FROM tmp_names;\n\
+         SELECT nmae FROM tmp_names;\n\
+         DROP TABLE tmp_names;\n",
+    );
+    t.write("b.sql", "SELECT name FROM tmp_names;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "a.sql", "b.sql"]);
+    run.assert_code(1);
+    let v = run.json();
+    let files = v["files"].as_array().expect("files array");
+    let codes_of = |name: &str| -> Vec<String> {
+        files
+            .iter()
+            .filter(|f| f["file"] == name)
+            .flat_map(|f| f["diagnostics"].as_array().expect("diagnostics").clone())
+            .map(|d| d["kind"].as_str().expect("kind").to_string())
+            .collect()
+    };
+    // The typo against the temp table is reported, the table itself is found
+    assert_eq!(codes_of("a.sql"), vec!["ColumnNotFound"]);
+    // The temp table isn't visible in other files
+    assert_eq!(codes_of("b.sql"), vec!["TableNotFound"]);
+}
+
+#[test]
 fn short_schema_flag_is_accepted() {
     let t = with_users_schema("short-s");
     t.write("q.sql", "SELECT id FROM users;\n");
@@ -1380,6 +1409,64 @@ fn disable_unknown_code_is_an_error() {
 }
 
 #[test]
+fn misspelled_rule_flag_suggests_the_rule() {
+    let t = with_users_schema("allow-typo");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-A",
+        "ambigous-column",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("--allow: unknown rule or category 'ambigous-column'")
+    .assert_stderr_contains("Did you mean 'ambiguous-column'?");
+    t.run(&["check", "-s", "schema.sql", "-W", "suspicous", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("Did you mean 'suspicious'?");
+}
+
+#[test]
+fn misspelled_rule_names_in_config_suggest_the_rule() {
+    let t = with_users_schema("cfg-typo");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    for (config, expected) in [
+        (
+            "[rules]\ncolumn-not-fond = \"off\"\n",
+            "[rules]: unknown rule 'column-not-fond'. Did you mean 'column-not-found'?",
+        ),
+        (
+            "[categories]\npedantc = \"warn\"\n",
+            "[categories]: unknown category 'pedantc'. Did you mean 'pedantic'?",
+        ),
+        (
+            "disable = [\"type-mismach\"]\n",
+            "disable: unknown rule or category 'type-mismach'. Did you mean 'type-mismatch'?",
+        ),
+    ] {
+        t.write(
+            "sqlsift.toml",
+            &format!("schema = [\"schema.sql\"]\n{config}"),
+        );
+        let run = t.run(&["check", "q.sql"]);
+        run.assert_code(2);
+        // miette wraps long messages: compare without the layout
+        let squash = |s: &str| {
+            s.chars()
+                .filter(|c| !c.is_whitespace() && *c != '│')
+                .collect::<String>()
+        };
+        assert!(
+            squash(&run.stderr).contains(&squash(expected)),
+            "expected {expected:?} in:\n{}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn rule_names_work_like_codes() {
     let t = with_users_schema("disable-name");
     t.write("q.sql", "SELECT nme FROM users;\n");
@@ -1667,7 +1754,7 @@ fn json_output_structure() {
     let d = &diags[0];
     assert_eq!(d["kind"], "ColumnNotFound");
     assert_eq!(d["severity"], "error");
-    assert_eq!(d["message"], "Column 'nme' not found");
+    assert_eq!(d["message"], "Column 'nme' not found in table 'users'");
     assert_eq!(d["help"], "Did you mean 'name'?");
     assert_eq!(d["span"]["line"], 2);
     assert_eq!(d["span"]["column"], 3);
@@ -1792,7 +1879,10 @@ fn sarif_results_have_rule_level_message_and_region() {
     let r = &results[0];
     assert_eq!(r["ruleId"], "E0002");
     assert_eq!(r["level"], "error");
-    assert_eq!(r["message"]["text"], "Column 'nme' not found");
+    assert_eq!(
+        r["message"]["text"],
+        "Column 'nme' not found in table 'users'"
+    );
     let loc = &r["locations"][0]["physicalLocation"];
     assert_eq!(loc["artifactLocation"]["uri"], "queries/q.sql");
     assert_eq!(loc["region"]["startLine"], 2);
