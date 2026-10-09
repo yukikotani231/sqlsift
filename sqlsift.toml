@@ -13,14 +13,26 @@ schema = [
 #     "db/queries/**/*.sql",
 # ]
 
+# Query files to skip, whether they come from `files` or the command line
+# (glob patterns; `**` matches any number of directories, and a directory
+# pattern skips everything below it). `--ignore <PATTERN>` adds to this list.
+# ignore = [
+#     "sql/archive/**",
+#     "**/*.generated.sql",
+# ]
+
 # Or use schema directory to automatically include all .sql files
 # schema_dir = "db/schema"
 
 # SQL dialect: "postgresql" (default), "mysql", or "sqlite"
 # dialect = "postgresql"
 
-# Output format: "human", "json", or "sarif"
+# Output format: "human", "json", "sarif", or "github" (GitHub Actions annotations)
 # format = "human"
+
+# Fail the check (exit 1) when more than this many warnings are reported.
+# Use 0 to fail on any warning without turning warnings into errors.
+# max_warnings = 0
 
 # Disable specific rules (codes or names)
 # disable = ["E0001", "column-not-found"]

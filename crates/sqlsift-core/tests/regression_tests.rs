@@ -1108,3 +1108,50 @@ fn large_input_with_a_syntax_error_is_analyzed_in_linear_time() {
     assert_eq!(diagnostics[0].span.unwrap().line, 3001);
     assert!(elapsed.as_secs() < 20, "took {elapsed:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Spans carry the byte offset of their line/column (issue #85)
+// ---------------------------------------------------------------------------
+
+/// Text of a diagnostic's span, located by its byte offset
+fn offset_text<'a>(sql: &'a str, diagnostic: &Diagnostic) -> &'a str {
+    let span = diagnostic.span.expect("diagnostic should have a span");
+    &sql[span.offset..span.offset + span.length]
+}
+
+#[test]
+fn span_offsets_point_at_the_reported_location() {
+    // Multi-byte characters before the error, on the same line and on earlier lines
+    let sql = "SELECT 'héllo', id FROM users;\n-- ünïcode\nSELECT 'ö', naem FROM users;\n";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!((span.line, span.column), (3, 13));
+    assert_eq!(span.offset, sql.find("naem").unwrap());
+    assert_eq!(offset_text(sql, &diagnostics[0]), "naem");
+}
+
+#[test]
+fn span_offsets_are_set_when_statements_are_parsed_one_by_one() {
+    // The syntax error makes the analyzer parse each statement separately
+    let sql = "SELECT naem FROM users;\nSELECT FROM WHERE;\nSELECT 'ä', emial FROM users;\n";
+    let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ParseError,
+            DiagnosticKind::ColumnNotFound
+        ],
+        "{diagnostics:#?}"
+    );
+    assert_eq!(offset_text(sql, &diagnostics[0]), "naem");
+    let parse_error = diagnostics[1].span.unwrap();
+    let second = sql.find("SELECT FROM").unwrap();
+    let third = sql.find("SELECT 'ä'").unwrap();
+    assert!(
+        (second..third).contains(&parse_error.offset),
+        "{parse_error:?}"
+    );
+    assert_eq!(offset_text(sql, &diagnostics[2]), "emial");
+}
