@@ -186,21 +186,40 @@ impl Resolver<'_> {
         }
     }
 
-    /// Check type compatibility in a binary operation
-    pub(super) fn check_binary_op(&mut self, left: &Expr, op: &BinaryOperator, right: &Expr) {
+    /// Check type compatibility in a binary operation. `left_type` is the type of
+    /// `left` if the caller already inferred it. Returns the operation's result
+    /// type if it was inferred along the way (arithmetic), so that a chain of
+    /// operators (`a + b + c ...`) is type checked in linear time.
+    pub(super) fn check_binary_op(
+        &mut self,
+        left: &Expr,
+        op: &BinaryOperator,
+        right: &Expr,
+        left_type: Option<ExpressionType>,
+    ) -> Option<ExpressionType> {
         if is_comparison_operator(op) {
             self.check_comparison(left, right);
-            return;
+            return None;
         }
 
-        let Some(arith_op) = arithmetic_op(op) else {
-            return;
-        };
-        let left_type = self.infer_expr_type(left);
+        let arith_op = arithmetic_op(op)?;
+        let left_type = left_type.unwrap_or_else(|| self.infer_expr_type(left));
         let right_type = self.infer_expr_type(right);
+        self.check_arithmetic(left, arith_op, right, &left_type, &right_type);
+        Some(binary_op_result_type(left_type, op, right_type))
+    }
 
+    /// Check the operand types of an arithmetic operation
+    fn check_arithmetic(
+        &mut self,
+        left: &Expr,
+        arith_op: ArithmeticOp,
+        right: &Expr,
+        left_type: &ExpressionType,
+        right_type: &ExpressionType,
+    ) {
         // Numeric arithmetic with a string literal: the literal must be a number
-        let literal_operand = match (&left_type, &right_type) {
+        let literal_operand = match (left_type, right_type) {
             (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => Some((t, lit, right)),
             (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => Some((t, lit, left)),
             _ => None,
@@ -228,8 +247,7 @@ impl Resolver<'_> {
         }
 
         // Otherwise only check when both types are known
-        let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (&left_type, &right_type)
-        else {
+        let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_type, right_type) else {
             return;
         };
         if SqlType::temporal_arithmetic_result(lt, arith_op, rt).is_some() {
@@ -451,7 +469,7 @@ impl Resolver<'_> {
                 _ => ExpressionType::Unknown,
             },
             Expr::Nested(inner) => self.infer_expr_type(inner),
-            Expr::BinaryOp { left, op, right } => self.infer_binary_op_result_type(left, op, right),
+            Expr::BinaryOp { .. } => self.infer_binary_chain_type(expr),
             Expr::Cast { data_type, .. } => match SqlType::from_ast(data_type) {
                 SqlType::Unknown => ExpressionType::Unknown,
                 sql_type => ExpressionType::Known(sql_type),
@@ -617,42 +635,58 @@ impl Resolver<'_> {
         ExpressionType::Unknown
     }
 
-    /// Infer the result type of a binary operation
-    fn infer_binary_op_result_type(
-        &self,
-        left: &Expr,
-        op: &BinaryOperator,
-        right: &Expr,
-    ) -> ExpressionType {
-        match (self.infer_expr_type(left), self.infer_expr_type(right)) {
-            // Comparisons and logical operators over known operands are boolean
-            (ExpressionType::Known(_), ExpressionType::Known(_))
-                if is_comparison_operator(op)
-                    || matches!(op, BinaryOperator::And | BinaryOperator::Or) =>
-            {
-                ExpressionType::Known(SqlType::Boolean)
-            }
-            (ExpressionType::Known(lt), ExpressionType::Known(rt)) => {
-                let Some(arith_op) = arithmetic_op(op) else {
-                    return ExpressionType::Unknown;
-                };
-                if lt.is_numeric() && rt.is_numeric() {
-                    // Simplified promotion: the left operand's type
-                    ExpressionType::Known(lt)
-                } else {
-                    SqlType::temporal_arithmetic_result(&lt, arith_op, &rt)
-                        .map_or(ExpressionType::Unknown, ExpressionType::Known)
-                }
-            }
-            // Numeric arithmetic with a numeric string literal keeps the numeric type
-            (ExpressionType::Known(t), ExpressionType::StringLiteral(_))
-            | (ExpressionType::StringLiteral(_), ExpressionType::Known(t))
-                if t.is_numeric() && arithmetic_op(op).is_some() =>
-            {
-                ExpressionType::Known(t)
-            }
-            _ => ExpressionType::Unknown,
+    /// Infer the result type of a binary operation. A chain of left-associative
+    /// operators (`a + b + c ...`) nests as deep as it is long, so its left spine
+    /// is walked in a loop rather than recursively.
+    fn infer_binary_chain_type(&self, expr: &Expr) -> ExpressionType {
+        let mut chain = Vec::new();
+        let mut leftmost = expr;
+        while let Expr::BinaryOp { left, op, right } = leftmost {
+            chain.push((op, &**right));
+            leftmost = left;
         }
+        let mut ty = self.infer_expr_type(leftmost);
+        for (op, right) in chain.into_iter().rev() {
+            ty = binary_op_result_type(ty, op, self.infer_expr_type(right));
+        }
+        ty
+    }
+}
+
+/// Result type of a binary operation on operands of the given types
+fn binary_op_result_type(
+    left: ExpressionType,
+    op: &BinaryOperator,
+    right: ExpressionType,
+) -> ExpressionType {
+    match (left, right) {
+        // Comparisons and logical operators over known operands are boolean
+        (ExpressionType::Known(_), ExpressionType::Known(_))
+            if is_comparison_operator(op)
+                || matches!(op, BinaryOperator::And | BinaryOperator::Or) =>
+        {
+            ExpressionType::Known(SqlType::Boolean)
+        }
+        (ExpressionType::Known(lt), ExpressionType::Known(rt)) => {
+            let Some(arith_op) = arithmetic_op(op) else {
+                return ExpressionType::Unknown;
+            };
+            if lt.is_numeric() && rt.is_numeric() {
+                // Simplified promotion: the left operand's type
+                ExpressionType::Known(lt)
+            } else {
+                SqlType::temporal_arithmetic_result(&lt, arith_op, &rt)
+                    .map_or(ExpressionType::Unknown, ExpressionType::Known)
+            }
+        }
+        // Numeric arithmetic with a numeric string literal keeps the numeric type
+        (ExpressionType::Known(t), ExpressionType::StringLiteral(_))
+        | (ExpressionType::StringLiteral(_), ExpressionType::Known(t))
+            if t.is_numeric() && arithmetic_op(op).is_some() =>
+        {
+            ExpressionType::Known(t)
+        }
+        _ => ExpressionType::Unknown,
     }
 }
 

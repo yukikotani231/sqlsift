@@ -14,10 +14,11 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::mysql;
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, QualifiedName, SchemaBuilder};
-use crate::sqlc::QueryNames;
+use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Template, Templating};
 
 use comment_directives::InlineDirectives;
@@ -137,7 +138,10 @@ impl<'a> Analyzer<'a> {
     /// assert!(diagnostics.is_empty());
     /// ```
     pub fn analyze(&mut self, sql: &str) -> Vec<Diagnostic> {
-        self.analyze_text(sql, sql, &[])
+        let (sql, bom) = strip_bom(sql);
+        let mut diagnostics = self.analyze_text(sql, sql, &[]);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
     }
 
     /// Analyze the SQL in a TypeScript or JavaScript file: the tagged template
@@ -160,8 +164,42 @@ impl<'a> Analyzer<'a> {
     /// assert_eq!(diagnostics[0].span.unwrap().column, 31);
     /// ```
     pub fn analyze_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Vec<Diagnostic> {
-        let extracted = crate::embedded::extract(source, tags, self.dialect);
-        self.analyze_text(&extracted.text, source, &extracted.identifiers)
+        let (source, bom) = strip_bom(source);
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Script);
+        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
+    }
+
+    /// Analyze the SQL in the `<script>` blocks of a Vue or Svelte component, as
+    /// [`Analyzer::analyze_embedded`] does for a TypeScript or JavaScript file
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = "<script setup>\nconst u = await sql`SELECT nme FROM users`;\n</script>\n<p>`sql`</p>";
+    /// let diagnostics = Analyzer::new(&catalog).analyze_embedded_component(source, &["sql"]);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// ```
+    pub fn analyze_embedded_component<S: AsRef<str>>(
+        &mut self,
+        source: &str,
+        tags: &[S],
+    ) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Component);
+        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
     }
 
     /// Analyze `sql`, which has the same lines and character columns as `original`
@@ -187,10 +225,11 @@ impl<'a> Analyzer<'a> {
         };
         let source = match self.dialect {
             SqlDialect::PostgreSQL => psql::preprocess(&template.masked.text),
-            SqlDialect::MySQL | SqlDialect::SQLite => {
-                Preprocessed::unchanged(&template.masked.text)
-            }
+            SqlDialect::MySQL => mysql::preprocess(&template.masked.text),
+            SqlDialect::SQLite => Preprocessed::unchanged(&template.masked.text),
         };
+        // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
+        let text = sqlc::mask_parameters(&source.text, self.dialect);
         // A file that looks like a template but isn't masked doesn't parse
         let template_hint =
             self.templating == Templating::None && templating::looks_like_jinja(sql);
@@ -201,8 +240,8 @@ impl<'a> Analyzer<'a> {
         let query_names = QueryNames::parse(sql);
 
         // Parse the SQL
-        let lines = LineIndex::new(&source.text);
-        let statements = self.parse_statements(&source.text, &lines);
+        let lines = LineIndex::new(&text);
+        let statements = self.parse_statements(&text, &lines);
 
         // Tables, views and types created, altered or dropped by the file's own
         // statements, applied to a copy of the catalog made on the first such
@@ -244,7 +283,8 @@ impl<'a> Analyzer<'a> {
         // original input (extracting embedded SQL or masking a template may change
         // byte lengths, never lines or character columns)
         let original_lines = (!std::ptr::eq(original, sql)
-            || template.masked.text.len() != sql.len())
+            || template.masked.text.len() != sql.len()
+            || source.text.len() != sql.len())
         .then(|| LineIndex::new(original));
         let offsets = original_lines.as_ref().unwrap_or(&lines);
         for diagnostic in &mut self.diagnostics {
@@ -317,7 +357,16 @@ impl<'a> Analyzer<'a> {
         for range in ranges {
             let (line, column) = lines.line_column(range.start);
             let origin = Origin { line, column };
-            match Parser::parse_sql(dialect.as_ref(), &sql[range.clone()]) {
+            let text = &sql[range.clone()];
+            let parsed = Parser::parse_sql(dialect.as_ref(), text).or_else(|error| {
+                // MySQL's INSERT ... SET, which sqlparser doesn't support
+                match self.dialect {
+                    SqlDialect::MySQL => mysql::parse_insert_set(dialect.as_ref(), text)
+                        .map_or(Err(error), |parsed| parsed.map(|s| vec![s])),
+                    SqlDialect::PostgreSQL | SqlDialect::SQLite => Err(error),
+                }
+            });
+            match parsed {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
                 Err(error) => self
                     .diagnostics
@@ -353,6 +402,32 @@ fn explain_template_parse_error(d: &mut Diagnostic, template: &Template, not_mas
         Some(existing) => format!("{existing}\n{help}"),
         None => help,
     });
+}
+
+/// `text` without a leading UTF-8 byte order mark (which editors on Windows and
+/// tools like SSMS write), and the byte length removed. Columns of the stripped
+/// text are the ones an editor shows; see [`shift_offsets`] for byte offsets.
+pub(crate) fn strip_bom(text: &str) -> (&str, usize) {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, text.len() - rest.len()),
+        None => (text, 0),
+    }
+}
+
+/// Make the byte offsets of diagnostics found in a text [`strip_bom`] removed
+/// `bom` bytes from relative to the original text
+pub(crate) fn shift_offsets(diagnostics: &mut [Diagnostic], bom: usize) {
+    if bom == 0 {
+        return;
+    }
+    for diagnostic in diagnostics {
+        let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+        for span in diagnostic.span.iter_mut().chain(labels) {
+            if span.line > 0 {
+                span.offset += bom;
+            }
+        }
+    }
 }
 
 /// Where a statement's text starts in the full input (1-indexed line and column)

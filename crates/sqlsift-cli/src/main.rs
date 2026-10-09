@@ -13,9 +13,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::Result;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
-use sqlsift_core::embedded::is_embedded_sql_file;
+use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
+use sqlsift_core::stack::{with_analysis_stack, ANALYSIS_STACK_SIZE};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::args::{Args, Command, OutputFormat, SchemaFormat};
@@ -109,7 +110,9 @@ fn analyze_files(
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
             .with_templating(options.templating[i]);
-        let diagnostics = if is_embedded_sql_file(name) {
+        let diagnostics = if is_component_file(name) {
+            analyzer.analyze_embedded_component(&content, options.embedded_sql_tags)
+        } else if is_embedded_sql_file(name) {
             analyzer.analyze_embedded(&content, options.embedded_sql_tags)
         } else {
             analyzer.analyze(&content)
@@ -120,12 +123,16 @@ fn analyze_files(
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(files.len());
+    // Analysis runs on threads with a large stack: sqlparser recurses as deep as
+    // a chain of binary operators is long
     if workers <= 1 {
-        return files
-            .iter()
-            .enumerate()
-            .map(|(i, path)| analyze_one(i, path))
-            .collect();
+        return with_analysis_stack(|| {
+            files
+                .iter()
+                .enumerate()
+                .map(|(i, path)| analyze_one(i, path))
+                .collect()
+        });
     }
 
     // Workers take the next unclaimed file until none are left
@@ -134,7 +141,7 @@ fn analyze_files(
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                scope.spawn(|| {
+                let work = || {
                     let mut done = Vec::new();
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -143,8 +150,13 @@ fn analyze_files(
                         };
                         done.push((i, analyze_one(i, path)));
                     }
-                })
+                };
+                std::thread::Builder::new()
+                    .stack_size(ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, work)
             })
+            // Fewer workers if some can't be spawned (the others take their files)
+            .filter_map(std::result::Result::ok)
             .collect();
         for handle in handles {
             for (i, result) in handle.join().expect("analysis thread panicked") {
@@ -154,7 +166,11 @@ fn analyze_files(
     });
     results
         .into_iter()
-        .map(|r| r.expect("every file is analyzed"))
+        .zip(files)
+        .enumerate()
+        .map(|(i, (result, path))| {
+            result.unwrap_or_else(|| with_analysis_stack(|| analyze_one(i, path)))
+        })
         .collect()
 }
 
@@ -204,6 +220,15 @@ fn read_file(path: &Path) -> Result<String> {
 /// Whether a path pattern contains glob metacharacters
 fn is_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?', '['])
+}
+
+/// The directory a glob pattern starts in: its components before the first one
+/// with glob metacharacters
+fn glob_base(pattern: &str) -> PathBuf {
+    Path::new(pattern)
+        .components()
+        .take_while(|c| !is_glob(&c.as_os_str().to_string_lossy()))
+        .collect()
 }
 
 /// Expand a glob pattern into matching paths (sorted, as returned by `glob`)
@@ -278,7 +303,7 @@ fn build_catalog(
     let mut builder = SchemaBuilder::with_dialect(dialect);
     for schema_file in schema_files {
         let content = read_file(schema_file)?;
-        if let Err(diags) = builder.parse(&content) {
+        if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
             return Ok(Err(FileDiagnostics {
                 file: schema_file.display().to_string(),
                 source: content,
@@ -379,10 +404,17 @@ fn run(args: Args) -> Result<bool> {
             let mut unmatched = Vec::new();
             for pattern in &config.files {
                 if is_glob(pattern) {
-                    let matches = expand_glob(pattern)?;
+                    let mut matches = expand_glob(pattern)?;
                     if matches.is_empty() {
                         unmatched.push(format!("'{pattern}'"));
                     }
+                    // Installed packages and build output that the pattern matches
+                    // aren't checked for SQL in TypeScript / JavaScript
+                    let base = glob_base(pattern);
+                    matches.retain(|path| {
+                        !(is_embedded_sql_file(path)
+                            && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
+                    });
                     query_files.extend(matches);
                 } else {
                     query_files.push(PathBuf::from(pattern));
