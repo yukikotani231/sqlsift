@@ -100,7 +100,8 @@ sqlsift check --schema schema.sql queries/*.sql
 # Use multiple schema files
 sqlsift check -s users.sql -s orders.sql queries/*.sql
 
-# Use a migrations directory (all *.sql files, recursively, in filename order)
+# Use a migrations directory (all *.sql files, recursively, in filename order;
+# rollback files such as *.down.sql are skipped)
 sqlsift check --schema-dir ./migrations queries/*.sql
 
 # Other dialects
@@ -159,6 +160,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
 
+Only the "up" direction of migrations is applied: `--schema-dir` skips rollback files (`*.down.sql` from sqlx / golang-migrate, Flyway undo files `U<version>__*.sql`), and in any schema file everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored. Files passed explicitly with `--schema` are always loaded.
+
 ## Editor Integration
 
 sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type.
@@ -201,6 +204,37 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration error).
 
 Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI.
+
+### Re-check everything when the schema changes
+
+sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
+
+```yaml
+on: pull_request
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=d "$BASE" HEAD)
+          if grep -q '^db/' <<< "$changed"; then
+            files='queries/**/*.sql'  # schema changed: check every query
+          else
+            files=$(grep '^queries/.*\.sql$' <<< "$changed" | tr '\n' ' ' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - if: steps.changed.outputs.files != ''
+        uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: ${{ steps.changed.outputs.files }}
+```
 
 ### GitHub Code Scanning (SARIF)
 
@@ -343,6 +377,7 @@ SELECT bad_col FROM missing_table;
 - DISTINCT ON, UNION / INTERSECT / EXCEPT
 - ORDER BY with SELECT alias support
 - Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
 
 ### DDL
 

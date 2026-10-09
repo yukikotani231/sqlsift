@@ -10,6 +10,7 @@ use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 use crate::analyzer;
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::psql;
 use crate::schema::{
     Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
     PrimaryKeyDef, QualifiedName, TableDef, UniqueConstraintDef, ViewDef,
@@ -75,9 +76,20 @@ impl SchemaBuilder {
         )
     }
 
-    /// Parse SQL schema definitions and build the catalog
+    /// Parse SQL schema definitions and build the catalog.
+    ///
+    /// dbmate `-- migrate:down` sections are ignored (see
+    /// [`strip_down_migrations`](crate::schema::strip_down_migrations)).
     pub fn parse(&mut self, sql: &str) -> Result<(), Vec<Diagnostic>> {
+        let sql = &*crate::schema::strip_down_migrations(sql);
         let dialect = self.dialect.parser_dialect();
+
+        // psql meta-commands in dumps and scripts (`\connect`, `\restrict`, `\i`, ...)
+        let source = match self.dialect {
+            SqlDialect::PostgreSQL => psql::preprocess(sql),
+            SqlDialect::MySQL | SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
+        };
+        let sql: &str = &source.text;
 
         // Try parsing the entire SQL first (fast path)
         match Parser::parse_sql(dialect.as_ref(), sql) {
