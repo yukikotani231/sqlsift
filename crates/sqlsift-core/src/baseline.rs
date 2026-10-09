@@ -1163,7 +1163,6 @@ mod tests {
         assert_eq!(normalize_separators(".\\sql\\q.sql"), "sql/q.sql");
     }
 
-    #[cfg(unix)]
     #[test]
     fn verbatim_prefixes_are_stripped() {
         assert_eq!(
@@ -1180,6 +1179,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn file_keys_resolve_symbolic_links() {
         let dir = std::env::temp_dir().join(format!("sqlsift-bl-link-{}", std::process::id()));
