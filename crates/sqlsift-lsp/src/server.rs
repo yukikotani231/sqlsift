@@ -121,11 +121,17 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let TextDocumentItem { uri, text, .. } = params.text_document;
+        let TextDocumentItem {
+            uri,
+            text,
+            language_id,
+            ..
+        } = params.text_document;
 
         {
             let mut state = self.state.write().await;
             state.open_documents.insert(uri.clone(), text.clone());
+            state.document_languages.insert(uri.clone(), language_id);
         }
 
         self.publish_diagnostics_for(uri, &text).await;
@@ -185,6 +191,7 @@ impl LanguageServer for Backend {
         {
             let mut state = self.state.write().await;
             state.open_documents.remove(&uri);
+            state.document_languages.remove(&uri);
         }
 
         // Clear diagnostics for closed document
@@ -196,6 +203,11 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
 
         let state = self.state.read().await;
+        // Schema names are offered only in SQL documents, not in the code of
+        // TypeScript / JavaScript ones
+        if state.is_embedded_sql_document(uri) {
+            return Ok(None);
+        }
         let Some(text) = state.open_documents.get(uri) else {
             return Ok(None);
         };
@@ -218,8 +230,11 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let state = self.state.read().await;
+        if state.is_embedded_sql_document(&params.text_document_position.text_document.uri) {
+            return Ok(None);
+        }
         let items = state.completion_items();
 
         if items.is_empty() {
