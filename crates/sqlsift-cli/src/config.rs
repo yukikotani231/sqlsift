@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use sqlsift_core::rules::{find_category, find_rule, RuleConfig, RuleLevel};
+use sqlsift_core::rules::{
+    find_category, find_rule, similar_category_name, similar_rule_name, RuleConfig, RuleLevel,
+};
 
 /// Keys recognized in `sqlsift.toml`
 const KNOWN_KEYS: &[&str] = &[
@@ -18,6 +20,7 @@ const KNOWN_KEYS: &[&str] = &[
     "schema_dir",
     "rules",
     "categories",
+    "max_warnings",
 ];
 
 /// Configuration for sqlsift
@@ -40,9 +43,13 @@ pub struct Config {
     #[serde(default)]
     pub dialect: Option<String>,
 
-    /// Output format (human, json, sarif)
+    /// Output format (human, json, sarif, github)
     #[serde(default)]
     pub format: Option<String>,
+
+    /// Fail the check when more than this many warnings are reported
+    #[serde(default)]
+    pub max_warnings: Option<usize>,
 
     /// Rules to disable (e.g., ["E0001", "E0002"])
     #[serde(default)]
@@ -131,6 +138,7 @@ impl Config {
     /// Merge CLI arguments into configuration
     /// CLI arguments take precedence over config file values; `--ignore`
     /// patterns are added to the config file's `ignore`
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_with_args(
         mut self,
         schema: &[PathBuf],
@@ -139,6 +147,7 @@ impl Config {
         ignore: &[String],
         format: &Option<crate::args::OutputFormat>,
         dialect: &Option<String>,
+        max_warnings: Option<usize>,
     ) -> Self {
         self.ignore.extend(ignore.iter().cloned());
 
@@ -161,6 +170,10 @@ impl Config {
 
         if dialect.is_some() {
             self.dialect = dialect.clone();
+        }
+
+        if max_warnings.is_some() {
+            self.max_warnings = max_warnings;
         }
 
         self
@@ -188,9 +201,14 @@ impl Config {
 
         for (name, level) in &self.categories {
             if find_category(name).is_none() {
+                let hint = match similar_category_name(name) {
+                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    None => String::new(),
+                };
                 miette::bail!(
-                    "[categories]: unknown category '{}' (expected one of: {})",
+                    "[categories]: unknown category '{}'{} (expected one of: {})",
                     name,
+                    hint,
                     sqlsift_core::RuleCategory::ALL.map(|c| c.name()).join(", ")
                 );
             }
@@ -198,9 +216,14 @@ impl Config {
         }
         for (id, level) in &self.rules {
             if find_rule(id).is_none() {
+                let hint = match similar_rule_name(id) {
+                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    None => String::new(),
+                };
                 miette::bail!(
-                    "[rules]: unknown rule '{}' (run `sqlsift rules` to list rules)",
-                    id
+                    "[rules]: unknown rule '{}'{} (run `sqlsift rules` to list rules)",
+                    id,
+                    hint
                 );
             }
             set(id, parse_level(level, "[rules]")?, "[rules]")?;

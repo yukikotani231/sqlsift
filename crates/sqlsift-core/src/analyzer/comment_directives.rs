@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::DiagnosticKind;
+use crate::rules::{find_rule, similar_rule_name};
 
 /// Parsed inline disable directives from SQL comments
 pub struct InlineDirectives {
@@ -99,10 +100,9 @@ impl InlineDirectives {
         match &self.disabled_file {
             None => false,
             Some(None) => true,
-            Some(Some(ids)) => {
-                ids.contains(&kind.code().to_uppercase())
-                    || ids.contains(&kind.name().to_uppercase())
-            }
+            Some(Some(ids)) => ids.iter().any(|i| {
+                i.eq_ignore_ascii_case(kind.code()) || i.eq_ignore_ascii_case(kind.name())
+            }),
         }
     }
 
@@ -110,9 +110,44 @@ impl InlineDirectives {
     fn suppresses(&self, id: &str, line: usize) -> bool {
         match self.disabled_lines.get(&line) {
             Some(None) => true, // All rules disabled
-            Some(Some(ids)) => ids.contains(&id.to_uppercase()),
+            Some(Some(ids)) => ids.iter().any(|i| i.eq_ignore_ascii_case(id)),
             None => false,
         }
+    }
+
+    /// Names in the disable directives for the given line that are no rule code or
+    /// name (most likely misspelled), sorted
+    pub fn unknown_ids(&self, line: usize) -> Vec<&str> {
+        let Some(Some(ids)) = self.disabled_lines.get(&line) else {
+            return Vec::new();
+        };
+        let mut unknown: Vec<&str> = ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| find_rule(id).is_none())
+            .collect();
+        unknown.sort_unstable();
+        unknown
+    }
+
+    /// Explain why a diagnostic on `line` was not suppressed when that line's disable
+    /// directive names an unknown rule: "Did you mean ...?"
+    pub fn unknown_id_help(&self, line: usize) -> Option<String> {
+        let notes: Vec<String> = self
+            .unknown_ids(line)
+            .into_iter()
+            .map(|id| match similar_rule_name(id) {
+                Some(suggestion) => format!(
+                    "'{}' in the sqlsift:disable comment is not a rule. Did you mean '{}'?",
+                    id, suggestion
+                ),
+                None => format!(
+                    "'{}' in the sqlsift:disable comment is not a rule (run `sqlsift rules` to list rules)",
+                    id
+                ),
+            })
+            .collect();
+        (!notes.is_empty()).then(|| notes.join("\n"))
     }
 }
 
@@ -146,7 +181,7 @@ fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Option<HashS
         .split([',', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_uppercase())
+        .map(str::to_string)
         .collect();
 
     if codes.is_empty() {
@@ -237,6 +272,23 @@ fn merge_codes(existing: &mut Option<HashSet<String>>, new: Option<HashSet<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unknown_rule_names_get_a_suggestion() {
+        let sql = "-- sqlsift:disable ambigous-column, E0002, zzz\nSELECT 1";
+        let directives = InlineDirectives::parse(sql);
+        assert_eq!(directives.unknown_ids(2), vec!["ambigous-column", "zzz"]);
+        assert_eq!(
+            directives.unknown_id_help(2).as_deref(),
+            Some(
+                "'ambigous-column' in the sqlsift:disable comment is not a rule. \
+                 Did you mean 'ambiguous-column'?\n\
+                 'zzz' in the sqlsift:disable comment is not a rule \
+                 (run `sqlsift rules` to list rules)"
+            )
+        );
+        assert_eq!(directives.unknown_id_help(1), None);
+    }
 
     #[test]
     fn test_inline_same_line() {

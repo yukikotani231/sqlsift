@@ -13,7 +13,7 @@ use indexmap::IndexMap;
 use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
-use crate::schema::{Catalog, QualifiedName};
+use crate::schema::{Catalog, FormerColumn, QualifiedName};
 use crate::types::SqlType;
 
 /// Type of an expression or column, as far as it can be inferred
@@ -92,6 +92,8 @@ pub(super) struct Relation {
     /// Columns merged into an earlier relation by `JOIN ... USING` / `NATURAL JOIN`
     /// (lowercase): they appear once in `SELECT *`
     pub(super) merged: HashSet<String>,
+    /// Columns of a catalog table that ALTER TABLE renamed or dropped
+    pub(super) former_columns: Vec<FormerColumn>,
 }
 
 /// Whether a relation has a column
@@ -114,6 +116,7 @@ impl Relation {
             name: name.into(),
             columns,
             merged: HashSet::new(),
+            former_columns: Vec::new(),
         }
     }
 
@@ -125,11 +128,27 @@ impl Relation {
             .values()
             .map(|c| Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type)))
             .collect();
-        Some(Self::new(
-            RelationKind::Table,
-            name.to_string(),
-            Some(columns),
-        ))
+        let mut relation = Self::new(RelationKind::Table, name.to_string(), Some(columns));
+        relation.former_columns = table.former_columns.clone();
+        Some(relation)
+    }
+
+    /// What the relation is, as a word for diagnostics (`table`, `view`, `CTE`, ...)
+    pub(super) fn kind_name(&self) -> &'static str {
+        match self.kind {
+            RelationKind::Table => "table",
+            RelationKind::View => "view",
+            RelationKind::Cte => "CTE",
+            RelationKind::Function => "function",
+            _ => "subquery",
+        }
+    }
+
+    /// The renamed or dropped column of this table that was called `name`
+    pub(super) fn former_column(&self, name: &str) -> Option<&FormerColumn> {
+        self.former_columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
     }
 
     /// A catalog view, with the column types inferred from its query
@@ -332,6 +351,29 @@ impl Scope {
             .iter()
             .flat_map(|f| f.ctes.iter().map(|c| c.name.clone()))
             .collect()
+    }
+
+    /// The relation an unqualified column resolves to, if it resolves to exactly one
+    pub(super) fn column_relation(&self, name: &str, dialect: SqlDialect) -> Option<&Relation> {
+        for frame in self.visible() {
+            let mut found = frame
+                .relations
+                .values()
+                .filter(|r| matches!(r.column(name, dialect), ColumnMatch::Yes(_)));
+            if let Some(relation) = found.next() {
+                let unique =
+                    found.next().is_none() || frame.using_columns.contains(&name.to_lowercase());
+                return unique.then_some(relation);
+            }
+            if frame
+                .relations
+                .values()
+                .any(|r| matches!(r.column(name, dialect), ColumnMatch::Maybe))
+            {
+                return None;
+            }
+        }
+        None
     }
 
     /// Look up an unqualified column: the innermost query block that has it wins

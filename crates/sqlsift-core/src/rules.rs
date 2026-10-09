@@ -24,6 +24,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Diagnostic, DiagnosticKind, Severity};
+use crate::suggest::find_most_similar;
 
 /// Rule category: what kind of problem a rule finds. Decides the default level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -234,18 +235,51 @@ pub fn find_category(name: &str) -> Option<RuleCategory> {
         .find(|c| c.name().eq_ignore_ascii_case(name))
 }
 
+/// The rule name most similar to a misspelled one (for "did you mean" suggestions)
+///
+/// ```
+/// use sqlsift_core::rules::similar_rule_name;
+///
+/// assert_eq!(similar_rule_name("ambigous-column"), Some("ambiguous-column"));
+/// assert_eq!(similar_rule_name("no-such-thing"), None);
+/// ```
+pub fn similar_rule_name(id: &str) -> Option<&'static str> {
+    find_most_similar(RULES.iter().map(|r| r.name), |name| name, id)
+}
+
+/// The category name most similar to a misspelled one (for "did you mean" suggestions)
+pub fn similar_category_name(name: &str) -> Option<&'static str> {
+    find_most_similar(RuleCategory::ALL.map(|c| c.name()), |c| c, name)
+}
+
+/// The rule or category name most similar to a misspelled one
+pub fn similar_rule_or_category_name(id: &str) -> Option<&'static str> {
+    let names = RULES
+        .iter()
+        .map(|r| r.name)
+        .chain(RuleCategory::ALL.map(|c| c.name()));
+    find_most_similar(names, |name| name, id)
+}
+
 /// Error for a rule setting that names no rule or category
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownRule(pub String);
 
 impl fmt::Display for UnknownRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unknown rule or category '{}' (run `sqlsift rules` to list rules; categories: {})",
-            self.0,
-            RuleCategory::ALL.map(|c| c.name()).join(", ")
-        )
+        match similar_rule_or_category_name(&self.0) {
+            Some(suggestion) => write!(
+                f,
+                "unknown rule or category '{}'. Did you mean '{}'? (run `sqlsift rules` to list rules)",
+                self.0, suggestion
+            ),
+            None => write!(
+                f,
+                "unknown rule or category '{}' (run `sqlsift rules` to list rules; categories: {})",
+                self.0,
+                RuleCategory::ALL.map(|c| c.name()).join(", ")
+            ),
+        }
     }
 }
 
@@ -366,6 +400,26 @@ mod tests {
             .configure("no-such-rule", RuleLevel::Off)
             .unwrap_err();
         assert!(err.to_string().contains("no-such-rule"));
+        assert!(!err.to_string().contains("Did you mean"));
+    }
+
+    #[test]
+    fn unknown_ids_get_a_suggestion() {
+        let mut config = RuleConfig::default();
+        let err = config
+            .configure("ambigous-column", RuleLevel::Off)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown rule or category 'ambigous-column'. Did you mean 'ambiguous-column'? \
+             (run `sqlsift rules` to list rules)"
+        );
+        let err = config.configure("suspicous", RuleLevel::Off).unwrap_err();
+        assert!(
+            err.to_string().contains("Did you mean 'suspicious'?"),
+            "{err}"
+        );
+        assert_eq!(similar_category_name("pedantc"), Some("pedantic"));
     }
 
     #[test]

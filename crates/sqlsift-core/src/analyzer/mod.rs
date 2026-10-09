@@ -14,8 +14,9 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
-use crate::schema::Catalog;
+use crate::schema::{Catalog, SchemaBuilder};
 
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
@@ -115,13 +116,29 @@ impl<'a> Analyzer<'a> {
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
 
+        // psql meta-commands and variables (the rewrite keeps every location)
+        let source = match self.dialect {
+            SqlDialect::PostgreSQL => psql::preprocess(sql),
+            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(sql),
+        };
+
         // Parse the SQL
-        let statements = self.parse_statements(sql);
+        let lines = LineIndex::new(&source.text);
+        let statements = self.parse_statements(&source.text, &lines);
+
+        // Tables, views and types created, altered or dropped by the file's own
+        // statements, applied to a copy of the catalog made on the first such
+        // statement, so they are visible to the later statements of this file only
+        let mut file_schema: Option<SchemaBuilder> = None;
 
         // Analyze each statement
         for (stmt, origin) in &statements {
+            let catalog = file_schema
+                .as_ref()
+                .map_or(self.catalog, SchemaBuilder::catalog);
+
             // Name resolution and type checking in one walk over the statement
-            let mut resolver = Resolver::new(self.catalog, self.dialect);
+            let mut resolver = Resolver::new(catalog, self.dialect);
             resolver.statement(stmt);
 
             // Locations relative to the input
@@ -131,18 +148,54 @@ impl<'a> Analyzer<'a> {
                 }
                 self.diagnostics.push(diagnostic);
             }
+
+            if SchemaBuilder::changes_schema(stmt) {
+                file_schema
+                    .get_or_insert_with(|| {
+                        SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
+                    })
+                    .apply_statement(stmt);
+            }
         }
 
         // Report diagnostics in source order (parse errors are found before analysis)
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline or file directives, then apply rule levels
+        // Spans are built from line/column locations: add their byte offsets
+        for diagnostic in &mut self.diagnostics {
+            let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+            for span in diagnostic.span.iter_mut().chain(labels) {
+                lines.fill_offset(span);
+            }
+        }
+
+        // Filter out diagnostics suppressed by inline or file directives, then apply rule levels.
+        // A diagnostic that a directive meant to suppress but misspelled the rule of
+        // says so.
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
-            .filter(|d| match &d.span {
-                Some(span) => !directives.is_suppressed(d.kind, span.line),
-                None => !directives.is_suppressed_in_file(d.kind),
+            .filter_map(|mut d| {
+                let Some(span) = d.span else {
+                    return (!directives.is_suppressed_in_file(d.kind)).then_some(d);
+                };
+                // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
+                let substituted = matches!(
+                    d.kind,
+                    DiagnosticKind::TableNotFound
+                        | DiagnosticKind::ColumnNotFound
+                        | DiagnosticKind::AmbiguousColumn
+                ) && source.is_substituted(span.line, span.column);
+                if substituted || directives.is_suppressed(d.kind, span.line) {
+                    return None;
+                }
+                if let Some(note) = directives.unknown_id_help(span.line) {
+                    d.help = Some(match d.help.take() {
+                        Some(help) => format!("{help}\n{note}"),
+                        None => note,
+                    });
+                }
+                Some(d)
             })
             .collect();
         self.rules.apply(diagnostics)
@@ -154,18 +207,17 @@ impl<'a> Analyzer<'a> {
     /// a syntax error is reported where it occurs and doesn't hide diagnostics in the
     /// other statements. Only the statement's own text is parsed (keeping this linear
     /// in the input size); its locations are shifted by its [`Origin`] afterwards.
-    fn parse_statements(&mut self, sql: &str) -> Vec<(Statement, Origin)> {
+    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> Vec<(Statement, Origin)> {
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => return statements.into_iter().map(|s| (s, Origin::START)).collect(),
             Err(error) => error,
         };
 
-        let lines = LineIndex::new(sql);
-        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, &lines) else {
+        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, lines) else {
             // Tokenizer error: nothing can be parsed reliably
             self.diagnostics
-                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), &lines));
+                .push(parse_error_diagnostic(&error, sql, 0..sql.len(), lines));
             return Vec::new();
         };
 
@@ -177,7 +229,7 @@ impl<'a> Analyzer<'a> {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
                 Err(error) => self
                     .diagnostics
-                    .push(parse_error_diagnostic(&error, sql, range, &lines)),
+                    .push(parse_error_diagnostic(&error, sql, range, lines)),
             }
         }
         statements
@@ -229,6 +281,13 @@ impl<'a> LineIndex<'a> {
             .char_indices()
             .nth(column.saturating_sub(1) as usize)
             .map_or(self.sql.len(), |(i, _)| line_start + i)
+    }
+
+    /// Set the byte offset of a span that has a line/column location
+    fn fill_offset(&self, span: &mut Span) {
+        if span.line > 0 {
+            span.offset = self.byte_offset(span.line as u64, span.column as u64);
+        }
     }
 
     /// 1-indexed line / character column of a byte offset

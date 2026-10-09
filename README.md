@@ -100,11 +100,15 @@ sqlsift check --schema schema.sql queries/*.sql
 # Use multiple schema files
 sqlsift check -s users.sql -s orders.sql queries/*.sql
 
-# Use a migrations directory (all *.sql files, recursively, in filename order)
+# Use a migrations directory (all *.sql files, recursively, in filename order;
+# rollback files such as *.down.sql are skipped)
 sqlsift check --schema-dir ./migrations queries/*.sql
 
 # Other dialects
 sqlsift check --dialect mysql --schema schema.sql queries/*.sql
+
+# Read a query from stdin (e.g. the staged version in a pre-commit hook)
+git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queries/users.sql -
 ```
 
 To avoid repeating flags, add a `sqlsift.toml` to your project root (see [`sqlsift.toml`](sqlsift.toml) for all options):
@@ -120,10 +124,63 @@ schema = ["db/schema.sql"]
 
 Then just run `sqlsift check queries/**/*.sql`.
 
+### Inspecting the loaded schema
+
+When a query is flagged unexpectedly, check what sqlsift actually understood from your schema. `sqlsift schema` takes the same schema options as `check` (`--schema`, `--schema-dir`, `--config`, `--dialect`) and falls back to `sqlsift.toml`:
+
+```console
+$ sqlsift schema --schema-dir migrations
+Schema Information:
+==================
+Dialect: postgresql
+Schema files:
+  migrations/001_init.sql
+
+Schema: public
+  Table: users
+    - id integer NOT NULL PRIMARY KEY DEFAULT nextval('users_id_seq'::regclass)
+    - name text NOT NULL
+    - feeling mood NULL
+  View: user_names
+    - id integer
+    - name text
+  Materialized view: user_count
+    - n bigint
+
+Enum types:
+  mood: 'sad', 'ok', 'happy'
+```
+
+Objects are listed per schema in definition order. Statements sqlsift had to skip are reported as warnings on stderr.
+
+`sqlsift schema --format json` prints the same information as JSON:
+
+```jsonc
+{
+  "dialect": "postgresql",
+  "default_schema": "public",
+  "schema_files": ["migrations/001_init.sql"],
+  "schemas": [{
+    "name": "public",
+    "tables": [{
+      "name": "users",
+      "columns": [{ "name": "id", "type": "integer", "nullable": false, "primary_key": true,
+                    "identity": null, "auto_increment": false, "default": "nextval(...)" }],
+      "primary_key": ["id"],           // or null
+      "foreign_keys": [{ "name": null, "columns": ["..."], "references_table": "...", "references_columns": ["..."] }],
+      "unique": [["..."]]
+    }],
+    "views": [{ "name": "user_names", "materialized": false,
+                "columns": [{ "name": "id", "type": "integer" }] }]   // type is null when unknown
+  }],
+  "enums": [{ "name": "mood", "values": ["sad", "ok", "happy"] }]
+}
+```
+
 <details>
 <summary><b>Configuration file reference</b></summary>
 
-`sqlsift check` looks for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
+`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
 
 ```toml
 schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
@@ -131,7 +188,8 @@ schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
 files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
 ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
 dialect = "postgresql"            # postgresql, mysql or sqlite
-format = "human"                  # human, json or sarif
+format = "human"                  # human, json, sarif or github
+# max_warnings = 0                # fail when more than this many warnings are reported
 disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
 
 [rules]                           # per-rule level: "off", "warn" or "error"
@@ -144,7 +202,7 @@ correctness = "error"
 
 Relative paths in the file are resolved against the directory containing `sqlsift.toml`. `ignore` patterns apply to the files from `files` and to files given on the command line (and the editor shows no diagnostics for them); `*` and `?` match within a directory, `**` matches any number of directories, and a pattern that matches a directory skips everything below it. `--ignore <PATTERN>` (repeatable, relative to the current directory) adds to the file's `ignore` list. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
 
-Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported, `2` for usage or configuration errors (missing files, invalid config, etc.).
+Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported (or more warnings than `max_warnings` / `--max-warnings`), `2` for usage or configuration errors (missing files, patterns that match no files, invalid config, etc.).
 
 </details>
 
@@ -159,6 +217,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+
+Only the "up" direction of migrations is applied: `--schema-dir` skips rollback files (`*.down.sql` from sqlx / golang-migrate, Flyway undo files `U<version>__*.sql`), and in any schema file everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored. Files passed explicitly with `--schema` are always loaded.
 
 ## Editor Integration
 
@@ -201,7 +261,40 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 
 The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration error).
 
-Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI.
+Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI (add `--format github` for annotations in GitHub Actions).
+
+Rolling out a rule as `warn`? `--max-warnings <N>` (or `max_warnings` in `sqlsift.toml`) fails the check when more than `N` warnings are reported, so the backlog can only shrink.
+
+### Re-check everything when the schema changes
+
+sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
+
+```yaml
+on: pull_request
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=d "$BASE" HEAD)
+          if grep -q '^db/' <<< "$changed"; then
+            files='queries/**/*.sql'  # schema changed: check every query
+          else
+            files=$(grep '^queries/.*\.sql$' <<< "$changed" | tr '\n' ' ' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - if: steps.changed.outputs.files != ''
+        uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: ${{ steps.changed.outputs.files }}
+```
 
 ### GitHub Code Scanning (SARIF)
 
@@ -240,11 +333,11 @@ jobs:
           "code": "E0002",
           "kind": "ColumnNotFound",
           "severity": "error",
-          "message": "Column 'user_id' not found",
+          "message": "Column 'user_id' not found in table 'users'",
           "help": "Did you mean 'id'?",
           "line": 3,
           "column": 15,
-          "span": { "line": 3, "column": 15, "length": 7, "offset": 0 },
+          "span": { "line": 3, "column": 15, "length": 7, "offset": 62 },
           "labels": []
         }
       ]
@@ -252,6 +345,21 @@ jobs:
   ]
 }
 ```
+
+`line` and `column` are 1-indexed (columns count characters); `span.offset` is the 0-indexed byte offset of the same position in the file, and `span.length` is in bytes.
+
+### GitHub Actions annotations
+
+Running sqlsift inside your own job (a `make lint` step, a script, a container)? `--format github` prints one [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) per diagnostic on stdout, which GitHub turns into annotations on the pull request diff:
+
+```
+::error file=queries/fetch.sql,line=3,col=15,endLine=3,endColumn=22,title=E0002 column-not-found::Column 'user_id' not found%0Ahelp: Did you mean 'id'?
+::warning file=queries/report.sql,line=6,col=8,endLine=6,endColumn=10,title=E0006 ambiguous-column::Column 'id' is ambiguous
+```
+
+Warnings become `::warning`, errors `::error`. The summary still goes to stderr.
+
+### Other formats
 
 The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for all files and a `tool.driver.rules` entry for every diagnostic rule. Human output uses colors only when stderr is a terminal and `NO_COLOR` is not set.
 
@@ -355,6 +463,7 @@ A `disable-file` comment may appear anywhere in the file (conventionally at the 
 - DISTINCT ON, UNION / INTERSECT / EXCEPT
 - ORDER BY with SELECT alias support
 - Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
 
 ### DDL
 
@@ -365,6 +474,7 @@ A `disable-file` comment may appear anywhere in the file (conventionally at the 
 - `CHECK` constraints (column-level and table-level)
 - `GENERATED AS IDENTITY` columns (ALWAYS / BY DEFAULT)
 - Resilient parsing — unsupported DDL (functions, triggers, domains, etc.) is gracefully skipped
+- DDL inside a query file (`CREATE [TEMP] TABLE`, `CREATE TABLE ... AS SELECT`, `CREATE VIEW`, `ALTER TABLE`, `DROP`) applies to the later statements of that file only
 
 ### Dialects
 
@@ -383,7 +493,7 @@ Use the `--dialect` flag to specify the dialect.
 sqlsift check [OPTIONS] <FILES>...
 
 Arguments:
-  <FILES>...                SQL files to validate (supports glob patterns)
+  <FILES>...                SQL files to validate (supports glob patterns; `-` reads stdin)
 
 Options:
   -s, --schema <FILE>       Schema definition file (can be specified multiple times)
@@ -394,12 +504,31 @@ Options:
   -W, --warn <RULE>         Report a rule or category as warnings
   -D, --deny <RULE>         Report a rule or category as errors
   -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
-  -f, --format <FORMAT>     Output format: human, json, sarif [default: human]
+  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
+      --max-warnings <N>    Fail (exit 1) when more than N warnings are reported
+      --stdin-filename <PATH>
+                            File name to report for the query read from stdin (`-`)
   -v, --verbose             Enable verbose logging to stderr (-vv for debug)
   -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help
 ```
+
+```
+sqlsift schema [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...                Schema definition files (same as --schema)
+
+Options:
+  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
+      --schema-dir <DIR>    Directory containing schema files
+  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
+
+`sqlsift rules` lists every rule with its category and default level.
 
 </details>
 
