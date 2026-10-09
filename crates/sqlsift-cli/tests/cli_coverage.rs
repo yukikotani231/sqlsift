@@ -3286,6 +3286,81 @@ fn dbt_project_next_to_config_file_enables_jinja() {
     .assert_code(0);
 }
 
+/// A dbt project in `analytics/` with a model, a macro, a package and build output
+fn dbt_monorepo(name: &str) -> TempDir {
+    let t = TempDir::new(name);
+    t.write("analytics/schema.sql", USERS_SCHEMA);
+    t.write("analytics/dbt_project.yml", "name: demo\n");
+    t.write(
+        "analytics/models/m.sql",
+        "SELECT id FROM users WHERE id > {{ var('min_id') }}\n",
+    );
+    t.write(
+        "analytics/macros/cents.sql",
+        "{% macro cents(c) %}({{ c }} / 100){% endmacro %}\nnot sql at all\n",
+    );
+    t.write(
+        "analytics/dbt_packages/utils/models/x.sql",
+        "SELECT {{ x }} FROM {{ y }} WHERE\n",
+    );
+    t.write("analytics/target/compiled/m.sql", "SELECT FROM\n");
+    t
+}
+
+#[test]
+fn dbt_project_above_query_files_enables_jinja() {
+    let t = dbt_monorepo("dbt-ancestor");
+    // From the parent directory
+    t.run(&[
+        "check",
+        "-s",
+        "analytics/schema.sql",
+        "analytics/models/m.sql",
+    ])
+    .assert_code(0);
+    // From a subdirectory of the project
+    let models = t.path().join("analytics/models");
+    t.run_in(&models, &["check", "-s", "../schema.sql", "m.sql"])
+        .assert_code(0);
+    // --templating none still turns it off
+    t.run(&[
+        "check",
+        "--templating",
+        "none",
+        "-s",
+        "analytics/schema.sql",
+        "analytics/models/m.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("--templating jinja");
+}
+
+#[test]
+fn dbt_macros_packages_and_target_are_skipped() {
+    let t = dbt_monorepo("dbt-skip");
+    t.run(&["check", "-s", "analytics/schema.sql", "analytics/**/*.sql"])
+        .assert_code(0)
+        // The model and schema.sql
+        .assert_stderr_contains("All 2 file(s) passed validation");
+    // A file named on its own is checked (the macro file's body is skipped)
+    t.run(&[
+        "check",
+        "-s",
+        "analytics/schema.sql",
+        "analytics/target/compiled/m.sql",
+    ])
+    .assert_code(1);
+}
+
+#[test]
+fn template_parse_error_without_templating_suggests_jinja() {
+    let t = with_users_schema("jinja-hint");
+    t.write("q.sql", "SELECT id FROM {{ ref('a') }}\n");
+    t.run(&["check", "-s", "schema.sql", "q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("--templating jinja");
+}
+
 // ---------------------------------------------------------------------------
 // SQL embedded in application code (tests/fixtures/embedded)
 // ---------------------------------------------------------------------------

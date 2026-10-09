@@ -12,6 +12,9 @@ const SCHEMA: &str = r"
         created_at DATE
     );
     CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, total NUMERIC);
+    CREATE SCHEMA raw;
+    CREATE TABLE raw.customers (id INTEGER PRIMARY KEY, email TEXT);
+    CREATE TABLE raw.payments (id INTEGER PRIMARY KEY, order_id INTEGER, amount NUMERIC);
 ";
 
 fn analyze_with(dialect: SqlDialect, templating: Templating, sql: &str) -> Vec<Diagnostic> {
@@ -157,4 +160,139 @@ fn expressions_in_names_are_identifiers() {
            o.{{ var('column') }}, {{ var('column') }}\n\
          from orders o",
     );
+}
+
+// Issue #120
+
+#[test]
+fn loop_separators_are_dropped() {
+    assert_valid(
+        "select order_id,\n\
+         {% for m in ['a', 'b'] %}\n\
+           sum(amount) as {{ m }}_amount{% if not loop.last %},{% endif %}\n\
+         {% endfor %}\n\
+         from raw.payments group by 1",
+    );
+    assert_valid(
+        "select\n\
+         {%- for c in ['id', 'amount'] %}\n\
+           {{ c }}{{ ',' if not loop.last }}\n\
+         {%- endfor %}\n\
+         from raw.payments",
+    );
+    assert_valid(
+        "{% for t in ['a', 'b'] %}\n\
+         select id from users\n\
+         {% if not loop.last %} union all {% endif %}\n\
+         {% endfor %}",
+    );
+}
+
+#[test]
+fn only_the_first_branch_is_checked() {
+    assert_valid(
+        "select id, {% if target.name == 'prod' %} name {% else %} 'redacted' as name {% endif %}\n\
+         from users",
+    );
+    assert_valid(
+        "select id from users\n\
+         {% if var('a') %} where id > 1 {% elif var('b') %} where id > 2 {% else %} {% endif %}",
+    );
+    // The kept branch is still checked
+    let sql = "select {% if x %} nmae {% else %} name {% endif %} from users";
+    assert_eq!(single(sql), (DiagnosticKind::ColumnNotFound, 1, 19));
+}
+
+#[test]
+fn set_call_and_macro_bodies_are_skipped() {
+    assert_valid(
+        "{%- set status_list -%} 'placed', 'shipped' {%- endset -%}\n\
+         select id from users where name in ({{ status_list }})",
+    );
+    assert_valid(
+        "{%- call statement('max_date', fetch_result=True) -%}\n\
+           select max(created_at) from users\n\
+         {%- endcall -%}\n\
+         select id from users where created_at = '{{ max_date }}'",
+    );
+    assert_valid(
+        "{% macro cents_to_dollars(column_name, scale=2) %}\n\
+           ({{ column_name }} / 100)::numeric(16, {{ scale }})\n\
+         {% endmacro %}\n",
+    );
+    assert_valid("select {% raw %}'{{ not jinja }}'{% endraw %} as a from users");
+}
+
+#[test]
+fn template_casts_are_unknown_types() {
+    assert_valid("select id::{{ dbt.type_bigint() }} from orders");
+    assert_valid("select cast(id as {{ dbt.type_string() }}) from orders");
+}
+
+#[test]
+fn quoted_expressions_are_untyped() {
+    assert_valid("select id from orders where id = '{{ var(\"x\") }}'");
+    assert_valid("select id from orders where id = 'prefix_{{ var(\"x\") }}'");
+    assert_valid(
+        "select id from users where created_at > now() - interval '{{ var(\"n\") }} days'",
+    );
+    // A plain string is still typed
+    let sql = "select id from orders where id = 'x' and total > '{{ var(\"t\") }}'";
+    assert_eq!(single(sql).0, DiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn parse_errors_show_the_template_text() {
+    let diagnostics =
+        analyze("with spine as (\n  {{ dbt_utils.date_spine(datepart='day') }}\n)\nselect 1");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    let d = &diagnostics[0];
+    assert_eq!(d.kind, DiagnosticKind::ParseError);
+    assert!(!d.message.contains("$1"), "{}", d.message);
+    assert!(
+        d.message
+            .contains("found: Jinja expression {{ dbt_utils.date_spine(datepart='day') }}"),
+        "{}",
+        d.message
+    );
+    assert!(d.help.as_deref().unwrap().contains("sqlsift:disable-file"));
+}
+
+#[test]
+fn template_without_templating_suggests_it() {
+    let diagnostics = analyze_with(
+        SqlDialect::PostgreSQL,
+        Templating::None,
+        "select id from {{ ref('a') }}",
+    );
+    let help = diagnostics[0].help.as_deref().unwrap_or_default();
+    assert!(help.contains("--templating jinja"), "{diagnostics:#?}");
+    // Plain parse errors get no such hint
+    let diagnostics = analyze_with(
+        SqlDialect::PostgreSQL,
+        Templating::None,
+        "select id,, from users",
+    );
+    assert!(diagnostics[0].help.is_none(), "{diagnostics:#?}");
+}
+
+#[test]
+fn jinja_comment_directives_work() {
+    assert_valid("{# sqlsift:disable-file #}\nselect bogus from users");
+    assert_valid("{#- sqlsift:disable-file E0002 -#}\nselect bogus from users");
+    assert_valid("{# sqlsift:disable E0002 #}\nselect bogus from users");
+    assert_valid("select bogus from users {# sqlsift:disable column-not-found #}");
+    // A directive applies to the next SQL line, past lines of template tags
+    assert_valid("{# sqlsift:disable E0002 #}\n{% if x %}\nselect bogus from users\n{% endif %}");
+    let sql = "{# sqlsift:disable E0001 #}\nselect bogus from users";
+    assert_eq!(single(sql).0, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn sources_in_the_schema_are_checked() {
+    let sql = "select bogus_col from {{ source('raw', 'customers') }}";
+    assert_eq!(single(sql), (DiagnosticKind::ColumnNotFound, 1, 8));
+    assert_valid("select c.id, c.email from {{ source(\"raw\", \"customers\") }} as c");
+    // A source the schema doesn't have is a table with unknown columns
+    assert_valid("select anything from {{ source('raw', 'unknown') }}");
 }

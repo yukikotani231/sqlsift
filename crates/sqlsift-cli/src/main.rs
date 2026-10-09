@@ -2,6 +2,7 @@
 
 mod args;
 mod config;
+mod dbt;
 mod output;
 
 use std::collections::HashSet;
@@ -78,7 +79,8 @@ fn is_stdin(path: &Path) -> bool {
 struct QueryOptions<'a> {
     catalog: &'a Catalog,
     dialect: SqlDialect,
-    templating: Templating,
+    /// Templating of each query file (same order as the files)
+    templating: &'a [Templating],
     rules: &'a RuleConfig,
     /// Template literal tags whose SQL is checked in TypeScript / JavaScript files
     embedded_sql_tags: &'a [String],
@@ -95,7 +97,7 @@ fn analyze_files(
     stdin: Option<&str>,
     options: &QueryOptions,
 ) -> Vec<AnalyzedFile> {
-    let analyze_one = |path: &PathBuf| -> AnalyzedFile {
+    let analyze_one = |i: usize, path: &PathBuf| -> AnalyzedFile {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
         let (content, name) = match stdin {
             Some(stdin) if is_stdin(path) => (
@@ -106,7 +108,7 @@ fn analyze_files(
         };
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
-            .with_templating(options.templating);
+            .with_templating(options.templating[i]);
         let diagnostics = if is_embedded_sql_file(name) {
             analyzer.analyze_embedded(&content, options.embedded_sql_tags)
         } else {
@@ -119,7 +121,11 @@ fn analyze_files(
         .map_or(1, std::num::NonZeroUsize::get)
         .min(files.len());
     if workers <= 1 {
-        return files.iter().map(analyze_one).collect();
+        return files
+            .iter()
+            .enumerate()
+            .map(|(i, path)| analyze_one(i, path))
+            .collect();
     }
 
     // Workers take the next unclaimed file until none are left
@@ -135,7 +141,7 @@ fn analyze_files(
                         let Some(path) = files.get(i) else {
                             return done;
                         };
-                        done.push((i, analyze_one(path)));
+                        done.push((i, analyze_one(i, path)));
                     }
                 })
             })
@@ -457,6 +463,42 @@ fn run(args: Args) -> Result<bool> {
                 }
                 !ignored
             });
+            // Templating of each file: as configured, else Jinja for files in a dbt
+            // project (a `dbt_project.yml` in an ancestor directory). With Jinja, the
+            // dbt project's macros/, dbt_packages/ and target/ are skipped unless a
+            // file there is named on its own.
+            let named_files: HashSet<&str> = config
+                .files
+                .iter()
+                .map(String::as_str)
+                .filter(|p| !is_glob(p))
+                .collect();
+            let mut dbt_projects = dbt::DbtProjects::default();
+            let mut file_templating = Vec::with_capacity(query_files.len());
+            query_files.retain(|path| {
+                let detect_path = if is_stdin(path) {
+                    stdin_filename.as_deref()
+                } else {
+                    Some(path.as_path())
+                };
+                let file_templating_of = if config.templating.is_none()
+                    && detect_path.and_then(|p| dbt_projects.root_of(p)).is_some()
+                {
+                    Templating::Jinja
+                } else {
+                    templating
+                };
+                if file_templating_of == Templating::Jinja
+                    && !is_stdin(path)
+                    && !named_files.contains(path.to_string_lossy().as_ref())
+                    && dbt_projects.is_skipped(path)
+                {
+                    tracing::debug!(file = %path.display(), "Skipping dbt macro, package or build file");
+                    return false;
+                }
+                file_templating.push(file_templating_of);
+                true
+            });
             let ignored_count = found - query_files.len();
             if query_files.is_empty() {
                 if !quiet {
@@ -472,7 +514,7 @@ fn run(args: Args) -> Result<bool> {
             let options = QueryOptions {
                 catalog: &catalog,
                 dialect,
-                templating,
+                templating: &file_templating,
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
                 stdin_filename: stdin_filename.as_deref(),
