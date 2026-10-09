@@ -111,7 +111,8 @@ sqlsift check --dialect mysql --schema schema.sql queries/*.sql
 # Read a query from stdin (e.g. the staged version in a pre-commit hook)
 git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queries/users.sql -
 
-# SQL in TypeScript / JavaScript tagged templates (sql`...`; more tags with
+# SQL in TypeScript / JavaScript (and Vue / Svelte <script>) tagged templates
+# (sql`...`; node_modules and dist are skipped; more tags with
 # `embedded_sql_tags` in sqlsift.toml)
 sqlsift check -s schema.sql 'src/**/*.ts'
 ```

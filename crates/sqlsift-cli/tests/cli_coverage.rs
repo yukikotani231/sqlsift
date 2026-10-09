@@ -3439,3 +3439,42 @@ fn stdin_filename_extension_selects_typescript() {
         .assert_code(1)
         .assert_stderr_contains("E1000");
 }
+
+#[test]
+fn globs_skip_node_modules_and_build_output_for_typescript() {
+    let t = with_users_schema("embedded-node-modules");
+    let bad = "export const q = sql`SELECT nme FROM users`;\n";
+    t.write(
+        "src/db.ts",
+        "export const q = sql`SELECT name FROM users`;\n",
+    );
+    t.write("node_modules/pkg/index.js", bad);
+    t.write("dist/db.js", bad);
+    t.write("web/build/db.js", bad);
+    t.run(&["check", "-s", "schema.sql", "**/*.ts", "**/*.js"])
+        .assert_code(0);
+    // Unless the pattern starts in such a directory, or names the file
+    t.run(&["check", "-s", "schema.sql", "dist/*.js"])
+        .assert_code(1)
+        .assert_stderr_contains("dist/db.js");
+    t.run(&["check", "-s", "schema.sql", "node_modules/pkg/index.js"])
+        .assert_code(1);
+}
+
+#[test]
+fn vue_and_svelte_components_check_their_scripts() {
+    let t = with_users_schema("embedded-vue");
+    t.write(
+        "App.vue",
+        "<template>\n  <p>{{ count }}</p>\n</template>\n\n<script setup lang=\"ts\">\nconst rows = await sql`SELECT nme FROM users`;\n</script>\n",
+    );
+    t.write(
+        "Page.svelte",
+        "<script>\n  // sqlsift:disable-file\n  const rows = sql`SELECT nme FROM users`;\n</script>\n<h1>Hello</h1>\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "App.vue", "Page.svelte"])
+        .assert_code(1)
+        .assert_stderr_contains("App.vue:6:31")
+        .assert_stderr_lacks("Page.svelte")
+        .assert_stderr_lacks("E1000");
+}
