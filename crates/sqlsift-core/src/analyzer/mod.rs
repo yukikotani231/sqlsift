@@ -306,6 +306,9 @@ impl<'a> Analyzer<'a> {
             let origin = Origin { line, column };
             match Parser::parse_sql(dialect.as_ref(), &sql[range.clone()]) {
                 Ok(parsed) => statements.extend(parsed.into_iter().map(|s| (s, origin))),
+                Err(_)
+                    if self.dialect == SqlDialect::PostgreSQL
+                        && is_skipped_statement(&sql[range.clone()]) => {}
                 Err(error) => self
                     .diagnostics
                     .push(parse_error_diagnostic(&error, sql, range, lines)),
@@ -313,6 +316,64 @@ impl<'a> Analyzer<'a> {
         }
         statements
     }
+}
+
+fn is_skipped_statement(sql: &str) -> bool {
+    let mut offset = 0;
+    let first = next_sql_word(sql, &mut offset);
+    match first {
+        Some(word) if word.eq_ignore_ascii_case("ANALYZE") => true,
+        Some(word) if word.eq_ignore_ascii_case("VACUUM") => true,
+        Some(word) if word.eq_ignore_ascii_case("DO") => true,
+        Some(word) if word.eq_ignore_ascii_case("REFRESH") => {
+            let materialized = next_sql_word(sql, &mut offset)
+                .is_some_and(|word| word.eq_ignore_ascii_case("MATERIALIZED"));
+            let view = next_sql_word(sql, &mut offset)
+                .is_some_and(|word| word.eq_ignore_ascii_case("VIEW"));
+            materialized && view
+        }
+        _ => false,
+    }
+}
+
+fn next_sql_word<'a>(sql: &'a str, offset: &mut usize) -> Option<&'a str> {
+    let bytes = sql.as_bytes();
+    loop {
+        while bytes.get(*offset).is_some_and(u8::is_ascii_whitespace) {
+            *offset += 1;
+        }
+        if bytes.get(*offset..*offset + 2) == Some(b"--") {
+            *offset = sql[*offset..].find('\n').map_or(sql.len(), |i| *offset + i + 1);
+        } else if bytes.get(*offset..*offset + 2) == Some(b"/*") {
+            *offset += 2;
+            let mut depth = 1;
+            while depth > 0 {
+                match bytes.get(*offset..*offset + 2) {
+                    Some(b"/*") => {
+                        depth += 1;
+                        *offset += 2;
+                    }
+                    Some(b"*/") => {
+                        depth -= 1;
+                        *offset += 2;
+                    }
+                    Some(_) => *offset += 1,
+                    None => return None,
+                }
+            }
+        } else {
+            break;
+        }
+    }
+
+    let start = *offset;
+    while bytes
+        .get(*offset)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        *offset += 1;
+    }
+    (*offset > start).then_some(&sql[start..*offset])
 }
 
 /// Where a statement's text starts in the full input (1-indexed line and column)
