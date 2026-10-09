@@ -274,6 +274,12 @@ impl<'a> Analyzer<'a> {
                         None => note,
                     });
                 }
+                if let Some(note) = directives.malformed_directive_help(span.line) {
+                    d.help = Some(match d.help.take() {
+                        Some(help) => format!("{help}\n{note}"),
+                        None => note,
+                    });
+                }
                 Some(d)
             })
             .collect();

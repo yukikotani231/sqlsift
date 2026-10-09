@@ -7,6 +7,7 @@ Sometimes a query is right and sqlsift is wrong, or a legacy file isn't worth fi
 ## One line: `sqlsift:disable`
 
 A `-- sqlsift:disable` comment on its own line applies to the next line; at the end of a line, it applies to that line.
+Whitespace around the colon is allowed, as in `-- sqlsift : disable` or `-- sqlsift: disable`.
 
 ```sql
 -- Suppress a specific rule on the next line
@@ -22,6 +23,9 @@ SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, column-not-found
 -- Suppress all rules on the next line
 -- sqlsift:disable
 SELECT bad_col FROM missing_table;
+
+-- Whitespace around the colon is also accepted
+-- sqlsift : disable-file E0002
 ```
 
 ## One file: `sqlsift:disable-file`
@@ -31,6 +35,9 @@ SELECT bad_col FROM missing_table;
 
 -- or turn off every rule for this file, including parse errors (E1000)
 -- sqlsift:disable-file
+
+-- Whitespace around the colon is also accepted
+-- sqlsift : disable-file E0002
 ```
 
 A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it. It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file.
