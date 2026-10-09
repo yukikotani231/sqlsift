@@ -90,13 +90,33 @@ impl SchemaBuilder {
     /// dbmate `-- migrate:down` sections are ignored (see
     /// [`strip_down_migrations`](crate::schema::strip_down_migrations)).
     pub fn parse(&mut self, sql: &str) -> Result<(), Vec<Diagnostic>> {
+        // A leading byte order mark is not part of the SQL
+        let (sql, bom) = crate::analyzer::strip_bom(sql);
+        let first_new = self.diagnostics.len();
+        self.parse_text(sql);
+        crate::analyzer::shift_offsets(&mut self.diagnostics[first_new..], bom);
+
+        if self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == crate::error::Severity::Error)
+        {
+            Err(std::mem::take(&mut self.diagnostics))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build the catalog from the statements of `sql`
+    fn parse_text(&mut self, sql: &str) {
         let sql = &*crate::schema::strip_down_migrations(sql);
         let dialect = self.dialect.parser_dialect();
 
         // psql meta-commands in dumps and scripts (`\connect`, `\restrict`, `\i`, ...)
         let source = match self.dialect {
             SqlDialect::PostgreSQL => psql::preprocess(sql),
-            SqlDialect::MySQL | SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
+            SqlDialect::MySQL => crate::mysql::preprocess(sql),
+            SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
         };
         let sql: &str = &source.text;
 
@@ -116,16 +136,6 @@ impl SchemaBuilder {
             }
         }
         self.catalog.search_path = search_path;
-
-        if self
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == crate::error::Severity::Error)
-        {
-            Err(std::mem::take(&mut self.diagnostics))
-        } else {
-            Ok(())
-        }
     }
 
     /// Parse SQL statements individually, skipping those that fail to parse.
@@ -170,11 +180,30 @@ impl SchemaBuilder {
         err: &ParserError,
     ) {
         let parser_dialect = self.dialect.parser_dialect();
-        let Ok(tokens) = Tokenizer::new(parser_dialect.as_ref(), stmt)
-            .with_unescape(false)
-            .tokenize_with_location()
-        else {
-            return;
+        let tokenize = |text: &str| {
+            Tokenizer::new(parser_dialect.as_ref(), text)
+                .with_unescape(false)
+                .tokenize_with_location()
+        };
+        // If the statement can't be tokenized, the text before the error still tells
+        // what it defines (so a skipped definition is reported)
+        let mut text = stmt;
+        let tokens = loop {
+            match tokenize(text) {
+                Ok(tokens) => break tokens,
+                Err(error) => {
+                    let end = byte_offset_of(
+                        text,
+                        usize::try_from(error.location.line).unwrap_or(0),
+                        usize::try_from(error.location.column).unwrap_or(0),
+                    )
+                    .unwrap_or(0);
+                    if end == 0 || end >= text.len() {
+                        return;
+                    }
+                    text = &text[..end];
+                }
+            }
         };
         let significant: Vec<_> = tokens
             .iter()

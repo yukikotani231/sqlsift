@@ -94,8 +94,10 @@ impl InlineDirectives {
                     // Inline comment (SQL + -- sqlsift:disable): applies to this line
                     merge_into_map(&mut disabled_lines, line_num, codes);
                 }
-            } else if !trimmed.is_empty() && !trimmed.starts_with("--") {
-                // Non-comment, non-empty line: apply pending disables
+            } else if !trimmed.trim_matches(';').trim().is_empty() && !trimmed.starts_with("--") {
+                // Non-comment, non-empty line: apply pending disables (a line of only
+                // `;`, such as a template literal's opening backtick in embedded SQL,
+                // is not the line a directive is meant for)
                 if let Some(codes) = pending_codes.take() {
                     merge_into_map(&mut disabled_lines, line_num, codes);
                 }

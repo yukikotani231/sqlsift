@@ -239,9 +239,13 @@ impl Lsp {
     }
 
     fn open(&mut self, uri: &str, text: &str) {
+        self.open_as(uri, "sql", text);
+    }
+
+    fn open_as(&mut self, uri: &str, language_id: &str, text: &str) {
         self.notify(
             "textDocument/didOpen",
-            json!({"textDocument": {"uri": uri, "languageId": "sql", "version": 1, "text": text}}),
+            json!({"textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": text}}),
         );
     }
 
@@ -384,6 +388,46 @@ fn table_not_found_range() {
         .expect("E0001 diagnostic");
     assert_eq!(d["range"]["start"], json!({"line": 0, "character": 15}));
     assert_eq!(d["range"]["end"], json!({"line": 0, "character": 21}));
+}
+
+#[test]
+fn byte_order_mark_is_ignored_and_ranges_count_it() {
+    let t = TempDir::new("bom");
+    t.write("schema.sql", &format!("\u{feff}{USERS_SCHEMA}"));
+    t.write("sqlsift.toml", "schema = [\"schema.sql\"]\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(&uri, "\u{feff}SELECT nme FROM users;");
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diags), ["E0002"], "{diags:#?}");
+    // LSP positions count the BOM (one UTF-16 unit) as part of the document
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 0, "character": 8})
+    );
+    assert_eq!(
+        diags[0]["range"]["end"],
+        json!({"line": 0, "character": 11})
+    );
+}
+
+#[test]
+fn very_long_or_chain_does_not_crash_the_server() {
+    let t = workspace("long-or", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let filter: Vec<String> = (0..100_000).map(|i| format!("id = {i}")).collect();
+    lsp.open(
+        &uri,
+        &format!("SELECT id FROM users WHERE {};", filter.join(" OR ")),
+    );
+    assert!(lsp.diagnostics_for(&uri).is_empty());
+    // Still serving
+    let other = t.uri("other.sql");
+    lsp.open(&other, "SELECT nme FROM users;");
+    assert_eq!(codes(&lsp.diagnostics_for(&other)), ["E0002"]);
 }
 
 #[test]
@@ -964,4 +1008,134 @@ fn missing_baseline_file_is_reported() {
     lsp.initialize(Some(&t.root_uri()));
     let msg = wait_for_warning(&mut lsp, "nope.json");
     assert!(msg.contains("Failed to read baseline"), "{msg}");
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript / JavaScript and dbt documents
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typescript_document_checks_tagged_templates() {
+    let t = workspace("ts", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/users.ts");
+    let text = "import { sql } from './db';\n\
+                export const q = (id: number) =>\n  sql`SELECT nme FROM users WHERE id = ${id}`;\n";
+    lsp.open_as(&uri, "typescript", text);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diags), ["E0002"], "{diags:#?}");
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 2, "character": 13})
+    );
+    assert_eq!(
+        diags[0]["range"]["end"],
+        json!({"line": 2, "character": 16})
+    );
+}
+
+#[test]
+fn typescript_document_without_sql_has_no_diagnostics() {
+    let t = workspace("ts-plain", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    for (file, language) in [
+        ("src/app.tsx", "typescriptreact"),
+        ("src/app.js", "javascript"),
+        ("src/app.jsx", "javascriptreact"),
+    ] {
+        let uri = t.uri(file);
+        let text = "const greeting = `hello ${name}`;\n\
+                    export function f(a, b) { return a / b; } // SELECT * FROM nowhere\n";
+        lsp.open_as(&uri, language, text);
+        let diags = lsp.diagnostics_for(&uri);
+        assert!(diags.is_empty(), "{file}: {diags:#?}");
+    }
+}
+
+#[test]
+fn typescript_document_is_detected_by_extension() {
+    let t = workspace("ts-ext", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.mts");
+    lsp.open_as(&uri, "plaintext", "await sql`SELECT * FROM userz`;\n");
+    assert_eq!(codes(&lsp.diagnostics_for(&uri)), ["E0001"]);
+}
+
+#[test]
+fn config_embedded_sql_tags_are_used() {
+    let t = workspace("ts-tags", "embedded_sql_tags = [\"$queryRaw\"]\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.ts");
+    let text = "await prisma.$queryRaw`SELECT nme FROM users`;\n\
+                await sql`SELECT bogus FROM users`;\n";
+    lsp.open_as(&uri, "typescript", text);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diags), ["E0002"], "{diags:#?}");
+    assert_eq!(diags[0]["range"]["start"]["line"], 0);
+}
+
+#[test]
+fn completion_and_hover_are_off_in_typescript_documents() {
+    let t = workspace("ts-completion", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.ts");
+    lsp.open_as(&uri, "typescript", "const users = 1;\n");
+    let resp = lsp.request(
+        "textDocument/completion",
+        json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 6}}),
+    );
+    assert!(resp["result"].is_null(), "{resp}");
+    let resp = lsp.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 8}}),
+    );
+    assert!(resp["result"].is_null(), "{resp}");
+}
+
+const DBT_MODEL: &str = "{{ config(materialized='view') }}\n\
+                         SELECT u.id FROM users u JOIN {{ ref('s') }} s ON s.id = u.id\n";
+
+#[test]
+fn dbt_project_in_subdirectory_enables_jinja() {
+    let t = workspace("dbt-nested", "");
+    t.write("analytics/dbt_project.yml", "name: analytics\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+
+    let model = t.uri("analytics/models/staging/m.sql");
+    lsp.open(&model, DBT_MODEL);
+    let diags = lsp.diagnostics_for(&model);
+    assert!(diags.is_empty(), "{diags:#?}");
+
+    // Outside the dbt project the template is a parse error
+    let other = t.uri("queries/q.sql");
+    lsp.open(&other, DBT_MODEL);
+    assert!(codes(&lsp.diagnostics_for(&other)).contains(&"E1000".to_string()));
+}
+
+#[test]
+fn jinja_sql_language_enables_jinja() {
+    let t = workspace("jinja-sql", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("models/m.sql");
+    lsp.open_as(&uri, "jinja-sql", DBT_MODEL);
+    let diags = lsp.diagnostics_for(&uri);
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+#[test]
+fn explicit_templating_none_wins_over_dbt_detection() {
+    let t = workspace("dbt-none", "templating = \"none\"\n");
+    t.write("analytics/dbt_project.yml", "name: analytics\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("analytics/models/m.sql");
+    lsp.open_as(&uri, "jinja-sql", DBT_MODEL);
+    assert!(codes(&lsp.diagnostics_for(&uri)).contains(&"E1000".to_string()));
 }

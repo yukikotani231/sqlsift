@@ -5,7 +5,7 @@
 | Dialect | Flag | Notes |
 |---------|------|-------|
 | PostgreSQL | default, `--dialect postgresql` | Most complete: enums, `DISTINCT ON`, `LATERAL`, JSON operators, psql scripts |
-| MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`; booleans are integers |
+| MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`, `mysqldump` files, `INSERT ... SET`, index hints ([details](queries.md#mysql-syntax)); booleans are integers |
 | SQLite | `--dialect sqlite` | SQLite's loose typing: booleans are integers |
 
 Set it once in `sqlsift.toml` with `dialect = "mysql"`.
@@ -41,5 +41,5 @@ Anything sqlsift can't infer is treated as unknown and never reported, so missin
 
 - Schema-qualified names (`public.users`) are not fully resolved.
 - Function bodies and stored procedures are skipped, not analyzed.
-- SQL embedded in application code (strings in Python, Go, TypeScript, …) is not supported; sqlsift reads `.sql` files.
+- SQL embedded in application code is supported for tagged template literals in TypeScript, JavaScript, Vue and Svelte files (see [SQL in TypeScript and JavaScript](queries.md#sql-in-typescript-and-javascript)); strings in other languages (Python, Go, …) are not.
 - dbt / Jinja templates are masked, not rendered (see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates)): macros aren't expanded, and the columns of `{{ ref(...) }}` models are unknown.
