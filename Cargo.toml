@@ -58,6 +58,8 @@ module_name_repetitions = "allow"
 doc_markdown = "allow"
 # Type mapping tables read better with one arm per type
 match_same_arms = "allow"
+# `assert!(v.is_empty())` reads better than `assert_eq!(v, [] as [T; 0])`
+assert_is_empty = "allow"
 # Line/column numbers (u64 in sqlparser, u32 in LSP) always fit
 cast_possible_truncation = "allow"
 # `use Enum::*` inside a function keeps long matches readable
