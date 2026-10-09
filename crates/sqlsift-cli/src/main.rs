@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use miette::Result;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
-use sqlsift_core::embedded::is_embedded_sql_file;
+use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
@@ -107,7 +107,9 @@ fn analyze_files(
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
             .with_templating(options.templating);
-        let diagnostics = if is_embedded_sql_file(name) {
+        let diagnostics = if is_component_file(name) {
+            analyzer.analyze_embedded_component(&content, options.embedded_sql_tags)
+        } else if is_embedded_sql_file(name) {
             analyzer.analyze_embedded(&content, options.embedded_sql_tags)
         } else {
             analyzer.analyze(&content)
@@ -198,6 +200,15 @@ fn read_file(path: &Path) -> Result<String> {
 /// Whether a path pattern contains glob metacharacters
 fn is_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?', '['])
+}
+
+/// The directory a glob pattern starts in: its components before the first one
+/// with glob metacharacters
+fn glob_base(pattern: &str) -> PathBuf {
+    Path::new(pattern)
+        .components()
+        .take_while(|c| !is_glob(&c.as_os_str().to_string_lossy()))
+        .collect()
 }
 
 /// Expand a glob pattern into matching paths (sorted, as returned by `glob`)
@@ -373,10 +384,17 @@ fn run(args: Args) -> Result<bool> {
             let mut unmatched = Vec::new();
             for pattern in &config.files {
                 if is_glob(pattern) {
-                    let matches = expand_glob(pattern)?;
+                    let mut matches = expand_glob(pattern)?;
                     if matches.is_empty() {
                         unmatched.push(format!("'{pattern}'"));
                     }
+                    // Installed packages and build output that the pattern matches
+                    // aren't checked for SQL in TypeScript / JavaScript
+                    let base = glob_base(pattern);
+                    matches.retain(|path| {
+                        !(is_embedded_sql_file(path)
+                            && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
+                    });
                     query_files.extend(matches);
                 } else {
                     query_files.push(PathBuf::from(pattern));

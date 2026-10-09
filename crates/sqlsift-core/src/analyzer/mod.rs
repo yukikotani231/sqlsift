@@ -160,7 +160,35 @@ impl<'a> Analyzer<'a> {
     /// assert_eq!(diagnostics[0].span.unwrap().column, 31);
     /// ```
     pub fn analyze_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Vec<Diagnostic> {
-        let extracted = crate::embedded::extract(source, tags, self.dialect);
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Script);
+        self.analyze_text(&extracted.text, source, &extracted.identifiers)
+    }
+
+    /// Analyze the SQL in the `<script>` blocks of a Vue or Svelte component, as
+    /// [`Analyzer::analyze_embedded`] does for a TypeScript or JavaScript file
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = "<script setup>\nconst u = await sql`SELECT nme FROM users`;\n</script>\n<p>`sql`</p>";
+    /// let diagnostics = Analyzer::new(&catalog).analyze_embedded_component(source, &["sql"]);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// ```
+    pub fn analyze_embedded_component<S: AsRef<str>>(
+        &mut self,
+        source: &str,
+        tags: &[S],
+    ) -> Vec<Diagnostic> {
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Component);
         self.analyze_text(&extracted.text, source, &extracted.identifiers)
     }
 

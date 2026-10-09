@@ -180,3 +180,110 @@ fn parse_errors_get_the_query_name() {
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ParseError);
     assert_eq!(diagnostics[0].query_name.as_deref(), Some("Broken"));
 }
+
+// postgres.js, kysely, Prisma and Slonik patterns (#121)
+
+#[test]
+fn postgres_js_insert_and_update_helpers() {
+    let source = r"
+        await sql`INSERT INTO posts ${sql(post, 'author_id', 'title')}`;
+        await sql`INSERT INTO posts (author_id, title) VALUES ${sql(rows)}`;
+        await sql`UPDATE posts SET ${sql(patch, 'title')} WHERE id = ${id}`;
+        await sql`INSERT INTO posts ${sql(post)} ON CONFLICT (id) DO NOTHING RETURNING id`;
+        await sql`INSERT INTO authors (name) VALUES ${sql(rows)} RETURNING nme`;
+        await sql`UPDATE posts SET ${sql(patch)} WHERE idd = ${id}`;
+        await sql`INSERT INTO ${table} ${sql(row)}`;
+        await sql`INSERT INTO posts (author_id, title) VALUES ${sql(rows)} ON CONFLICT (id) DO UPDATE SET title = excluded.title`;
+    ";
+    assert_eq!(
+        locations(&analyze_ts(source, &["sql"])),
+        vec![
+            (DiagnosticKind::ColumnNotFound, 6, 76),
+            (DiagnosticKind::ColumnNotFound, 7, 56),
+        ]
+    );
+}
+
+#[test]
+fn interpolated_fragments_between_clauses_are_dropped() {
+    let source = r"
+        sql`SELECT p.id FROM posts p WHERE p.title ILIKE ${t} ${cond ? sql`AND p.published` : sql``} ORDER BY p.id`;
+        prisma.$queryRaw`SELECT id FROM authors ${where}`;
+        sql`SELECT id FROM posts WHERE ${cond ? sql`published` : sql`true`} ORDER BY id ${dir}`;
+        sql`SELECT titel FROM posts ${where}`;
+    ";
+    assert_eq!(
+        locations(&analyze_ts(source, &["sql", "$queryRaw"])),
+        vec![(DiagnosticKind::ColumnNotFound, 5, 20)]
+    );
+}
+
+#[test]
+fn templates_that_are_not_statements_are_fragments() {
+    let source = r"
+        const a = sql<boolean>`published = ${true}`;
+        db.selectFrom('posts').where(sql`author_id = ${id}`);
+        const w = Prisma.sql`WHERE id > ${minId}`;
+        const f = sql`AND nme = ${x}`;
+        const e = sql``;
+        const q = sql`${a} UNION ${b}`;
+        const s = sql`
+          -- leading comments are skipped
+          (SELECT nme FROM authors)
+        `;
+    ";
+    assert_eq!(
+        locations(&analyze_ts(source, &["sql"])),
+        vec![(DiagnosticKind::ColumnNotFound, 10, 19)]
+    );
+}
+
+#[test]
+fn slonik_call_and_member_tags() {
+    let source = r"
+        sql.type(z.object({ id: z.number() }))`SELECT idd FROM posts`;
+        sql.typeAlias('id')`SELECT idd FROM posts`;
+        sql.unsafe`SELECT idd FROM posts`;
+        sql.fragment`AND idd = 1`;
+    ";
+    assert_eq!(
+        locations(&analyze_ts(source, &["sql"])),
+        vec![
+            (DiagnosticKind::ColumnNotFound, 2, 55),
+            (DiagnosticKind::ColumnNotFound, 3, 36),
+            (DiagnosticKind::ColumnNotFound, 4, 27),
+        ]
+    );
+}
+
+#[test]
+fn directives_in_code_comments() {
+    let file = "// sqlsift:disable-file\nconst q = sql`SELECT nme FROM authors`;";
+    assert!(analyze_ts(file, &["sql"]).is_empty());
+    let file = "/* sqlsift:disable-file E0002 */\nsql`SELECT nme FROM nowhere`;";
+    assert_eq!(
+        locations(&analyze_ts(file, &["sql"])),
+        vec![(DiagnosticKind::TableNotFound, 2, 21)]
+    );
+    // A next-line directive applies to the template's first line of SQL
+    let next_line =
+        "// sqlsift:disable E0002\nconst rows = await sql`\n  SELECT nme FROM authors\n`;\n\
+                     sql`SELECT nme FROM authors`;";
+    assert_eq!(
+        locations(&analyze_ts(next_line, &["sql"])),
+        vec![(DiagnosticKind::ColumnNotFound, 5, 12)]
+    );
+    let inline = "sql`SELECT nme FROM authors`; // sqlsift:disable column-not-found";
+    assert!(analyze_ts(inline, &["sql"]).is_empty());
+}
+
+#[test]
+fn vue_and_svelte_script_blocks() {
+    let source = "<template>\n  <p>{{ sql`SELECT nope` }}</p>\n</template>\n\
+                  <script setup lang=\"ts\">\nconst q = await sql`SELECT nme FROM authors`;\n</script>\n";
+    let diagnostics = Analyzer::new(&catalog()).analyze_embedded_component(source, &["sql"]);
+    assert_eq!(
+        locations(&diagnostics),
+        vec![(DiagnosticKind::ColumnNotFound, 5, 28)]
+    );
+}
