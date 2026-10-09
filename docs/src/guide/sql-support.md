@@ -41,5 +41,5 @@ Anything sqlsift can't infer is treated as unknown and never reported, so missin
 
 - Schema-qualified names (`public.users`) are not fully resolved.
 - Function bodies and stored procedures are skipped, not analyzed.
-- SQL embedded in application code (strings in Python, Go, TypeScript, …) is not supported; sqlsift reads `.sql` files.
+- SQL in TypeScript and JavaScript tagged templates is supported; see [SQL in TypeScript and JavaScript](queries.md#sql-in-typescript-and-javascript). SQL in strings or other application code (Python, Go, …) is not supported; sqlsift reads `.sql` files and tagged templates in `.ts` / `.js` files.
 - dbt / Jinja templates are masked, not rendered (see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates)): macros aren't expanded, and the columns of `{{ ref(...) }}` models are unknown.
