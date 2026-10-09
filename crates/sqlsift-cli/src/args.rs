@@ -72,7 +72,8 @@ pub enum Command {
         dialect: Option<String>,
 
         /// Query file templating: jinja (dbt models), none [default: jinja when
-        /// dbt_project.yml is in the current or the config file's directory, else none]
+        /// dbt_project.yml is in the current or the config file's directory or above
+        /// the query file, else none]
         #[arg(long, value_name = "ENGINE")]
         templating: Option<String>,
 

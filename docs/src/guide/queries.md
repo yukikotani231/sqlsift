@@ -85,7 +85,7 @@ With the MySQL dialect, these are accepted in schema and query files:
 
 ## dbt and Jinja templates
 
-dbt models are Jinja templates, not plain SQL. With `--templating jinja` (or `templating = "jinja"` in `sqlsift.toml`) sqlsift masks the template syntax before checking a query file. This is turned on automatically when a `dbt_project.yml` is in the current directory or in the directory of `sqlsift.toml`; set `templating = "none"` to turn it off.
+dbt models are Jinja templates, not plain SQL. With `--templating jinja` (or `templating = "jinja"` in `sqlsift.toml`) sqlsift masks the template syntax before checking a query file. This is turned on automatically when a `dbt_project.yml` is in the current directory, in the directory of `sqlsift.toml`, or in a directory above the query file (so `sqlsift check -s schema.sql 'analytics/models/**/*.sql'` works from a monorepo root); set `templating = "none"` to turn it off. When a file with `{{` or `{%` fails to parse without templating, the error suggests `--templating jinja`.
 
 ```sql
 {{ config(materialized='incremental') }}
@@ -98,13 +98,20 @@ where c.id > (select max(customer_id) from {{ this }})
 {% endif %}
 ```
 
-- `{# comments #}` and `{% statements %}` are skipped. The SQL inside `{% if %}` and `{% for %}` blocks is checked once, as written.
-- `{{ ref(...) }}`, `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema to get them checked.
+- `{# comments #}` and `{% statements %}` are skipped. The SQL inside a `{% for %}` block is checked once, as a single iteration (both `loop.first` and `loop.last`): separators such as `{% if not loop.last %},{% endif %}` and `{{ ',' if not loop.last }}` are dropped.
+- Of `{% if %} ... {% elif %} ... {% else %} ... {% endif %}` only the first branch is checked; the others are skipped.
+- The bodies of `{% set x %}...{% endset %}`, `{% call %}...{% endcall %}`, `{% macro %}...{% endmacro %}` (and `test`, `materialization`, `docs` blocks) are skipped. The body of `{% raw %}...{% endraw %}` is checked as SQL.
+- `{{ source('raw', 'customers') }}` is the schema's table `raw.customers` when your schema has it, so its columns are checked.
+- `{{ ref(...) }}`, other `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema to get them checked.
 - `{{ ... }}` as part of a name (`total_{{ c }}`, `as {{ alias }}`) is a name sqlsift doesn't know, and at the start of a statement (`{{ config(...) }}`) it is skipped.
-- Any other `{{ ... }}` is an untyped value, like a bind parameter: it is never a type mismatch.
+- `{{ ... }}` as a type (`x::{{ dbt.type_bigint() }}`, `cast(x as {{ ... }})`) is a type sqlsift doesn't know.
+- Any other `{{ ... }}`, and a string literal with one in it (`'{{ var("start") }}'`), is an untyped value, like a bind parameter: it is never a type mismatch.
+- `sqlsift:disable` directives work in Jinja comments too: `{# sqlsift:disable-file #}`, `{# sqlsift:disable E0002 #}` (dbt users avoid `--` comments, which end up in the compiled SQL).
 - Everything else is checked as usual, and diagnostics point at the original file.
 
-Macros that expand to whole clauses or statements can't be followed, and both branches of an `{% if %} ... {% else %}` are kept, which may not be valid SQL. Use `ignore` or `-- sqlsift:disable-file` for such files.
+Macros that expand to whole clauses or statements can't be followed: a parse error on one shows the template tag (`found: Jinja expression {{ dbt_utils.date_spine(...) }}`). Use `ignore` or `{# sqlsift:disable-file #}` for such files.
+
+With Jinja templating, files in the dbt project's `macros/`, `dbt_packages/` and `target/` directories are skipped when they are matched by a glob pattern (`'**/*.sql'`); a file named on its own is still checked. Add other directories you don't want checked (`analyses/`, `snapshots/`) to `ignore`.
 
 sqlsift supports the PostgreSQL, MySQL and SQLite dialects only, so this helps dbt projects on Postgres (or a Postgres-compatible warehouse such as Redshift, as far as its SQL is Postgres-compatible), MySQL or SQLite. Projects on Snowflake, BigQuery or Databricks won't benefit until those dialects are supported.
 

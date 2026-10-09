@@ -18,9 +18,9 @@ use crate::mysql;
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{mask_unsupported_clauses, unparsed_definition};
-use crate::schema::{Catalog, SchemaBuilder, SkippedDefinition};
+use crate::schema::{Catalog, QualifiedName, SchemaBuilder, SkippedDefinition};
 use crate::sqlc::{self, QueryNames};
-use crate::templating::{self, Templating};
+use crate::templating::{self, Template, Templating};
 
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
@@ -214,24 +214,31 @@ impl<'a> Analyzer<'a> {
     ) -> Vec<Diagnostic> {
         self.diagnostics.clear();
 
-        // Parse inline disable directives from comments
-        let directives = InlineDirectives::parse(sql);
-        // sqlc query names (`-- name: GetPost :one`)
-        let query_names = QueryNames::parse(sql);
-
         // Template tags, then psql meta-commands and variables (the rewrites keep
         // every line and character column)
+        let catalog = self.catalog;
         let template = match self.templating {
-            Templating::Jinja => templating::mask_jinja(sql),
-            Templating::None => Preprocessed::unchanged(sql),
+            Templating::Jinja => templating::mask_jinja(sql, &|schema, table| {
+                let name = QualifiedName::with_schema(schema, table);
+                catalog.table_exists(&name) || catalog.view_exists(&name)
+            }),
+            Templating::None => Template::unchanged(sql),
         };
         let source = match self.dialect {
-            SqlDialect::PostgreSQL => psql::preprocess(&template.text),
-            SqlDialect::MySQL => mysql::preprocess(&template.text),
-            SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
+            SqlDialect::PostgreSQL => psql::preprocess(&template.masked.text),
+            SqlDialect::MySQL => mysql::preprocess(&template.masked.text),
+            SqlDialect::SQLite => Preprocessed::unchanged(&template.masked.text),
         };
         // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
         let text = sqlc::mask_parameters(&source.text, self.dialect);
+        // A file that looks like a template but isn't masked doesn't parse
+        let template_hint =
+            self.templating == Templating::None && templating::looks_like_jinja(sql);
+
+        // Parse inline disable directives from comments (`{# ... #}` comments too)
+        let directives = InlineDirectives::parse(&template.directive_text());
+        // sqlc query names (`-- name: GetPost :one`)
+        let query_names = QueryNames::parse(sql);
 
         // Parse the SQL
         let lines = LineIndex::new(&text);
@@ -292,8 +299,10 @@ impl<'a> Analyzer<'a> {
         // Spans are built from line/column locations: add their byte offsets in the
         // original input (extracting embedded SQL or masking a template may change
         // byte lengths, never lines or character columns)
-        let original_lines = (!std::ptr::eq(original, sql) || source.text.len() != sql.len())
-            .then(|| LineIndex::new(original));
+        let original_lines = (!std::ptr::eq(original, sql)
+            || template.masked.text.len() != sql.len()
+            || source.text.len() != sql.len())
+        .then(|| LineIndex::new(original));
         let offsets = original_lines.as_ref().unwrap_or(&lines);
         for diagnostic in &mut self.diagnostics {
             let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
@@ -320,12 +329,15 @@ impl<'a> Analyzer<'a> {
                         | DiagnosticKind::ColumnNotFound
                         | DiagnosticKind::AmbiguousColumn
                 ) && (source.is_substituted(span.line, span.column)
-                    || template.is_substituted(span.line, span.column)
+                    || template.masked.is_substituted(span.line, span.column)
                     || psql::is_within(substituted, span.line, span.column));
                 if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }
                 d.query_name = query_names.at(span.line).map(str::to_string);
+                if d.kind == DiagnosticKind::ParseError {
+                    explain_template_parse_error(&mut d, &template, template_hint);
+                }
                 if let Some(note) = directives.unknown_id_help(span.line) {
                     d.help = Some(match d.help.take() {
                         Some(help) => format!("{help}\n{note}"),
@@ -407,6 +419,33 @@ impl<'a> Analyzer<'a> {
         }
         (statements, skipped)
     }
+}
+
+/// Make a parse error in a template name the template tag it is on instead of its
+/// masked text (`found: $1`), and suggest what to do. `not_masked`: the file looks
+/// like a template but templating is off.
+fn explain_template_parse_error(d: &mut Diagnostic, template: &Template, not_masked: bool) {
+    let help = if not_masked {
+        "this looks like a Jinja (dbt) template: check it with `--templating jinja` \
+         (or `templating = \"jinja\"` in sqlsift.toml)"
+            .to_string()
+    } else {
+        let Some(tag) = d.span.and_then(|s| template.tag_at(s.line, s.column)) else {
+            return;
+        };
+        if let Some(found) = d.message.rfind("found: ") {
+            d.message.truncate(found);
+            d.message.push_str("found: Jinja expression ");
+            d.message.push_str(tag);
+        }
+        "sqlsift can't tell what SQL this template expression expands to here; \
+         skip the file with `ignore` in sqlsift.toml or `{# sqlsift:disable-file #}`"
+            .to_string()
+    };
+    d.help = Some(match d.help.take() {
+        Some(existing) => format!("{existing}\n{help}"),
+        None => help,
+    });
 }
 
 /// Parsed statements and the table / view definitions that could not be parsed,

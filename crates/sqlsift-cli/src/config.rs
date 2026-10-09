@@ -48,7 +48,8 @@ pub struct Config {
     pub dialect: Option<String>,
 
     /// Query file templating ("jinja", "none"); when unset, Jinja is used if a
-    /// `dbt_project.yml` is next to the config file or in the current directory
+    /// `dbt_project.yml` is next to the config file, in the current directory or in
+    /// an ancestor directory of the query file
     #[serde(default)]
     pub templating: Option<String>,
 
@@ -218,7 +219,8 @@ impl Config {
 impl Config {
     /// The configured templating of query files. When unset, Jinja is used for dbt
     /// projects: a `dbt_project.yml` in the current directory or in the directory
-    /// of the configuration file.
+    /// of the configuration file (query files in a directory with a
+    /// `dbt_project.yml` above them are Jinja templates too).
     pub fn templating(&self) -> Result<Templating> {
         if let Some(templating) = &self.templating {
             return templating.parse().map_err(|e: String| miette::miette!(e));
