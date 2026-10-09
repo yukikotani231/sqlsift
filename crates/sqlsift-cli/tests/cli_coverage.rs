@@ -3117,6 +3117,19 @@ fn invalid_baseline_file_exits_two() {
 }
 
 #[test]
+fn baseline_with_conflict_markers_exits_two() {
+    let t = with_two_errors("bl-conflict");
+    t.write(
+        "b.json",
+        "{\n  \"version\": 2,\n<<<<<<< HEAD\n  \"entries\": []\n=======\n  \"entries\": []\n>>>>>>> feat\n}",
+    );
+    t.run(&["check", "-s", "schema.sql", "--baseline", "b.json", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("the baseline has merge conflict markers (line 3)")
+        .assert_stderr_contains("--write-baseline");
+}
+
+#[test]
 fn baselined_warnings_do_not_count_toward_max_warnings() {
     let t = two_warnings("bl-maxw");
     t.run(&[

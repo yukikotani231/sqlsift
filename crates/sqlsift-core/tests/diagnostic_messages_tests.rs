@@ -380,3 +380,15 @@ fn misspelled_rule_in_disable_comment_is_explained() {
     let d = single_pg(&c, "SELECT bdy FROM posts -- sqlsift:disable E0006");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'body'?"));
 }
+
+#[test]
+fn swapped_adjacent_characters_are_suggested() {
+    let c = pg("CREATE TABLE events (id int, kind text, day date);");
+    let d = single_pg(&c, "SELECT kidn FROM events");
+    assert_eq!(d.kind, DiagnosticKind::ColumnNotFound);
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'kind'?"));
+
+    let d = single_pg(&c, "SELECT dya FROM events");
+    assert_eq!(d.kind, DiagnosticKind::ColumnNotFound);
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'day'?"));
+}
