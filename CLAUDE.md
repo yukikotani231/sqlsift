@@ -37,6 +37,8 @@ sqlsift/
 │       ├── src/extension.ts
 │       └── package.json
 │
+├── docs/                  # User guide (mdBook), published to GitHub Pages at /sqlsift/docs/
+├── site/                  # Browser playground (GitHub Pages root)
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Real-world schema test fixtures (Chinook, Pagila, Northwind)
 ├── scripts/
@@ -108,7 +110,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 1. Add variant to `DiagnosticKind` in `error.rs` and its entry (code, name, category, summary) to `RULES` in `rules.rs`, in the same position (the registry is indexed by the variant)
 2. Pick the category by how sure the rule is: `correctness` (definitely wrong, default error), `suspicious` (likely wrong, default warn), `pedantic` / `style` / `restriction` (opt-in)
 3. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
-4. Add test cases (`crates/sqlsift-core/tests/`) and the rule to the README rule table
+4. Add test cases (`crates/sqlsift-core/tests/`), the rule to the README rule table and a rule page in `docs/src/rules/` (user guide, mdBook)
 
 ### Adding SQL Type Support
 
@@ -129,7 +131,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 1. Add field to `Config` struct in `config.rs` with `#[serde(default)]`, and add the key to `KNOWN_KEYS` (unknown keys produce a warning)
 2. Update `Config::merge_with_args()` to merge with CLI arguments
 3. If the value is a path, resolve it relative to the config file's directory in `Config::from_file()` (and in `sqlsift-lsp/src/state.rs`)
-4. Document in `sqlsift.toml` sample file
+4. Document in `sqlsift.toml` sample file and `docs/src/reference/config.md`
 
 ## Dependencies
 

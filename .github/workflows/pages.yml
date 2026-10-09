@@ -6,6 +6,7 @@ on:
     paths:
       - "crates/**"
       - "site/**"
+      - "docs/**"
       - "scripts/build-playground.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -15,6 +16,7 @@ on:
     paths:
       - "crates/**"
       - "site/**"
+      - "docs/**"
       - "scripts/build-playground.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -27,6 +29,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   WASM_BINDGEN_VERSION: "0.2.100"
+  MDBOOK_VERSION: "0.4.52"
 
 jobs:
   build:
@@ -58,6 +61,14 @@ jobs:
 
       - name: Build wasm + bindings
         run: ./scripts/build-playground.sh
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
+
+      - name: Build user guide
+        run: mdbook build docs --dest-dir "$GITHUB_WORKSPACE/site/docs"
 
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
