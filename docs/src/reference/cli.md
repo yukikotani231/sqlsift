@@ -42,9 +42,10 @@ Options:
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
       --max-warnings <N>    Fail (exit 1) when more than N warnings are reported
       --baseline <PATH>     Baseline file of known diagnostics, which are not reported
-      --write-baseline      Write every current diagnostic to the baseline file
-                            (--baseline, `baseline` in sqlsift.toml, or
-                            sqlsift-baseline.json) and exit 0
+      --write-baseline      Write every current diagnostic of the checked files to the
+                            baseline file and exit 0, keeping the entries of other files
+                            that still exist (--baseline, `baseline` in sqlsift.toml, or
+                            sqlsift-baseline.json)
       --stdin-filename <PATH>
                             File name to report for the query read from stdin (`-`)
 ```

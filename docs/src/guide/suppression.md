@@ -61,11 +61,15 @@ This writes every current diagnostic (errors and warnings) to `sqlsift-baseline.
 baseline = "sqlsift-baseline.json"
 ```
 
-Diagnostics in the baseline are not printed and don't count toward the exit code, `--max-errors` or `--max-warnings`. `sqlsift check` prints how many were hidden, and a note when baseline entries no longer occur (the problem was fixed); re-run `sqlsift check --write-baseline` to remove them. That note never fails the check.
+Diagnostics in the baseline are not printed and don't count toward the exit code, `--max-errors` or `--max-warnings`. `sqlsift check` prints how many were hidden, and a note when baseline entries no longer occur: the problem was fixed, or the entry's file was deleted, renamed or is now ignored. Re-run `sqlsift check --write-baseline` to remove them. That note never fails the check. Entries of files that still exist but weren't checked in this run (say, a pre-commit hook checking only changed files) are never reported as stale.
 
-A diagnostic matches a baseline entry by its file (relative to the baseline file), rule code and the text of the statement it is in, with comments and whitespace ignored. Adding lines or statements elsewhere in the file, or reformatting the statement, keeps the match; changing the statement itself makes its diagnostics new again. The same mistake made twice in one statement is matched by its position among them. Each entry also stores the line and message, for people reading the file.
+A diagnostic matches a baseline entry by its file (relative to the baseline file, with symbolic links resolved), rule code and the statement it is in. The statement is compared ignoring comments, whitespace (including whitespace around operators, commas and parentheses), the case of keywords and unquoted identifiers, and quotes around a lowercase identifier (`"users"` is `users`); string literals must be unchanged. In TypeScript and JavaScript files only the SQL template counts, not the code around it. So adding lines or statements elsewhere in the file, or running a formatter over the statement, keeps the match. Each entry hides one diagnostic, so the same mistake made twice in one statement needs two entries.
 
-Write the baseline over the same files that CI checks (by default the `files` in `sqlsift.toml`): `--write-baseline` replaces the whole file with the diagnostics of the files given.
+When a statement with baselined problems is changed, its diagnostics that are left are still matched by rule code and message against the file's unmatched entries: fixing one of several problems in a statement doesn't make the others new. The entries store no line numbers and are sorted by file, rule, statement hash and message, so adding lines to a file doesn't change the baseline (and doesn't cause merge conflicts in it).
+
+`--write-baseline` records the diagnostics of the files it checks, and keeps the existing entries of other files that still exist and aren't ignored, printing how many were kept and removed. So it can be run over a few files, and two configurations can share one baseline file. To start over, delete the file first.
+
+Baseline files written by sqlsift 0.1 (format version 1) are still read; `--write-baseline` writes version 2.
 
 ## Project-wide: rule levels
 
