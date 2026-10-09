@@ -16,3 +16,11 @@ git_tag_name = "v{{ version }}"
 [[package]]
 name = "sqlsift-cli"
 git_tag_enable = true
+
+# Playground-only crate, not distributed (its version still follows the workspace).
+# It didn't exist at v0.1.4, so sharing the v{version} tag made release-plz look for it
+# in the tagged worktree and fail. A tag name of its own (never created) avoids that.
+[[package]]
+name = "sqlsift-wasm"
+release = false
+git_tag_name = "sqlsift-wasm-v{{ version }}"
