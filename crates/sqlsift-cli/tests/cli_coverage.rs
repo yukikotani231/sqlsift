@@ -656,7 +656,204 @@ fn schema_subcommand_prints_tables_and_columns() {
 #[test]
 fn schema_subcommand_requires_files() {
     let t = TempDir::new("schema-cmd-none");
-    t.run(&["schema"]).assert_code(2);
+    let run = t.run(&["schema"]);
+    run.assert_code(2);
+    if temp_root_is_config_free(&t) {
+        run.assert_stderr_contains("No schema files specified");
+    }
+}
+
+const RICH_SCHEMA: &str = "\
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, feeling mood);
+CREATE VIEW user_names AS SELECT id, name FROM users;
+CREATE MATERIALIZED VIEW user_count AS SELECT COUNT(*) AS n FROM users;
+CREATE TABLE audit.events (id BIGINT NOT NULL, user_id INTEGER REFERENCES users (id));
+";
+
+#[test]
+fn schema_subcommand_accepts_schema_flag() {
+    let t = TempDir::new("schema-cmd-flag");
+    t.write("a.sql", USERS_SCHEMA);
+    t.write("b.sql", ORDERS_SCHEMA);
+    t.run(&["schema", "-s", "a.sql", "--schema", "b.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("Table: orders");
+}
+
+#[test]
+fn schema_subcommand_accepts_schema_dir() {
+    let t = TempDir::new("schema-cmd-dir");
+    t.write("migrations/001_users.sql", USERS_SCHEMA);
+    t.write("migrations/002_orders.sql", ORDERS_SCHEMA);
+    t.write(
+        "migrations/003_alter.sql",
+        "ALTER TABLE users ADD COLUMN email TEXT;\n",
+    );
+    let run = t.run(&["schema", "--schema-dir", "migrations"]);
+    run.assert_code(0)
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("Table: orders")
+        .assert_stdout_contains("- email text");
+}
+
+#[test]
+fn schema_subcommand_missing_schema_dir_exits_two() {
+    let t = TempDir::new("schema-cmd-dir-missing");
+    t.run(&["schema", "--schema-dir", "nope"])
+        .assert_code(2)
+        .assert_stderr_contains("Schema directory not found");
+}
+
+#[test]
+fn schema_subcommand_falls_back_to_config() {
+    let t = TempDir::new("schema-cmd-config");
+    t.write("db/migrations/001.sql", USERS_SCHEMA);
+    t.write("sqlsift.toml", "schema_dir = \"db/migrations\"\n");
+    t.run(&["schema"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users");
+
+    // From a subdirectory, the config is discovered and paths stay relative to it
+    let sub = t.mkdir("src/queries");
+    t.run_in(&sub, &["schema"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users");
+}
+
+#[test]
+fn schema_subcommand_explicit_config_path() {
+    let t = TempDir::new("schema-cmd-config-path");
+    t.write("conf/schema.sql", ORDERS_SCHEMA);
+    t.write(
+        "conf/custom.toml",
+        "schema = [\"schema.sql\"]\ndialect = \"postgresql\"\n",
+    );
+    t.run(&["schema", "-c", "conf/custom.toml"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: orders");
+}
+
+#[test]
+fn schema_subcommand_cli_overrides_config() {
+    let t = TempDir::new("schema-cmd-override");
+    t.write("a.sql", USERS_SCHEMA);
+    t.write("b.sql", ORDERS_SCHEMA);
+    t.write("sqlsift.toml", "schema = [\"a.sql\"]\n");
+    let run = t.run(&["schema", "b.sql"]);
+    run.assert_code(0).assert_stdout_contains("Table: orders");
+    assert!(
+        !run.stdout.contains("Table: users"),
+        "positional files should replace config schema\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn schema_subcommand_respects_dialect() {
+    let t = TempDir::new("schema-cmd-dialect");
+    t.write(
+        "schema.sql",
+        "CREATE TABLE `items` (`id` INT NOT NULL AUTO_INCREMENT, `kind` ENUM('a', 'b'), PRIMARY KEY (`id`));\n",
+    );
+    t.run(&["schema", "-d", "mysql", "-s", "schema.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: items")
+        .assert_stdout_contains("- kind enum('a', 'b')");
+    t.run(&["schema", "-d", "oracle", "-s", "schema.sql"])
+        .assert_code(2);
+}
+
+#[test]
+fn schema_subcommand_shows_views_enums_and_schemas() {
+    let t = TempDir::new("schema-cmd-rich");
+    t.write("schema.sql", RICH_SCHEMA);
+    let run = t.run(&["schema", "-s", "schema.sql"]);
+    run.assert_code(0)
+        .assert_stdout_contains("Schema: public")
+        .assert_stdout_contains("Schema: audit")
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("- id integer NOT NULL PRIMARY KEY")
+        .assert_stdout_contains("- feeling mood NULL")
+        .assert_stdout_contains("View: user_names")
+        .assert_stdout_contains("Materialized view: user_count")
+        .assert_stdout_contains("- n bigint")
+        .assert_stdout_contains("Table: events")
+        .assert_stdout_contains("Enum types:")
+        .assert_stdout_contains("mood: 'sad', 'ok', 'happy'");
+
+    // Output is deterministic and follows definition order
+    let again = t.run(&["schema", "-s", "schema.sql"]);
+    assert_eq!(run.stdout, again.stdout);
+    let users = run.stdout.find("Table: users").unwrap();
+    let view = run.stdout.find("View: user_names").unwrap();
+    assert!(
+        users < view,
+        "tables are listed before views\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn schema_subcommand_json_output() {
+    let t = TempDir::new("schema-cmd-json");
+    t.write("schema.sql", RICH_SCHEMA);
+    let run = t.run(&["schema", "--format", "json", "-s", "schema.sql"]);
+    run.assert_code(0);
+    let json = run.json();
+
+    assert_eq!(json["dialect"], "postgresql");
+    assert_eq!(json["default_schema"], "public");
+    assert_eq!(json["schema_files"][0], "schema.sql");
+
+    let schemas = json["schemas"].as_array().expect("schemas array");
+    let names: Vec<_> = schemas
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["public", "audit"]);
+
+    let public = &schemas[0];
+    let users = &public["tables"][0];
+    assert_eq!(users["name"], "users");
+    assert_eq!(users["primary_key"], serde_json::json!(["id"]));
+    assert_eq!(users["columns"][0]["name"], "id");
+    assert_eq!(users["columns"][0]["type"], "integer");
+    assert_eq!(users["columns"][0]["nullable"], false);
+    assert_eq!(users["columns"][0]["primary_key"], true);
+    assert_eq!(users["columns"][2]["type"], "mood");
+    assert_eq!(users["columns"][2]["nullable"], true);
+
+    let views = public["views"].as_array().expect("views array");
+    assert_eq!(views[0]["name"], "user_names");
+    assert_eq!(views[0]["materialized"], false);
+    assert_eq!(views[0]["columns"][1]["name"], "name");
+    assert_eq!(views[0]["columns"][1]["type"], "text");
+    assert_eq!(views[1]["name"], "user_count");
+    assert_eq!(views[1]["materialized"], true);
+
+    let events = &schemas[1]["tables"][0];
+    assert_eq!(events["name"], "events");
+    assert_eq!(
+        events["foreign_keys"][0]["columns"],
+        serde_json::json!(["user_id"])
+    );
+    assert_eq!(events["foreign_keys"][0]["references_table"], "users");
+
+    assert_eq!(json["enums"][0]["name"], "mood");
+    assert_eq!(
+        json["enums"][0]["values"],
+        serde_json::json!(["sad", "ok", "happy"])
+    );
+}
+
+#[test]
+fn schema_subcommand_rejects_sarif_format() {
+    let t = with_users_schema("schema-cmd-sarif");
+    t.run(&["schema", "--format", "sarif", "-s", "schema.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("possible values: human, json");
 }
 
 #[test]

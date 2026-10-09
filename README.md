@@ -121,10 +121,63 @@ schema = ["db/schema.sql"]
 
 Then just run `sqlsift check queries/**/*.sql`.
 
+### Inspecting the loaded schema
+
+When a query is flagged unexpectedly, check what sqlsift actually understood from your schema. `sqlsift schema` takes the same schema options as `check` (`--schema`, `--schema-dir`, `--config`, `--dialect`) and falls back to `sqlsift.toml`:
+
+```console
+$ sqlsift schema --schema-dir migrations
+Schema Information:
+==================
+Dialect: postgresql
+Schema files:
+  migrations/001_init.sql
+
+Schema: public
+  Table: users
+    - id integer NOT NULL PRIMARY KEY DEFAULT nextval('users_id_seq'::regclass)
+    - name text NOT NULL
+    - feeling mood NULL
+  View: user_names
+    - id integer
+    - name text
+  Materialized view: user_count
+    - n bigint
+
+Enum types:
+  mood: 'sad', 'ok', 'happy'
+```
+
+Objects are listed per schema in definition order. Statements sqlsift had to skip are reported as warnings on stderr.
+
+`sqlsift schema --format json` prints the same information as JSON:
+
+```jsonc
+{
+  "dialect": "postgresql",
+  "default_schema": "public",
+  "schema_files": ["migrations/001_init.sql"],
+  "schemas": [{
+    "name": "public",
+    "tables": [{
+      "name": "users",
+      "columns": [{ "name": "id", "type": "integer", "nullable": false, "primary_key": true,
+                    "identity": null, "auto_increment": false, "default": "nextval(...)" }],
+      "primary_key": ["id"],           // or null
+      "foreign_keys": [{ "name": null, "columns": ["..."], "references_table": "...", "references_columns": ["..."] }],
+      "unique": [["..."]]
+    }],
+    "views": [{ "name": "user_names", "materialized": false,
+                "columns": [{ "name": "id", "type": "integer" }] }]   // type is null when unknown
+  }],
+  "enums": [{ "name": "mood", "values": ["sad", "ok", "happy"] }]
+}
+```
+
 <details>
 <summary><b>Configuration file reference</b></summary>
 
-`sqlsift check` looks for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
+`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
 
 ```toml
 schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
@@ -423,6 +476,22 @@ Options:
   -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help
 ```
+
+```
+sqlsift schema [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...                Schema definition files (same as --schema)
+
+Options:
+  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
+      --schema-dir <DIR>    Directory containing schema files
+  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
+
+`sqlsift rules` lists every rule with its category and default level.
 
 </details>
 
