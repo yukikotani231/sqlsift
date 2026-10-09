@@ -212,6 +212,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ CHECK constraints (column-level and table-level)
 - ✅ GENERATED AS IDENTITY columns
 - ✅ Resilient parsing (gracefully skips unsupported DDL)
+- ✅ psql scripts (PostgreSQL only, `psql.rs`): meta-commands blanked out, `\g`/`\gset` end a query, `:var`/`:'var'` → `$1`, `:"var"` → identifier whose name diagnostics are dropped; the rewrite keeps every byte offset
 - ✅ Configuration file (sqlsift.toml)
 - ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable`), `sqlsift rules` lists the registry
 - ✅ Multiple output formats (human, JSON, SARIF)
