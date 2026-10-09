@@ -5,21 +5,42 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{self, Url};
 
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
+use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
-use crate::config::Config;
+use crate::config::{default_embedded_sql_tags, Config};
+
+/// Language ids of documents whose SQL is in tagged template literals
+const EMBEDDED_SQL_LANGUAGES: &[&str] = &[
+    "typescript",
+    "typescriptreact",
+    "javascript",
+    "javascriptreact",
+];
+
+/// Language ids of Jinja-templated SQL documents (`jinja-sql` is set by the
+/// "dbt Power User" extension)
+const JINJA_LANGUAGES: &[&str] = &["jinja-sql", "jinja"];
 
 pub struct ServerState {
     pub catalog: Catalog,
     pub dialect: SqlDialect,
     /// Templating of query documents (`templating` in sqlsift.toml, or Jinja in a
-    /// dbt project)
+    /// dbt project at the workspace root or next to sqlsift.toml)
     pub templating: Templating,
+    /// Whether `templating` was set explicitly in sqlsift.toml (then it applies to
+    /// every document; otherwise Jinja is detected per document)
+    pub templating_configured: bool,
+    /// `embedded_sql_tags` from sqlsift.toml: tags of the template literals
+    /// checked as SQL in TypeScript and JavaScript documents
+    pub embedded_sql_tags: Vec<String>,
     /// Rule levels from sqlsift.toml
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
+    /// Language ids of the open documents (from `textDocument/didOpen`)
+    pub document_languages: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
     /// `ignore` patterns from sqlsift.toml: matching documents get no diagnostics
     pub ignore: IgnorePatterns,
@@ -37,8 +58,11 @@ impl ServerState {
             catalog: Catalog::default(),
             dialect: SqlDialect::default(),
             templating: Templating::None,
+            templating_configured: false,
+            embedded_sql_tags: default_embedded_sql_tags(),
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
+            document_languages: HashMap::new(),
             schema_files: Vec::new(),
             ignore: IgnorePatterns::default(),
             baseline: None,
@@ -78,7 +102,10 @@ impl ServerState {
         let config_dir = config_path.parent().unwrap_or(workspace_root);
         match &config.templating {
             Some(templating) => match templating.parse() {
-                Ok(t) => self.templating = t,
+                Ok(t) => {
+                    self.templating = t;
+                    self.templating_configured = true;
+                }
                 Err(e) => self
                     .config_warnings
                     .push(format!("{}: {}", config_path.display(), e)),
@@ -89,6 +116,8 @@ impl ServerState {
                 }
             }
         }
+
+        self.embedded_sql_tags = config.embedded_sql_tags();
 
         // Rule levels (`disable`, `[rules]`, `[categories]`)
         let (rules, problems) = config.rule_config();
@@ -158,11 +187,61 @@ impl ServerState {
     }
 
     /// Analyze a SQL document and return diagnostics
+    #[cfg(test)]
     pub fn analyze_document(&self, text: &str) -> Vec<Diagnostic> {
+        self.analyze_with(text, self.templating, false)
+    }
+
+    /// Analyze `text` as SQL with `templating`, or, when `embedded`, the SQL in
+    /// its tagged template literals (`embedded_sql_tags`)
+    fn analyze_with(&self, text: &str, templating: Templating, embedded: bool) -> Vec<Diagnostic> {
         let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
             .with_rules(self.rules.clone())
-            .with_templating(self.templating);
-        analyzer.analyze(text)
+            .with_templating(templating);
+        if embedded {
+            analyzer.analyze_embedded(text, &self.embedded_sql_tags)
+        } else {
+            analyzer.analyze(text)
+        }
+    }
+
+    /// Whether the document at `uri` is TypeScript or JavaScript, whose SQL is in
+    /// tagged template literals: by its language id, or else its file extension
+    pub fn is_embedded_sql_document(&self, uri: &Url) -> bool {
+        match self.document_languages.get(uri) {
+            Some(language) if EMBEDDED_SQL_LANGUAGES.contains(&language.as_str()) => true,
+            Some(language) if language == "sql" || JINJA_LANGUAGES.contains(&language.as_str()) => {
+                false
+            }
+            _ => is_embedded_sql_file(Path::new(uri.path())),
+        }
+    }
+
+    /// Templating of the document at `uri`: the `templating` setting when there
+    /// is one, else Jinja for a `jinja-sql` / `jinja` document or one inside a dbt
+    /// project (`dbt_project.yml` in one of its ancestor directories), else the
+    /// workspace's
+    pub fn document_templating(&self, uri: &Url) -> Templating {
+        if self.templating_configured {
+            return self.templating;
+        }
+        if self
+            .document_languages
+            .get(uri)
+            .is_some_and(|language| JINJA_LANGUAGES.contains(&language.as_str()))
+        {
+            return Templating::Jinja;
+        }
+        if let Ok(path) = uri.to_file_path() {
+            if path
+                .ancestors()
+                .skip(1)
+                .any(|dir| dbt_templating(dir) == Templating::Jinja)
+            {
+                return Templating::Jinja;
+            }
+        }
+        self.templating
     }
 
     /// Diagnostics to show for the document at `uri`: none for ignored files
@@ -171,7 +250,11 @@ impl ServerState {
         if self.is_ignored(uri) {
             return Vec::new();
         }
-        let diagnostics = self.analyze_document(text);
+        let diagnostics = self.analyze_with(
+            text,
+            self.document_templating(uri),
+            self.is_embedded_sql_document(uri),
+        );
         match (&self.baseline, uri.to_file_path()) {
             (Some((filter, dir)), Ok(path)) => {
                 let key = baseline::file_key(&path, dir);
