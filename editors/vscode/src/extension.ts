@@ -1,5 +1,6 @@
 import { ExtensionContext, workspace } from "vscode";
 import {
+  DocumentFilter,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
@@ -17,6 +18,33 @@ function getBundledServerPath(context: ExtensionContext): string | undefined {
     return bundledPath;
   }
   return undefined;
+}
+
+/** Languages whose SQL is in tagged template literals (sql`...`) */
+const EMBEDDED_SQL_LANGUAGES = [
+  "typescript",
+  "typescriptreact",
+  "javascript",
+  "javascriptreact",
+];
+
+/**
+ * Documents sent to the server: SQL, dbt models (`jinja-sql` from dbt Power
+ * User, or `.sql` files in the generic `jinja` language) and, when enabled,
+ * TypeScript / JavaScript files with embedded SQL
+ */
+function documentSelector(embeddedSql: boolean): DocumentFilter[] {
+  const selector: DocumentFilter[] = [
+    { scheme: "file", language: "sql" },
+    { scheme: "file", language: "jinja-sql" },
+    { scheme: "file", language: "jinja", pattern: "**/*.sql" },
+  ];
+  if (embeddedSql) {
+    for (const language of EMBEDDED_SQL_LANGUAGES) {
+      selector.push({ scheme: "file", language });
+    }
+  }
+  return selector;
 }
 
 export function activate(context: ExtensionContext) {
@@ -38,7 +66,9 @@ export function activate(context: ExtensionContext) {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "sql" }],
+    documentSelector: documentSelector(
+      config.get<boolean>("embeddedSql.enable", true)
+    ),
   };
 
   client = new LanguageClient(
