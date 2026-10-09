@@ -93,8 +93,9 @@ pub enum Command {
         #[arg(long, value_name = "PATH")]
         baseline: Option<PathBuf>,
 
-        /// Write every current diagnostic to the baseline file and exit 0
-        /// (the file is `--baseline`, `baseline` in sqlsift.toml, or sqlsift-baseline.json)
+        /// Write every current diagnostic of the checked files to the baseline file and
+        /// exit 0, keeping the entries of other files that still exist (the file is
+        /// `--baseline`, `baseline` in sqlsift.toml, or sqlsift-baseline.json)
         #[arg(long)]
         write_baseline: bool,
     },

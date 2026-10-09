@@ -914,14 +914,12 @@ fn ranges_use_utf16_code_units() {
 /// A baseline file with one E0002 entry for `file`, in the statement `statement`
 fn baseline_json(file: &str, statement: &str) -> String {
     json!({
-        "version": 1,
+        "version": 2,
         "entries": [{
             "file": file,
             "code": "E0002",
             "statement_hash": sqlsift_core::baseline::statement_hash(statement),
-            "occurrence": 0,
-            "line": 1,
-            "message": "Column 'nme' not found in table 'users'"
+            "message": "Column 'nme' not found"
         }]
     })
     .to_string()

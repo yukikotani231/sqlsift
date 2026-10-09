@@ -2953,28 +2953,28 @@ fn write_baseline_records_every_diagnostic_and_exits_zero() {
     .assert_stderr_contains("Wrote 3 baseline entries for 2 file(s) to sqlsift-baseline.json")
     .assert_stderr_contains("--baseline sqlsift-baseline.json");
     let baseline = read_baseline(&t, "sqlsift-baseline.json");
-    assert_eq!(baseline["version"], 1);
+    assert_eq!(baseline["version"], 2);
     let entries = baseline["entries"].as_array().unwrap();
-    // Warnings are recorded too
-    let summary: Vec<(String, String, u64)> = entries
+    // Warnings are recorded too; sorted by file and code, without line numbers
+    let summary: Vec<(String, String)> = entries
         .iter()
         .map(|e| {
+            assert!(e.get("line").is_none(), "{e}");
             (
                 e["file"].as_str().unwrap().to_string(),
                 e["code"].as_str().unwrap().to_string(),
-                e["line"].as_u64().unwrap(),
             )
         })
         .collect();
     assert_eq!(
         summary,
         [
-            ("q.sql".to_string(), "E0002".to_string(), 1),
-            ("q.sql".to_string(), "E0001".to_string(), 2),
-            ("w.sql".to_string(), "E0002".to_string(), 1),
+            ("q.sql".to_string(), "E0001".to_string()),
+            ("q.sql".to_string(), "E0002".to_string()),
+            ("w.sql".to_string(), "E0002".to_string()),
         ]
     );
-    assert!(entries[0]["message"].as_str().unwrap().contains("nme"));
+    assert!(entries[1]["message"].as_str().unwrap().contains("nme"));
     assert_eq!(entries[0]["statement_hash"].as_str().unwrap().len(), 16);
 }
 
@@ -3169,6 +3169,243 @@ fn baseline_matches_stdin_by_stdin_filename() {
         "SELECT nme FROM users;\n",
     )
     .assert_code(0);
+}
+
+/// `sqlsift check -s schema.sql --baseline sqlsift-baseline.json <files>`
+fn check_with_baseline(t: &TempDir, files: &[&str]) -> Run {
+    let mut args = vec![
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+    ];
+    args.extend(files);
+    t.run(&args)
+}
+
+/// `sqlsift check -s schema.sql --write-baseline <files>`
+fn write_baseline(t: &TempDir, files: &[&str]) -> Run {
+    let mut args = vec!["check", "-s", "schema.sql", "--write-baseline"];
+    args.extend(files);
+    t.run(&args)
+}
+
+#[test]
+fn baseline_handles_bom_and_non_ascii_text() {
+    let t = with_users_schema("bl-utf8");
+    t.write("bom.sql", "\u{feff}SELECT 1;\nSELECT nme FROM users;\n");
+    t.write("id.sql", "SELECT nme FROM café;\n");
+    t.write(
+        "cjk.sql",
+        "SELECT 名前 FROM users;\nSELECT nme FROM users WHERE name = '🎉 ok';\n",
+    );
+    t.write("e.json", "{\"version\":2,\"entries\":[]}");
+    let files = ["bom.sql", "id.sql", "cjk.sql"];
+    let mut args = vec!["check", "-s", "schema.sql", "--baseline", "e.json"];
+    args.extend(files);
+    t.run(&args).assert_code(1).assert_stderr_lacks("panicked");
+    write_baseline(&t, &files)
+        .assert_code(0)
+        .assert_stderr_lacks("panicked");
+    check_with_baseline(&t, &files)
+        .assert_code(0)
+        .assert_stderr_contains("All 3 file(s) passed validation");
+}
+
+#[test]
+fn baseline_of_typescript_ignores_the_code_around_the_sql() {
+    let t = TempDir::new("bl-ts");
+    t.write(
+        "schema.sql",
+        "CREATE TABLE actor (actor_id INTEGER PRIMARY KEY, first_name TEXT);\n",
+    );
+    t.write(
+        "a.ts",
+        "export async function get(id: number) {\n  const rows = await db.query(sql`SELECT frist_name FROM actor WHERE actor_id = ${id}`);\n  return rows;\n}\n",
+    );
+    write_baseline(&t, &["a.ts"]).assert_code(0);
+    t.write(
+        "a.ts",
+        "export async function getActor(actorId: number): Promise<Actor[]> {\n  const result = await db.query(sql`\n    SELECT frist_name\n    FROM actor\n    WHERE actor_id = ${actorId}\n  `);\n  return result;\n}\n",
+    );
+    check_with_baseline(&t, &["a.ts"])
+        .assert_code(0)
+        .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline")
+        .assert_stderr_lacks("no longer occur");
+}
+
+#[test]
+fn baseline_entries_of_deleted_or_ignored_files_are_stale() {
+    let t = with_users_schema("bl-gone");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nfiles = [\"sql/**/*.sql\"]\nbaseline = \"sqlsift-baseline.json\"\n",
+    );
+    t.write("sql/a.sql", "SELECT nme FROM users;\n");
+    t.write("sql/b.sql", "SELECT nme FROM users;\n");
+    t.write("sql/admin/c.sql", "SELECT nme FROM users;\n");
+    t.run(&["check", "--write-baseline"]).assert_code(0);
+    t.run(&["check"])
+        .assert_code(0)
+        .assert_stderr_lacks("no longer occur");
+
+    // Deleted file
+    fs::remove_file(t.path().join("sql/a.sql")).unwrap();
+    t.run(&["check"])
+        .assert_code(0)
+        .assert_stderr_contains("Note: 1 baseline entry no longer occurs");
+    // Newly ignored directory
+    t.run(&["check", "--ignore", "sql/admin/**"])
+        .assert_code(0)
+        .assert_stderr_contains("Note: 2 baseline entries no longer occur");
+    // A run over some of the files: existing files not given are not stale,
+    // deleted ones are
+    t.run(&["check", "sql/b.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Note: 1 baseline entry no longer occurs");
+    // Renamed: the old name is stale, the new one is a new problem
+    fs::rename(t.path().join("sql/b.sql"), t.path().join("sql/d.sql")).unwrap();
+    t.run(&["check"])
+        .assert_code(1)
+        .assert_stderr_contains("Note: 2 baseline entries no longer occur");
+}
+
+#[test]
+fn write_baseline_on_some_files_keeps_the_entries_of_the_others() {
+    let t = with_users_schema("bl-merge");
+    t.write("a.sql", "SELECT nme FROM users;\n");
+    t.write("b.sql", "SELECT nme FROM users;\nSELECT x FROM users;\n");
+    t.write("c.sql", "SELECT nme FROM users;\n");
+    write_baseline(&t, &["a.sql", "b.sql", "c.sql"]).assert_code(0);
+
+    // a.sql was fixed and c.sql deleted; only a.sql is rewritten
+    t.write("a.sql", "SELECT name FROM users;\n");
+    fs::remove_file(t.path().join("c.sql")).unwrap();
+    write_baseline(&t, &["a.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Wrote 0 baseline entries for 1 file(s)")
+        .assert_stderr_contains("Kept 2 entries for 1 file(s) not checked in this run")
+        .assert_stderr_contains(
+            "Removed 1 entry for 1 file(s) that no longer exist or are ignored",
+        );
+    let baseline = read_baseline(&t, "sqlsift-baseline.json");
+    let files: Vec<&str> = baseline["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["b.sql", "b.sql"]);
+    check_with_baseline(&t, &["a.sql", "b.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("2 known diagnostic(s) hidden by the baseline")
+        .assert_stderr_lacks("no longer occur");
+}
+
+#[test]
+fn baseline_survives_formatter_changes() {
+    let t = with_users_schema("bl-format");
+    t.write(
+        "q.sql",
+        "SELECT nme FROM users WHERE id = 993;\nSELECT * FROM userz WHERE id = (1);\n",
+    );
+    write_baseline(&t, &["q.sql"]).assert_code(0);
+    t.write(
+        "q.sql",
+        "select nme\nfrom \"users\"\nwhere id=993;\n\nselect *\n  from USERZ\n where id = ( 1 );\n",
+    );
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("2 known diagnostic(s) hidden by the baseline")
+        .assert_stderr_lacks("no longer occur");
+}
+
+#[test]
+fn partly_fixed_statement_keeps_its_other_problems_hidden() {
+    let t = with_users_schema("bl-partial");
+    t.write(
+        "q.sql",
+        "SELECT nme, nme, lst_name FROM users WHERE id = 'abc';\n",
+    );
+    write_baseline(&t, &["q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Wrote 4 baseline entries");
+    t.write(
+        "q.sql",
+        "SELECT nme, nme, name FROM users WHERE id = 'abc';\n",
+    );
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("3 known diagnostic(s) hidden by the baseline")
+        .assert_stderr_contains("Note: 1 baseline entry no longer occurs");
+    // A new instance of a baselined problem is still reported
+    t.write(
+        "q.sql",
+        "SELECT nme, nme, nme, name FROM users WHERE id = 'abc';\n",
+    );
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Found 1 error(s)");
+}
+
+#[test]
+fn version_1_baselines_are_still_read() {
+    let t = with_users_schema("bl-v1");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    // Written by sqlsift 0.1.x
+    t.write(
+        "sqlsift-baseline.json",
+        r#"{"version": 1, "entries": [{"file": "q.sql", "code": "E0002",
+            "statement_hash": "0000000000000000", "occurrence": 0, "line": 1,
+            "message": "Column 'nme' not found in table 'users'"}]}"#,
+    );
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline");
+}
+
+#[test]
+fn paths_from_a_config_in_a_subdirectory_are_normalized() {
+    let t = with_users_schema("bl-subdir-paths");
+    t.write(
+        "ci/sqlsift.toml",
+        "schema = [\"../schema.sql\"]\nfiles = [\"../queries/**/*.sql\"]\nbaseline = \"../sqlsift-baseline.json\"\n",
+    );
+    t.write("queries/mysql/q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&["check", "-c", "ci/sqlsift.toml", "-f", "github"]);
+    run.assert_code(2); // the baseline doesn't exist yet
+    t.run(&["check", "-c", "ci/sqlsift.toml", "--write-baseline"])
+        .assert_code(0)
+        .assert_stderr_contains("to sqlsift-baseline.json")
+        .assert_stderr_lacks("ci/..");
+    t.write("queries/mysql/new.sql", "SELECT bad FROM users;\n");
+    let run = t.run(&["check", "-c", "ci/sqlsift.toml", "-f", "github"]);
+    run.assert_code(1);
+    assert!(
+        run.stdout.contains("file=queries/mysql/new.sql,"),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("ci/.."), "{}", run.stdout);
+    let sarif = t.run(&["check", "-c", "ci/sqlsift.toml", "-f", "sarif"]);
+    assert!(
+        sarif.stdout.contains("\"queries/mysql/new.sql\""),
+        "{}",
+        sarif.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn baseline_matches_files_reached_through_a_symlink() {
+    let t = with_users_schema("bl-symlink");
+    t.write("queries/q.sql", "SELECT nme FROM users;\n");
+    write_baseline(&t, &["queries/q.sql"]).assert_code(0);
+    std::os::unix::fs::symlink(t.path().join("queries"), t.path().join("qlink")).unwrap();
+    check_with_baseline(&t, &["qlink/q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline");
 }
 
 // ---------------------------------------------------------------------------
