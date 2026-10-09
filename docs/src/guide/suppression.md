@@ -35,6 +35,8 @@ SELECT bad_col FROM missing_table;
 
 A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it. It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file.
 
+In TypeScript, JavaScript, Vue and Svelte files, write the directives as code comments (`// sqlsift:disable-file`, `/* sqlsift:disable E0002 */`) or as SQL comments inside a template; a `disable-file` comment inside one template applies to the whole file (see [SQL in TypeScript and JavaScript](queries.md#directives)).
+
 ## Whole files, without editing them: `ignore`
 
 To skip generated or archived files entirely, list them in `ignore` in `sqlsift.toml`, or pass `--ignore`:
