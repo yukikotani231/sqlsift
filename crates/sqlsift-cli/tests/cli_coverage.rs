@@ -3678,6 +3678,54 @@ fn stdin_filename_extension_selects_typescript() {
 }
 
 #[test]
+fn schema_subcommand_shows_enum_schemas() {
+    let t = TempDir::new("schema-cmd-enum-schema");
+    t.write(
+        "schema.sql",
+        "CREATE TYPE public.st AS ENUM ('a', 'b');
+CREATE SCHEMA billing;
+CREATE TYPE billing.charge_state AS ENUM ('open', 'paid');
+CREATE TABLE c (id int, s public.st);
+",
+    );
+    t.run(&["schema", "-s", "schema.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("public.st: 'a', 'b'")
+        .assert_stdout_contains("billing.charge_state: 'open', 'paid'");
+    let json = t
+        .run(&["schema", "--format", "json", "-s", "schema.sql"])
+        .json();
+    assert_eq!(json["enums"][1]["name"], "charge_state");
+    assert_eq!(json["enums"][1]["schema"], "billing");
+}
+
+#[test]
+fn check_follows_postgres_script_statements() {
+    let t = TempDir::new("check-postgres-scripts");
+    t.write(
+        "schema.sql",
+        "CREATE TABLE users (id int, country text);
+CREATE SCHEMA analytics;
+CREATE TABLE analytics.daily_active (day date, dau int);
+",
+    );
+    t.write(
+        "q.sql",
+        "COPY users (id, country) FROM stdin;
+1\tJP
+\\.
+SELECT bogus FROM users;
+SET search_path TO analytics, public;
+SELECT dau FROM daily_active;
+",
+    );
+    t.run(&["check", "-s", "schema.sql", "q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Column 'bogus' not found")
+        .assert_stderr_contains("Found 1 error(s), 0 warning(s) in 1 file(s)");
+}
+
+#[test]
 fn globs_skip_node_modules_and_build_output_for_typescript() {
     let t = with_users_schema("embedded-node-modules");
     let bad = "export const q = sql`SELECT nme FROM users`;\n";

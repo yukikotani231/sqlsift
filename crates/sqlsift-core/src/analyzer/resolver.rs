@@ -1422,9 +1422,13 @@ impl<'a> Resolver<'a> {
     /// Build a "table not found" diagnostic, suggesting a similarly named table, view or
     /// CTE, or else a likely reason why the table is missing
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
-        let help = match self.similar_table(table_name) {
-            Some(suggestion) => format!("Did you mean '{suggestion}'?"),
-            None => self.missing_table_hint(table_name),
+        let help = match (
+            self.skipped_definition_hint(table_name),
+            self.similar_table(table_name),
+        ) {
+            (Some(hint), _) => hint,
+            (None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
+            (None, None) => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
@@ -1473,6 +1477,25 @@ impl<'a> Resolver<'a> {
             .filter(|(shown, _)| !catalog.names_match(shown, &typed));
         find_most_similar(candidates, |(_, name)| name.as_str(), &table_name.name)
             .map(|(shown, _)| shown)
+    }
+
+    /// Why a table is missing when an earlier statement of the query file that
+    /// defines it could not be parsed
+    fn skipped_definition_hint(&self, table_name: &QualifiedName) -> Option<String> {
+        let def = self.catalog.skipped_definitions.iter().rev().find(|d| {
+            d.line.is_some()
+                && d.name.as_deref().is_some_and(|name| {
+                    let last = name.rsplit('.').next().unwrap_or(name);
+                    last.trim_matches('"')
+                        .eq_ignore_ascii_case(&table_name.name)
+                })
+        })?;
+        Some(format!(
+            "The {} statement for '{}' on line {} could not be parsed (see the parse error there), so the table is unknown",
+            def.kind,
+            def.name.as_deref().unwrap_or_default(),
+            def.line.unwrap_or_default()
+        ))
     }
 
     /// Why a table that has no similarly named one may be missing

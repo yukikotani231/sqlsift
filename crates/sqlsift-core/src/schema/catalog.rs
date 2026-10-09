@@ -13,8 +13,13 @@ pub struct Catalog {
     pub schemas: IndexMap<String, Schema>,
     /// Default schema name (e.g., "public" for PostgreSQL)
     pub default_schema: String,
-    /// Enum type definitions (name -> EnumTypeDef)
+    /// Enum type definitions (name, `schema.name` when created with a schema ->
+    /// EnumTypeDef)
     pub enums: IndexMap<String, EnumTypeDef>,
+    /// Schemas searched, in order, for unqualified names (PostgreSQL
+    /// `SET search_path`). Empty means just [`Self::default_schema`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_path: Vec<String>,
     /// PostgreSQL identifier rules: unquoted names fold to lowercase and quoted names
     /// are case-sensitive. When false, table/view/schema names match case-insensitively.
     #[serde(default)]
@@ -32,6 +37,10 @@ pub struct SkippedDefinition {
     pub kind: String,
     /// Name of the object it defines or alters, if it could be determined
     pub name: Option<String>,
+    /// Line of the statement when it is in the query file being analyzed (`None`
+    /// for the schema input)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 impl Catalog {
@@ -40,6 +49,7 @@ impl Catalog {
             schemas: IndexMap::new(),
             default_schema: "public".to_string(),
             enums: IndexMap::new(),
+            search_path: Vec::new(),
             case_sensitive_names: false,
             skipped_definitions: Vec::new(),
         };
@@ -72,7 +82,7 @@ impl Catalog {
             .name
             .schema
             .clone()
-            .unwrap_or_else(|| self.default_schema.clone());
+            .unwrap_or_else(|| self.creation_schema().to_string());
         let schema = self.get_or_create_schema(&schema_name);
         schema.tables.insert(table.name.name.clone(), table);
     }
@@ -82,23 +92,50 @@ impl Catalog {
     /// Names are matched exactly first, then case-insensitively (unquoted
     /// identifiers are case-insensitive in SQL).
     pub fn get_table(&self, name: &QualifiedName) -> Option<&TableDef> {
-        let schema = self.get_schema(name)?;
-        self.lookup(&schema.tables, &name.name)
+        let (schema, table) = self.locate(name, |s| &s.tables)?;
+        self.schemas[schema].tables.get_index(table).map(|(_, t)| t)
     }
 
     /// Look up a table by name (mutable)
     pub fn get_table_mut(&mut self, name: &QualifiedName) -> Option<&mut TableDef> {
-        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        let schema_index = self.index_of(&self.schemas, schema_name)?;
-        let table_index = self.index_of(&self.schemas[schema_index].tables, &name.name)?;
-        let (_, schema) = self.schemas.get_index_mut(schema_index)?;
-        schema.tables.get_index_mut(table_index).map(|(_, t)| t)
+        let (schema, table) = self.locate(name, |s| &s.tables)?;
+        let (_, schema) = self.schemas.get_index_mut(schema)?;
+        schema.tables.get_index_mut(table).map(|(_, t)| t)
     }
 
-    /// Look up the schema a (possibly unqualified) name refers to
-    fn get_schema(&self, name: &QualifiedName) -> Option<&Schema> {
-        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        self.lookup(&self.schemas, schema_name)
+    /// Schemas searched for unqualified names, in order: the search path, or the
+    /// default schema
+    pub fn search_path(&self) -> impl Iterator<Item = &str> {
+        let default = self
+            .search_path
+            .is_empty()
+            .then_some(self.default_schema.as_str());
+        self.search_path.iter().map(String::as_str).chain(default)
+    }
+
+    /// Schema that unqualified objects are created in: the first schema of the
+    /// search path, or the default schema
+    pub fn creation_schema(&self) -> &str {
+        self.search_path.first().unwrap_or(&self.default_schema)
+    }
+
+    /// Index of the schema and of the object named `name` in it, among the objects
+    /// of each schema given by `objects` (an unqualified name is looked up in the
+    /// schemas of the search path, in order)
+    fn locate<V>(
+        &self,
+        name: &QualifiedName,
+        objects: impl Fn(&Schema) -> &IndexMap<String, V>,
+    ) -> Option<(usize, usize)> {
+        let find = |schema_name: &str| {
+            let schema = self.index_of(&self.schemas, schema_name)?;
+            let object = self.index_of(objects(&self.schemas[schema]), &name.name)?;
+            Some((schema, object))
+        };
+        match &name.schema {
+            Some(schema_name) => find(schema_name),
+            None => self.search_path().find_map(find),
+        }
     }
 
     /// Name of an identifier as stored in the catalog: with PostgreSQL rules, unquoted
@@ -132,12 +169,6 @@ impl Catalog {
         }
     }
 
-    /// Look up `key` in `map` following the catalog's case rules
-    fn lookup<'m, V>(&self, map: &'m IndexMap<String, V>, key: &str) -> Option<&'m V> {
-        self.index_of(map, key)
-            .and_then(|i| map.get_index(i).map(|(_, v)| v))
-    }
-
     /// Index of `key` in `map` following the catalog's case rules
     fn index_of<V>(&self, map: &IndexMap<String, V>, key: &str) -> Option<usize> {
         if self.case_sensitive_names {
@@ -152,14 +183,68 @@ impl Catalog {
         self.get_table(name).is_some()
     }
 
-    /// Add an enum type to the catalog
+    /// Add an enum type to the catalog (replacing one with the same name)
     pub fn add_enum(&mut self, enum_def: EnumTypeDef) {
-        self.enums.insert(enum_def.name.clone(), enum_def);
+        let key = enum_def.qualified_name();
+        let schema = enum_def
+            .schema
+            .clone()
+            .unwrap_or_else(|| self.default_schema.clone());
+        match self.enum_index(&format!("{schema}.{}", enum_def.name)) {
+            Some(index) => {
+                self.enums.shift_remove_index(index);
+                self.enums.shift_insert(index, key, enum_def);
+            }
+            None => {
+                self.enums.insert(key, enum_def);
+            }
+        }
     }
 
-    /// Get an enum type by name
+    /// Get an enum type by name: `name`, or `schema.name` (as in a column type such
+    /// as `public.mood`). An unqualified name is looked up in the search path, then
+    /// in any schema.
     pub fn get_enum(&self, name: &str) -> Option<&EnumTypeDef> {
-        get_ignore_case(&self.enums, name)
+        self.enum_index(name)
+            .and_then(|i| self.enums.get_index(i).map(|(_, e)| e))
+    }
+
+    /// Index in [`Self::enums`] of the enum type `name` (see [`Self::get_enum`])
+    fn enum_index(&self, name: &str) -> Option<usize> {
+        let (schema, base) = match name.rsplit_once('.') {
+            // `db.schema.type`: the schema is the second-to-last part
+            Some((schema, base)) => (Some(schema.rsplit('.').next().unwrap_or(schema)), base),
+            None => (None, name),
+        };
+        let default_schema = self.default_schema.as_str();
+        // Exact names first, then ignoring case
+        let find = |schema: Option<&str>| {
+            self.enums
+                .values()
+                .position(|e| {
+                    e.name == base
+                        && schema
+                            .map_or(true, |s| e.schema.as_deref().unwrap_or(default_schema) == s)
+                })
+                .or_else(|| {
+                    self.enums.values().position(|e| {
+                        e.name.eq_ignore_ascii_case(base)
+                            && schema.map_or(true, |s| {
+                                e.schema
+                                    .as_deref()
+                                    .unwrap_or(default_schema)
+                                    .eq_ignore_ascii_case(s)
+                            })
+                    })
+                })
+        };
+        match schema {
+            Some(schema) => find(Some(schema)),
+            None => self
+                .search_path()
+                .find_map(|s| find(Some(s)))
+                .or_else(|| find(None)),
+        }
     }
 
     /// Check if an enum type exists
@@ -169,36 +254,40 @@ impl Catalog {
 
     /// Get an enum type by name (mutable)
     pub fn get_enum_mut(&mut self, name: &str) -> Option<&mut EnumTypeDef> {
-        let index = index_ignore_case(&self.enums, name)?;
+        let index = self.enum_index(name)?;
         self.enums.get_index_mut(index).map(|(_, e)| e)
     }
 
     /// Drop an enum type from the catalog
     pub fn drop_enum(&mut self, name: &str) {
-        if let Some(index) = index_ignore_case(&self.enums, name) {
+        if let Some(index) = self.enum_index(name) {
             self.enums.shift_remove_index(index);
         }
     }
 
     /// Drop a view from the catalog
     pub fn drop_view(&mut self, name: &QualifiedName) {
-        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        let Some(schema_index) = self.index_of(&self.schemas, schema_name) else {
+        if let Some((schema, view)) = self.locate(name, |s| &s.views) {
+            self.schemas[schema].views.shift_remove_index(view);
+        }
+    }
+
+    /// Rename a table, keeping it in its schema
+    pub fn rename_table(&mut self, name: &QualifiedName, new_name: String) {
+        let Some((schema, index)) = self.locate(name, |s| &s.tables) else {
             return;
         };
-        if let Some(index) = self.index_of(&self.schemas[schema_index].views, &name.name) {
-            self.schemas[schema_index].views.shift_remove_index(index);
+        let tables = &mut self.schemas[schema].tables;
+        if let Some((_, mut table)) = tables.shift_remove_index(index) {
+            table.name.name.clone_from(&new_name);
+            tables.insert(new_name, table);
         }
     }
 
     /// Drop a table from the catalog
     pub fn drop_table(&mut self, name: &QualifiedName) {
-        let schema_name = name.schema.as_ref().unwrap_or(&self.default_schema);
-        let Some(schema_index) = self.index_of(&self.schemas, schema_name) else {
-            return;
-        };
-        if let Some(index) = self.index_of(&self.schemas[schema_index].tables, &name.name) {
-            self.schemas[schema_index].tables.shift_remove_index(index);
+        if let Some((schema, table)) = self.locate(name, |s| &s.tables) {
+            self.schemas[schema].tables.shift_remove_index(table);
         }
     }
 
@@ -208,15 +297,15 @@ impl Catalog {
             .name
             .schema
             .clone()
-            .unwrap_or_else(|| self.default_schema.clone());
+            .unwrap_or_else(|| self.creation_schema().to_string());
         let schema = self.get_or_create_schema(&schema_name);
         schema.views.insert(view.name.name.clone(), view);
     }
 
     /// Look up a view by name
     pub fn get_view(&self, name: &QualifiedName) -> Option<&ViewDef> {
-        let schema = self.get_schema(name)?;
-        self.lookup(&schema.views, &name.name)
+        let (schema, view) = self.locate(name, |s| &s.views)?;
+        self.schemas[schema].views.get_index(view).map(|(_, v)| v)
     }
 
     /// Check if a view exists
@@ -260,11 +349,6 @@ impl Catalog {
 fn index_ignore_case<V>(map: &IndexMap<String, V>, key: &str) -> Option<usize> {
     map.get_index_of(key)
         .or_else(|| map.keys().position(|k| k.eq_ignore_ascii_case(key)))
-}
-
-/// Look up `key` in `map`, matching exactly first and then ignoring ASCII case
-fn get_ignore_case<'m, V>(map: &'m IndexMap<String, V>, key: &str) -> Option<&'m V> {
-    index_ignore_case(map, key).and_then(|i| map.get_index(i).map(|(_, v)| v))
 }
 
 /// A database schema (namespace)
@@ -523,6 +607,20 @@ pub struct CheckConstraintDef {
 pub struct EnumTypeDef {
     pub name: String,
     pub values: Vec<String>,
+    /// Schema the type was created in, when its name was qualified
+    /// (`CREATE TYPE billing.state AS ENUM ...`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+impl EnumTypeDef {
+    /// `schema.name`, or `name` if the type was created without a schema
+    pub fn qualified_name(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// Identity column kind (GENERATED ... AS IDENTITY)
