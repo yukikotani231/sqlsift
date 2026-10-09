@@ -81,6 +81,25 @@ impl SchemaBuilder {
     /// dbmate `-- migrate:down` sections are ignored (see
     /// [`strip_down_migrations`](crate::schema::strip_down_migrations)).
     pub fn parse(&mut self, sql: &str) -> Result<(), Vec<Diagnostic>> {
+        // A leading byte order mark is not part of the SQL
+        let (sql, bom) = crate::analyzer::strip_bom(sql);
+        let first_new = self.diagnostics.len();
+        self.parse_text(sql);
+        crate::analyzer::shift_offsets(&mut self.diagnostics[first_new..], bom);
+
+        if self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == crate::error::Severity::Error)
+        {
+            Err(std::mem::take(&mut self.diagnostics))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build the catalog from the statements of `sql`
+    fn parse_text(&mut self, sql: &str) {
         let sql = &*crate::schema::strip_down_migrations(sql);
         let dialect = self.dialect.parser_dialect();
 
@@ -102,16 +121,6 @@ impl SchemaBuilder {
                 // Fall back to statement-by-statement parsing to skip unsupported syntax
                 self.parse_statements_individually(sql);
             }
-        }
-
-        if self
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == crate::error::Severity::Error)
-        {
-            Err(std::mem::take(&mut self.diagnostics))
-        } else {
-            Ok(())
         }
     }
 

@@ -137,7 +137,10 @@ impl<'a> Analyzer<'a> {
     /// assert!(diagnostics.is_empty());
     /// ```
     pub fn analyze(&mut self, sql: &str) -> Vec<Diagnostic> {
-        self.analyze_text(sql, sql, &[])
+        let (sql, bom) = strip_bom(sql);
+        let mut diagnostics = self.analyze_text(sql, sql, &[]);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
     }
 
     /// Analyze the SQL in a TypeScript or JavaScript file: the tagged template
@@ -160,9 +163,12 @@ impl<'a> Analyzer<'a> {
     /// assert_eq!(diagnostics[0].span.unwrap().column, 31);
     /// ```
     pub fn analyze_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
         let extracted =
             crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Script);
-        self.analyze_text(&extracted.text, source, &extracted.identifiers)
+        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
     }
 
     /// Analyze the SQL in the `<script>` blocks of a Vue or Svelte component, as
@@ -187,9 +193,12 @@ impl<'a> Analyzer<'a> {
         source: &str,
         tags: &[S],
     ) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
         let extracted =
             crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Component);
-        self.analyze_text(&extracted.text, source, &extracted.identifiers)
+        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
     }
 
     /// Analyze `sql`, which has the same lines and character columns as `original`
@@ -342,6 +351,32 @@ impl<'a> Analyzer<'a> {
             }
         }
         statements
+    }
+}
+
+/// `text` without a leading UTF-8 byte order mark (which editors on Windows and
+/// tools like SSMS write), and the byte length removed. Columns of the stripped
+/// text are the ones an editor shows; see [`shift_offsets`] for byte offsets.
+pub(crate) fn strip_bom(text: &str) -> (&str, usize) {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, text.len() - rest.len()),
+        None => (text, 0),
+    }
+}
+
+/// Make the byte offsets of diagnostics found in a text [`strip_bom`] removed
+/// `bom` bytes from relative to the original text
+pub(crate) fn shift_offsets(diagnostics: &mut [Diagnostic], bom: usize) {
+    if bom == 0 {
+        return;
+    }
+    for diagnostic in diagnostics {
+        let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+        for span in diagnostic.span.iter_mut().chain(labels) {
+            if span.line > 0 {
+                span.offset += bom;
+            }
+        }
     }
 }
 

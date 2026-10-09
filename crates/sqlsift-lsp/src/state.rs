@@ -8,6 +8,7 @@ use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
+use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::config::{default_embedded_sql_tags, Config};
@@ -164,7 +165,7 @@ impl ServerState {
         for schema_file in &self.schema_files {
             match std::fs::read_to_string(schema_file) {
                 Ok(content) => {
-                    if let Err(diags) = builder.parse(&content) {
+                    if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
                         for d in diags {
                             errors.push(format!("{}: {}", schema_file.display(), d.message));
                         }
@@ -194,15 +195,20 @@ impl ServerState {
 
     /// Analyze `text` as SQL with `templating`, or, when `embedded`, the SQL in
     /// its tagged template literals (`embedded_sql_tags`)
+    ///
+    /// The analysis runs on a thread with a large stack, so a very long expression
+    /// can't overflow the server's stack.
     fn analyze_with(&self, text: &str, templating: Templating, embedded: bool) -> Vec<Diagnostic> {
-        let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
-            .with_rules(self.rules.clone())
-            .with_templating(templating);
-        if embedded {
-            analyzer.analyze_embedded(text, &self.embedded_sql_tags)
-        } else {
-            analyzer.analyze(text)
-        }
+        with_analysis_stack(|| {
+            let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
+                .with_rules(self.rules.clone())
+                .with_templating(templating);
+            if embedded {
+                analyzer.analyze_embedded(text, &self.embedded_sql_tags)
+            } else {
+                analyzer.analyze(text)
+            }
+        })
     }
 
     /// Whether the document at `uri` is TypeScript or JavaScript, whose SQL is in

@@ -15,6 +15,7 @@ use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FI
 use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
+use sqlsift_core::stack::{with_analysis_stack, ANALYSIS_STACK_SIZE};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::args::{Args, Command, OutputFormat, SchemaFormat};
@@ -120,8 +121,10 @@ fn analyze_files(
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(files.len());
+    // Analysis runs on threads with a large stack: sqlparser recurses as deep as
+    // a chain of binary operators is long
     if workers <= 1 {
-        return files.iter().map(analyze_one).collect();
+        return with_analysis_stack(|| files.iter().map(analyze_one).collect());
     }
 
     // Workers take the next unclaimed file until none are left
@@ -130,7 +133,7 @@ fn analyze_files(
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                scope.spawn(|| {
+                let work = || {
                     let mut done = Vec::new();
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -139,8 +142,13 @@ fn analyze_files(
                         };
                         done.push((i, analyze_one(path)));
                     }
-                })
+                };
+                std::thread::Builder::new()
+                    .stack_size(ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, work)
             })
+            // Fewer workers if some can't be spawned (the others take their files)
+            .filter_map(std::result::Result::ok)
             .collect();
         for handle in handles {
             for (i, result) in handle.join().expect("analysis thread panicked") {
@@ -150,7 +158,8 @@ fn analyze_files(
     });
     results
         .into_iter()
-        .map(|r| r.expect("every file is analyzed"))
+        .zip(files)
+        .map(|(result, path)| result.unwrap_or_else(|| with_analysis_stack(|| analyze_one(path))))
         .collect()
 }
 
@@ -283,7 +292,7 @@ fn build_catalog(
     let mut builder = SchemaBuilder::with_dialect(dialect);
     for schema_file in schema_files {
         let content = read_file(schema_file)?;
-        if let Err(diags) = builder.parse(&content) {
+        if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
             return Ok(Err(FileDiagnostics {
                 file: schema_file.display().to_string(),
                 source: content,
