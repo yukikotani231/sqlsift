@@ -161,12 +161,14 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Filter out diagnostics suppressed by inline directives, then apply rule levels
+        // Filter out diagnostics suppressed by inline directives, then apply rule levels.
+        // A diagnostic that a directive meant to suppress but misspelled the rule of
+        // says so.
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
-            .filter(|d| {
-                let Some(span) = &d.span else {
-                    return true;
+            .filter_map(|mut d| {
+                let Some(span) = d.span else {
+                    return Some(d);
                 };
                 // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
                 let substituted = matches!(
@@ -175,7 +177,16 @@ impl<'a> Analyzer<'a> {
                         | DiagnosticKind::ColumnNotFound
                         | DiagnosticKind::AmbiguousColumn
                 ) && source.is_substituted(span.line, span.column);
-                !substituted && !directives.is_suppressed(d.kind, span.line)
+                if substituted || directives.is_suppressed(d.kind, span.line) {
+                    return None;
+                }
+                if let Some(note) = directives.unknown_id_help(span.line) {
+                    d.help = Some(match d.help.take() {
+                        Some(help) => format!("{help}\n{note}"),
+                        None => note,
+                    });
+                }
+                Some(d)
             })
             .collect();
         self.rules.apply(diagnostics)

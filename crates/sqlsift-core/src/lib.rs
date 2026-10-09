@@ -9,6 +9,7 @@ pub mod error;
 mod psql;
 pub mod rules;
 pub mod schema;
+mod suggest;
 pub mod types;
 
 pub use analyzer::Analyzer;

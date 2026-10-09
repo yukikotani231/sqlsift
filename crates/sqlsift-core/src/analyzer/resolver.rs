@@ -15,7 +15,8 @@ use std::collections::HashMap;
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
-use crate::schema::{Catalog, ColumnDef, QualifiedName, TableDef};
+use crate::schema::{Catalog, ColumnDef, FormerColumn, QualifiedName, TableDef};
+use crate::suggest::{find_most_similar, find_similar_name};
 
 use super::scope::{
     lookup_ignore_case, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType, Relation,
@@ -158,8 +159,8 @@ impl<'a> Resolver<'a> {
                     ),
                 )
                 .with_span(Span::from_sqlparser(&col_ident.span));
-                if let Some(suggestion) = find_similar_column(table_def, &col_ident.value) {
-                    diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+                if let Some(help) = missing_table_column_help(table_def, &col_ident.value) {
+                    diag = diag.with_help(help);
                 }
                 self.diagnostics.push(diag);
             }
@@ -394,8 +395,8 @@ impl<'a> Resolver<'a> {
             format!("Column '{}' not found in table '{}'", col.value, table_name),
         )
         .with_span(Span::from_sqlparser(&col.span));
-        if let Some(suggestion) = find_similar_column(table_def, &col.value) {
-            diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+        if let Some(help) = missing_table_column_help(table_def, &col.value) {
+            diag = diag.with_help(help);
         }
         self.diagnostics.push(diag);
     }
@@ -1300,22 +1301,22 @@ impl<'a> Resolver<'a> {
             if !matches!(relation.column(column_name, self.dialect), ColumnMatch::No) {
                 return;
             }
-            let kind = match relation.kind {
-                RelationKind::Table => "table",
-                RelationKind::View => "view",
-                RelationKind::Cte => "CTE",
-                _ => "subquery",
-            };
             let mut diag = Diagnostic::error(
                 DiagnosticKind::ColumnNotFound,
                 format!(
                     "Column '{}' not found in {} '{}'",
-                    column_name, kind, relation.name
+                    column_name,
+                    relation.kind_name(),
+                    relation.name
                 ),
             )
             .with_span(column_span);
-            if let Some(suggestion) = find_similar_name(relation.column_names(), column_name) {
-                diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+            if let Some(help) = missing_column_help(
+                relation.former_column(column_name),
+                relation.column_names(),
+                column_name,
+            ) {
+                diag = diag.with_help(help);
             }
             self.diagnostics.push(diag);
             return;
@@ -1360,23 +1361,28 @@ impl<'a> Resolver<'a> {
                     return;
                 }
 
-                let candidates: Vec<String> = self
+                let relations: Vec<&Relation> = self
                     .scope
                     .current_ref()
-                    .map(|f| {
-                        f.relations
-                            .values()
-                            .flat_map(|r| r.column_names())
-                            .collect()
-                    })
+                    .map(|f| f.relations.values().collect())
                     .unwrap_or_default();
-                let mut diag = Diagnostic::error(
-                    DiagnosticKind::ColumnNotFound,
-                    format!("Column '{}' not found", column_name),
-                )
-                .with_span(column_span);
-                if let Some(suggestion) = find_similar_name(candidates, column_name) {
-                    diag = diag.with_help(format!("Did you mean '{}'?", suggestion));
+                // Name the relation that was searched when there is only one in reach
+                let mut visible = self.scope.visible().flat_map(|f| f.relations.values());
+                let message = match (visible.next(), visible.next()) {
+                    (Some(only), None) => format!(
+                        "Column '{}' not found in {} '{}'",
+                        column_name,
+                        only.kind_name(),
+                        only.name
+                    ),
+                    _ => format!("Column '{}' not found", column_name),
+                };
+                let former = relations.iter().find_map(|r| r.former_column(column_name));
+                let candidates = relations.iter().flat_map(|r| r.column_names());
+                let mut diag = Diagnostic::error(DiagnosticKind::ColumnNotFound, message)
+                    .with_span(column_span);
+                if let Some(help) = missing_column_help(former, candidates, column_name) {
+                    diag = diag.with_help(help);
                 }
                 self.diagnostics.push(diag);
             }
@@ -1396,17 +1402,12 @@ impl<'a> Resolver<'a> {
             })
     }
 
-    /// Build a "table not found" diagnostic, suggesting a similarly named table, view or CTE
+    /// Build a "table not found" diagnostic, suggesting a similarly named table, view or
+    /// CTE, or else a likely reason why the table is missing
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
-        let candidates = self
-            .catalog
-            .table_or_view_names()
-            .into_iter()
-            .map(|n| n.name)
-            .chain(self.scope.cte_names());
-        let help = match find_similar_name(candidates, &table_name.name) {
+        let help = match self.similar_table(table_name) {
             Some(suggestion) => format!("Did you mean '{}'?", suggestion),
-            None => "Check that the table exists in your schema definition".to_string(),
+            None => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
@@ -1417,6 +1418,94 @@ impl<'a> Resolver<'a> {
             diag = diag.with_span(span);
         }
         diag
+    }
+
+    /// The table, view or CTE most similar to a missing one, named the way a query
+    /// refers to it: schema-qualified unless it is in the default schema
+    fn similar_table(&self, table_name: &QualifiedName) -> Option<String> {
+        let catalog = self.catalog;
+        let typed = table_name.to_string();
+        let schema = table_name
+            .schema
+            .as_deref()
+            .unwrap_or(&catalog.default_schema);
+        // Tables in the schema that was searched win ties with those in other schemas
+        let (same_schema, other_schemas): (Vec<_>, Vec<_>) =
+            catalog.table_or_view_names().into_iter().partition(|n| {
+                n.schema
+                    .as_deref()
+                    .is_some_and(|s| catalog.names_match(s, schema))
+            });
+        let display = |n: QualifiedName| match &n.schema {
+            Some(s) if !catalog.names_match(s, &catalog.default_schema) => (n.to_string(), n.name),
+            _ => (n.name.clone(), n.name),
+        };
+        // CTEs can only be referred to unqualified
+        let ctes = if table_name.schema.is_none() {
+            self.scope.cte_names()
+        } else {
+            Vec::new()
+        };
+        let ctes = ctes.into_iter().map(|n| (n.clone(), n));
+        let candidates = same_schema
+            .into_iter()
+            .map(display)
+            .chain(ctes)
+            .chain(other_schemas.into_iter().map(display))
+            // Never suggest what was written
+            .filter(|(shown, _)| !catalog.names_match(shown, &typed));
+        find_most_similar(candidates, |(_, name)| name.as_str(), &table_name.name)
+            .map(|(shown, _)| shown)
+    }
+
+    /// Why a table that has no similarly named one may be missing
+    fn missing_table_hint(&self, table_name: &QualifiedName) -> String {
+        const LIST_TABLES: &str =
+            "run `sqlsift schema <schema files>` to list the tables that were loaded";
+        let skipped = &self.catalog.skipped_definitions;
+        let defines_table = |name: &str| {
+            let unquote = |part: &str| {
+                part.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+                    .to_string()
+            };
+            name.rsplit('.')
+                .next()
+                .is_some_and(|last| unquote(last).eq_ignore_ascii_case(&table_name.name))
+        };
+        if let Some(def) = skipped
+            .iter()
+            .find(|d| d.name.as_deref().is_some_and(defines_table))
+        {
+            return format!(
+                "A {} statement for '{}' in the schema could not be parsed and was skipped (see the schema warnings)",
+                def.kind,
+                def.name.as_deref().unwrap_or_default()
+            );
+        }
+        if let Some(schema) = &table_name.schema {
+            let schema_known = self
+                .catalog
+                .schemas
+                .keys()
+                .any(|s| self.catalog.names_match(s, schema));
+            if !schema_known {
+                return format!(
+                    "Schema '{}' has no tables in the schema input; check that the schema files that define it are included",
+                    schema
+                );
+            }
+        }
+        if !skipped.is_empty() {
+            return format!(
+                "{} schema statement(s) could not be parsed and were skipped (see the schema warnings), so the table may be defined in one of them; {}",
+                skipped.len(),
+                LIST_TABLES
+            );
+        }
+        format!(
+            "Check that the table exists in your schema definition; {}",
+            LIST_TABLES
+        )
     }
 }
 
@@ -1516,73 +1605,37 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Find a similar column name (for suggestions)
-fn find_similar_column(table: &TableDef, name: &str) -> Option<String> {
-    find_similar_name(table.columns.keys().cloned(), name)
+/// Help for a column of a catalog table that doesn't exist
+fn missing_table_column_help(table: &TableDef, name: &str) -> Option<String> {
+    missing_column_help(
+        table.former_column(name),
+        table.columns.keys().cloned(),
+        name,
+    )
 }
 
-/// Find the candidate most similar to `name` (for "did you mean" suggestions)
-pub(super) fn find_similar_name(
+/// Help for a column that doesn't exist: what became of it if ALTER TABLE renamed or
+/// dropped it (a rename is rarely a small edit, so "did you mean" can't find it),
+/// else the most similar existing column
+fn missing_column_help(
+    former: Option<&FormerColumn>,
     candidates: impl IntoIterator<Item = String>,
     name: &str,
 ) -> Option<String> {
-    let name_lower = name.to_lowercase();
-    let mut best_match: Option<(usize, String)> = None;
-
-    for candidate in candidates {
-        let candidate_lower = candidate.to_lowercase();
-        let distance = levenshtein_distance(&name_lower, &candidate_lower);
-        // A name that is a prefix of the candidate (`author` -> `author_id`) is similar
-        let is_prefix = name_lower.chars().count() >= 3 && candidate_lower.starts_with(&name_lower);
-
-        // Allow roughly one edit per three characters (at least 1, at most 3)
-        if (is_prefix || distance <= name_lower.chars().count().div_ceil(3).clamp(1, 3))
-            && best_match
-                .as_ref()
-                .map_or(true, |(best, _)| distance < *best)
-        {
-            best_match = Some((distance, candidate));
-        }
+    match former {
+        Some(FormerColumn {
+            renamed_to: Some(new_name),
+            ..
+        }) => Some(format!(
+            "'{}' was renamed to '{}' by ALTER TABLE in the schema",
+            name, new_name
+        )),
+        Some(FormerColumn {
+            renamed_to: None, ..
+        }) => Some(format!(
+            "'{}' was dropped by ALTER TABLE in the schema",
+            name
+        )),
+        None => find_similar_name(candidates, name).map(|s| format!("Did you mean '{}'?", s)),
     }
-
-    best_match.map(|(_, name)| name)
-}
-
-/// Simple Levenshtein distance implementation
-fn levenshtein_distance(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let m = a_chars.len();
-    let n = b_chars.len();
-
-    if m == 0 {
-        return n;
-    }
-    if n == 0 {
-        return m;
-    }
-
-    let mut dp = vec![vec![0; n + 1]; m + 1];
-
-    for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
-        row[0] = i;
-    }
-    for (j, val) in dp[0].iter_mut().enumerate() {
-        *val = j;
-    }
-
-    for i in 1..=m {
-        for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
-            dp[i][j] = (dp[i - 1][j] + 1)
-                .min(dp[i][j - 1] + 1)
-                .min(dp[i - 1][j - 1] + cost);
-        }
-    }
-
-    dp[m][n]
 }
