@@ -109,6 +109,23 @@ error[E0002]: Column 'titel' not found in table 'posts'
 
 A statement belongs to the last `-- name: <Name> :<command>` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
 
+sqlc's named parameters are untyped placeholders, like `$1`:
+
+```sql
+-- name: ListPosts :many
+SELECT id, title FROM posts
+WHERE id > @after_id AND author_id = sqlc.arg(author_id)
+  AND (title = sqlc.narg('title') OR sqlc.narg('title') IS NULL)
+LIMIT @page_size;
+
+-- name: GetPostsByIDs :many
+SELECT id, title FROM posts WHERE id IN (sqlc.slice(ids));
+```
+
+- `sqlc.arg(name)`, `sqlc.narg(name)` and `sqlc.slice(name)` (with the name bare or quoted) are placeholders in every dialect.
+- `@name` is a placeholder with the PostgreSQL dialect only. PostgreSQL's `@` operators are left alone: `@>`, `<@`, `@@`, and `@` followed by a space (absolute value). With MySQL, `@name` stays a user variable (`SET @x = 1`), and with SQLite a bind parameter; sqlc supports `@name` for neither, so use `sqlc.arg(name)` there.
+- Parameters in string literals, quoted identifiers and comments are left alone.
+
 ## SQL in TypeScript and JavaScript
 
 Files ending in `.ts`, `.tsx`, `.js`, `.jsx`, `.mts` or `.cts` are checked for SQL in tagged template literals, as used by postgres.js, Slonik, `@vercel/postgres`, Prisma and others:

@@ -3332,6 +3332,22 @@ fn sqlc_query_names_in_json_output() {
 }
 
 #[test]
+fn sqlc_named_parameters_are_placeholders() {
+    // Only the misspelled column is reported, not `@after_id`, `sqlc.arg(min_count)`, ...
+    let run = check_embedded_fixture(&["-f", "json", "tests/fixtures/embedded/named_params.sql"]);
+    run.assert_code(1);
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0]["code"], "E0002");
+    assert_eq!(diagnostics[0]["line"], 25);
+    assert_eq!(diagnostics[0]["column"], 12);
+    assert_eq!(diagnostics[0]["query_name"], "GetDraft");
+}
+
+#[test]
 fn json_output_has_no_query_name_outside_sqlc_queries() {
     let t = with_users_schema("no-query-name");
     t.write("q.sql", "SELECT nme FROM users;\n");
