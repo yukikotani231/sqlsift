@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::DiagnosticKind;
 use crate::rules::{find_rule, similar_rule_name};
+use crate::suggest::find_similar_name;
 
 /// Rules disabled by a directive
 #[derive(Debug)]
@@ -49,6 +50,8 @@ pub struct InlineDirectives {
     disabled_lines: HashMap<usize, Disabled>,
     /// Rules disabled for the whole file by `-- sqlsift:disable-file`
     disabled_file: Option<Disabled>,
+    /// Malformed sqlsift directives and the lines they appear to target
+    malformed: HashMap<usize, Vec<String>>,
 }
 
 /// The kind of a `sqlsift:` comment directive
@@ -66,12 +69,28 @@ impl InlineDirectives {
         let mut disabled_lines: HashMap<usize, Disabled> = HashMap::new();
         let mut pending_codes: Option<Disabled> = None;
         let mut disabled_file: Option<Disabled> = None;
+        let mut pending_malformed = Vec::new();
+        let mut malformed = HashMap::new();
 
         for (idx, line) in sql.lines().enumerate() {
             let line_num = idx + 1; // 1-indexed to match sqlparser Span
             let trimmed = line.trim();
 
             let directive = parse_directive_from_line(line);
+            let malformed_directive = if directive.is_none() {
+                malformed_directive_from_line(line)
+            } else {
+                None
+            };
+            if !trimmed.is_empty()
+                && !trimmed.starts_with("--")
+                && !pending_malformed.is_empty()
+            {
+                malformed
+                    .entry(line_num)
+                    .or_insert_with(Vec::new)
+                    .append(&mut pending_malformed);
+            }
             if let Some((DirectiveScope::File, codes)) = directive {
                 match &mut disabled_file {
                     Some(existing) => existing.merge(codes),
@@ -94,6 +113,15 @@ impl InlineDirectives {
                     // Inline comment (SQL + -- sqlsift:disable): applies to this line
                     merge_into_map(&mut disabled_lines, line_num, codes);
                 }
+            } else if let Some(directive) = malformed_directive {
+                if trimmed.starts_with("--") {
+                    pending_malformed.push(directive);
+                } else {
+                    malformed.entry(line_num).or_insert_with(Vec::new).push(directive);
+                    if let Some(codes) = pending_codes.take() {
+                        merge_into_map(&mut disabled_lines, line_num, codes);
+                    }
+                }
             } else if !trimmed.is_empty() && !trimmed.starts_with("--") {
                 // Non-comment, non-empty line: apply pending disables
                 if let Some(codes) = pending_codes.take() {
@@ -105,6 +133,7 @@ impl InlineDirectives {
         Self {
             disabled_lines,
             disabled_file,
+            malformed,
         }
     }
 
@@ -163,6 +192,27 @@ impl InlineDirectives {
             .collect();
         (!notes.is_empty()).then(|| notes.join("\n"))
     }
+
+    /// Explain malformed sqlsift directives that target `line`.
+    pub fn malformed_directive_help(&self, line: usize) -> Option<String> {
+        let notes: Vec<String> = self
+            .malformed
+            .get(&line)?
+            .iter()
+            .map(|directive| {
+                let candidates = ["sqlsift:disable", "sqlsift:disable-file"].map(str::to_string);
+                match find_similar_name(candidates, directive) {
+                    Some(suggestion) => format!(
+                        "'{directive}' is not a sqlsift directive. Did you mean '{suggestion}'?"
+                    ),
+                    None => format!(
+                        "'{directive}' is not a sqlsift directive (valid directives are `sqlsift:disable` and `sqlsift:disable-file`)"
+                    ),
+                }
+            })
+            .collect();
+        Some(notes.join("\n"))
+    }
 }
 
 /// Parse a `-- sqlsift:disable ...` or `-- sqlsift:disable-file ...` directive from a line.
@@ -173,9 +223,14 @@ fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Disabled)> {
     let comment_start = find_line_comment(line)?;
     let comment = &line[comment_start + 2..]; // skip "--"
 
-    // Look for "sqlsift:disable"
+    // Look for "sqlsift:disable"; whitespace around the colon is allowed.
     let trimmed = comment.trim();
-    let rest = trimmed.strip_prefix("sqlsift:disable")?;
+    let (namespace, rest) = trimmed.split_once(':')?;
+    if namespace.trim() != "sqlsift" {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("disable")?;
     let (scope, rest) = match rest.strip_prefix("-file") {
         Some(rest) => (DirectiveScope::File, rest),
         None => (DirectiveScope::Line, rest),
@@ -203,6 +258,18 @@ fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Disabled)> {
     } else {
         Some((scope, Disabled::Rules(codes)))
     }
+}
+
+/// Return the apparent directive name when a sqlsift comment isn't valid.
+fn malformed_directive_from_line(line: &str) -> Option<String> {
+    let comment_start = find_line_comment(line)?;
+    let comment = line[comment_start + 2..].trim();
+    let (namespace, directive) = comment.split_once(':')?;
+    if namespace.trim() != "sqlsift" {
+        return None;
+    }
+    let name = directive.split_whitespace().next().unwrap_or("");
+    Some(format!("sqlsift:{name}"))
 }
 
 /// Find the byte offset of `--` that starts a line comment (not inside a string).
@@ -280,6 +347,29 @@ mod tests {
             )
         );
         assert_eq!(directives.unknown_id_help(1), None);
+    }
+
+    #[test]
+    fn malformed_directives_get_suggestions_on_their_target_line() {
+        for (sql, target_line) in [
+            ("-- sqlsift:disabel E0002\nSELECT 1", 2),
+            ("SELECT 1 -- sqlsift:disabel E0002", 1),
+        ] {
+            let directives = InlineDirectives::parse(sql);
+            let expected =
+                "'sqlsift:disabel' is not a sqlsift directive. Did you mean 'sqlsift:disable'?";
+            assert_eq!(
+                directives.malformed_directive_help(target_line).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_around_directive_colon_is_accepted() {
+        let directives = InlineDirectives::parse("-- sqlsift : disable-file E0002\nSELECT 1");
+        assert!(directives.is_suppressed_in_file(DiagnosticKind::ColumnNotFound));
+        assert_eq!(directives.malformed_directive_help(2), None);
     }
 
     #[test]
