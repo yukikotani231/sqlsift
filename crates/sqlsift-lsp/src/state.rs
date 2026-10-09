@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
 
+use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
@@ -19,6 +20,9 @@ pub struct ServerState {
     pub schema_files: Vec<PathBuf>,
     /// `ignore` patterns from sqlsift.toml: matching documents get no diagnostics
     pub ignore: IgnorePatterns,
+    /// `baseline` from sqlsift.toml and the directory its file names are relative to:
+    /// baselined diagnostics are not shown, as in `sqlsift check`
+    pub baseline: Option<(BaselineFilter, PathBuf)>,
     pub workspace_root: Option<PathBuf>,
     /// Problems found while loading sqlsift.toml, to be shown to the user
     pub config_warnings: Vec<String>,
@@ -33,6 +37,7 @@ impl ServerState {
             open_documents: HashMap::new(),
             schema_files: Vec::new(),
             ignore: IgnorePatterns::default(),
+            baseline: None,
             workspace_root: None,
             config_warnings: Vec::new(),
         }
@@ -82,6 +87,23 @@ impl ServerState {
                 .config_warnings
                 .push(format!("{}: {}", config_path.display(), e)),
         }
+
+        self.baseline = None;
+        if let Some(path) = &config.baseline {
+            let path = config_dir.join(path);
+            let loaded = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read baseline {}: {}", path.display(), e))
+                .and_then(|json| {
+                    Baseline::from_json(&json).map_err(|e| format!("{}: {}", path.display(), e))
+                });
+            match loaded {
+                Ok(loaded) => {
+                    let dir = path.parent().unwrap_or(config_dir).to_path_buf();
+                    self.baseline = Some((BaselineFilter::new(&loaded), dir));
+                }
+                Err(e) => self.config_warnings.push(e),
+            }
+        }
     }
 
     /// Rebuild the catalog from schema files
@@ -119,6 +141,22 @@ impl ServerState {
         let mut analyzer =
             Analyzer::with_dialect(&self.catalog, self.dialect).with_rules(self.rules.clone());
         analyzer.analyze(text)
+    }
+
+    /// Diagnostics to show for the document at `uri`: none for ignored files
+    /// (`ignore` in sqlsift.toml), and without the baselined ones
+    pub fn document_diagnostics(&self, uri: &Url, text: &str) -> Vec<Diagnostic> {
+        if self.is_ignored(uri) {
+            return Vec::new();
+        }
+        let diagnostics = self.analyze_document(text);
+        match (&self.baseline, uri.to_file_path()) {
+            (Some((filter, dir)), Ok(path)) => {
+                let key = baseline::file_key(&path, dir);
+                filter.filter(&key, text, diagnostics).kept
+            }
+            _ => diagnostics,
+        }
     }
 
     /// Whether the document at `uri` matches an `ignore` pattern (only `file:`

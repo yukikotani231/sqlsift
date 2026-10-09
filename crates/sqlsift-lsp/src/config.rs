@@ -36,6 +36,11 @@ pub struct Config {
     pub categories: BTreeMap<String, String>,
 
     pub schema_dir: Option<String>,
+
+    /// Baseline file (relative to the config file's directory): its
+    /// diagnostics are not shown
+    #[serde(default)]
+    pub baseline: Option<String>,
 }
 
 impl Config {

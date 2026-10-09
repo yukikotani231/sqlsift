@@ -45,6 +45,26 @@ ignore = ["queries/archive/**", "**/*.generated.sql"]
 
 Ignored files aren't parsed at all, and editors show no diagnostics for them. See [Checking queries](queries.md#choosing-files) for the pattern rules.
 
+## An existing backlog: baseline
+
+To adopt sqlsift on a project that already has many diagnostics, record them in a baseline file and get reports only for new ones:
+
+```bash
+sqlsift check --write-baseline
+```
+
+This writes every current diagnostic (errors and warnings) to `sqlsift-baseline.json` and exits `0`. Commit the file and point sqlsift at it, in `sqlsift.toml` (so the language server uses it too) or with `--baseline <PATH>`:
+
+```toml
+baseline = "sqlsift-baseline.json"
+```
+
+Diagnostics in the baseline are not printed and don't count toward the exit code, `--max-errors` or `--max-warnings`. `sqlsift check` prints how many were hidden, and a note when baseline entries no longer occur (the problem was fixed); re-run `sqlsift check --write-baseline` to remove them. That note never fails the check.
+
+A diagnostic matches a baseline entry by its file (relative to the baseline file), rule code and the text of the statement it is in, with comments and whitespace ignored. Adding lines or statements elsewhere in the file, or reformatting the statement, keeps the match; changing the statement itself makes its diagnostics new again. The same mistake made twice in one statement is matched by its position among them. Each entry also stores the line and message, for people reading the file.
+
+Write the baseline over the same files that CI checks (by default the `files` in `sqlsift.toml`): `--write-baseline` replaces the whole file with the diagnostics of the files given.
+
 ## Project-wide: rule levels
 
 To turn a rule off everywhere, set its level instead; see [Rules and levels](rules.md).
