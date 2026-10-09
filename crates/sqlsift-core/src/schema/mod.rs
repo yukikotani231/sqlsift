@@ -2,6 +2,7 @@
 
 mod builder;
 mod catalog;
+mod migrations;
 
 pub use builder::SchemaBuilder;
 pub use catalog::{
@@ -9,3 +10,4 @@ pub use catalog::{
     IdentityKind, PrimaryKeyDef, QualifiedName, Schema, SkippedDefinition, TableDef,
     UniqueConstraintDef, ViewDef,
 };
+pub use migrations::{is_rollback_migration, strip_down_migrations};

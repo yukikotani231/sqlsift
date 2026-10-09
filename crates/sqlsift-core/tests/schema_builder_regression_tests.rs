@@ -842,3 +842,86 @@ fn bit_types_stay_unknown_and_unchecked() {
     assert_eq!(column_type(&c, "t", "a"), SqlType::Unknown);
     assert_clean(&c, "SELECT a FROM t WHERE a = B'101' AND b = 'x'");
 }
+
+// =====================================================================
+// Migration files: dbmate down sections and rollback file names
+// =====================================================================
+
+#[test]
+fn dbmate_down_section_is_ignored() {
+    let c = pg("-- migrate:up\n\
+         CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);\n\
+         -- migrate:down\n\
+         DROP TABLE users;\n");
+    assert_clean(&c, "SELECT id, name FROM users;");
+}
+
+#[test]
+fn dbmate_up_after_down_is_applied_again() {
+    let c = pg("-- migrate:up transaction:false\n\
+         CREATE TABLE a (id INT);\n\
+         -- migrate:down\n\
+         DROP TABLE a;\n\
+         CREATE TABLE gone (id INT);\n\
+         -- migrate:up\n\
+         CREATE TABLE b (id INT);\n");
+    assert_clean(&c, "SELECT a.id, b.id FROM a, b;");
+    assert_codes(
+        &c,
+        SqlDialect::PostgreSQL,
+        "SELECT id FROM gone",
+        &["E0001"],
+    );
+}
+
+#[test]
+fn dbmate_down_section_in_unparseable_file_is_ignored() {
+    // A statement sqlparser rejects forces the statement-by-statement fallback
+    let c = pg("-- migrate:up\n\
+         CREATE TABLE users (id INT);\n\
+         CREATE NONSENSE STATEMENT;\n\
+         -- migrate:down\n\
+         DROP TABLE users;\n");
+    assert_clean(&c, "SELECT id FROM users;");
+}
+
+#[test]
+fn strip_down_migrations_keeps_offsets() {
+    use sqlsift_core::schema::strip_down_migrations;
+    let sql = "-- migrate:up\nCREATE TABLE t (id INT);\n-- migrate:down\nDROP TABLE t;\n";
+    assert_eq!(
+        strip_down_migrations(sql),
+        "-- migrate:up\nCREATE TABLE t (id INT);\n               \n             \n"
+    );
+    // Files without markers are returned unchanged
+    let plain = "CREATE TABLE t (id INT); -- migrate:downstream\n-- migrate:downgrade\n";
+    assert_eq!(strip_down_migrations(plain), plain);
+}
+
+#[test]
+fn rollback_migration_file_names() {
+    use sqlsift_core::schema::is_rollback_migration;
+    use std::path::Path;
+    for name in [
+        "000001_create_users.down.sql",
+        "migrations/20240101_init.DOWN.sql",
+        "U1__create_users.sql",
+        "U2.1__add_column.sql",
+        "U1_1__add_column.sql",
+    ] {
+        assert!(is_rollback_migration(Path::new(name)), "{name}");
+    }
+    for name in [
+        "000001_create_users.up.sql",
+        "V1__create_users.sql",
+        "R__views.sql",
+        "users.sql",
+        "Users__x.sql",
+        "U__nope.sql",
+        "migration.sql",
+        "download.sql",
+        "down.sql/schema.sql",
+    ] {
+        assert!(!is_rollback_migration(Path::new(name)), "{name}");
+    }
+}

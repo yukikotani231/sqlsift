@@ -14,8 +14,9 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
-use crate::schema::Catalog;
+use crate::schema::{Catalog, SchemaBuilder};
 
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
@@ -115,13 +116,28 @@ impl<'a> Analyzer<'a> {
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
 
+        // psql meta-commands and variables (the rewrite keeps every location)
+        let source = match self.dialect {
+            SqlDialect::PostgreSQL => psql::preprocess(sql),
+            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(sql),
+        };
+
         // Parse the SQL
-        let statements = self.parse_statements(sql);
+        let statements = self.parse_statements(&source.text);
+
+        // Tables, views and types created, altered or dropped by the file's own
+        // statements, applied to a copy of the catalog made on the first such
+        // statement, so they are visible to the later statements of this file only
+        let mut file_schema: Option<SchemaBuilder> = None;
 
         // Analyze each statement
         for (stmt, origin) in &statements {
+            let catalog = file_schema
+                .as_ref()
+                .map_or(self.catalog, SchemaBuilder::catalog);
+
             // Name resolution and type checking in one walk over the statement
-            let mut resolver = Resolver::new(self.catalog, self.dialect);
+            let mut resolver = Resolver::new(catalog, self.dialect);
             resolver.statement(stmt);
 
             // Locations relative to the input
@@ -130,6 +146,14 @@ impl<'a> Analyzer<'a> {
                     origin.shift(span);
                 }
                 self.diagnostics.push(diagnostic);
+            }
+
+            if SchemaBuilder::changes_schema(stmt) {
+                file_schema
+                    .get_or_insert_with(|| {
+                        SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
+                    })
+                    .apply_statement(stmt);
             }
         }
 
@@ -143,13 +167,20 @@ impl<'a> Analyzer<'a> {
         let diagnostics = std::mem::take(&mut self.diagnostics)
             .into_iter()
             .filter_map(|mut d| {
-                let Some(line) = d.span.map(|s| s.line) else {
+                let Some(span) = d.span else {
                     return Some(d);
                 };
-                if directives.is_suppressed(d.kind, line) {
+                // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
+                let substituted = matches!(
+                    d.kind,
+                    DiagnosticKind::TableNotFound
+                        | DiagnosticKind::ColumnNotFound
+                        | DiagnosticKind::AmbiguousColumn
+                ) && source.is_substituted(span.line, span.column);
+                if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }
-                if let Some(note) = directives.unknown_id_help(line) {
+                if let Some(note) = directives.unknown_id_help(span.line) {
                     d.help = Some(match d.help.take() {
                         Some(help) => format!("{help}\n{note}"),
                         None => note,

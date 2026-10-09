@@ -241,6 +241,35 @@ fn invalid_query_exits_one_with_error_summary() {
 }
 
 #[test]
+fn tables_created_in_a_query_file_are_local_to_that_file() {
+    let t = with_users_schema("file-local-tables");
+    t.write(
+        "a.sql",
+        "CREATE TEMP TABLE tmp_names AS SELECT id, name FROM users;\n\
+         SELECT name FROM tmp_names;\n\
+         SELECT nmae FROM tmp_names;\n\
+         DROP TABLE tmp_names;\n",
+    );
+    t.write("b.sql", "SELECT name FROM tmp_names;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "a.sql", "b.sql"]);
+    run.assert_code(1);
+    let v = run.json();
+    let files = v["files"].as_array().expect("files array");
+    let codes_of = |name: &str| -> Vec<String> {
+        files
+            .iter()
+            .filter(|f| f["file"] == name)
+            .flat_map(|f| f["diagnostics"].as_array().expect("diagnostics").clone())
+            .map(|d| d["kind"].as_str().expect("kind").to_string())
+            .collect()
+    };
+    // The typo against the temp table is reported, the table itself is found
+    assert_eq!(codes_of("a.sql"), vec!["ColumnNotFound"]);
+    // The temp table isn't visible in other files
+    assert_eq!(codes_of("b.sql"), vec!["TableNotFound"]);
+}
+
+#[test]
 fn short_schema_flag_is_accepted() {
     let t = with_users_schema("short-s");
     t.write("q.sql", "SELECT id FROM users;\n");
