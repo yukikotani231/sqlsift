@@ -565,7 +565,7 @@ cargo test
 cargo run -- check --schema tests/fixtures/schema.sql tests/fixtures/invalid_query.sql
 ```
 
-The architecture overview lives in [`CLAUDE.md`](CLAUDE.md). Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …), which drive automated releases.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup, repository layout and how to add a rule. Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …), which drive automated releases.
 
 ## License
 
