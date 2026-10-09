@@ -24,7 +24,7 @@ pub(crate) fn find_most_similar<T>(
 
     for candidate in candidates {
         let candidate_lower = key(&candidate).to_lowercase();
-        let distance = levenshtein_distance(&name_lower, &candidate_lower);
+        let distance = edit_distance(&name_lower, &candidate_lower);
         // A name that is a prefix of the candidate (`author` -> `author_id`) is similar
         let is_prefix = name_lower.chars().count() >= 3 && candidate_lower.starts_with(&name_lower);
 
@@ -41,8 +41,9 @@ pub(crate) fn find_most_similar<T>(
     best_match.map(|(_, candidate)| candidate)
 }
 
-/// Simple Levenshtein distance implementation
-fn levenshtein_distance(a: &str, b: &str) -> usize {
+/// Damerau-Levenshtein distance (optimal string alignment variant), allowing insertion,
+/// deletion, substitution, and transposition of adjacent characters.
+pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     let m = a_chars.len();
@@ -70,6 +71,14 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
             dp[i][j] = (dp[i - 1][j] + 1)
                 .min(dp[i][j - 1] + 1)
                 .min(dp[i - 1][j - 1] + cost);
+
+            if i > 1
+                && j > 1
+                && a_chars[i - 1] == b_chars[j - 2]
+                && a_chars[i - 2] == b_chars[j - 1]
+            {
+                dp[i][j] = dp[i][j].min(dp[i - 2][j - 2] + 1);
+            }
         }
     }
 
@@ -95,5 +104,18 @@ mod tests {
         let tables = [("billing", "charges"), ("public", "users")];
         let found = find_most_similar(tables, |t| t.1, "charge");
         assert_eq!(found, Some(("billing", "charges")));
+    }
+
+    #[test]
+    fn transpositions_count_as_single_edit() {
+        assert_eq!(edit_distance("kidn", "kind"), 1);
+        assert_eq!(edit_distance("dya", "day"), 1);
+
+        let candidates = ["id", "kind", "day"].map(String::from);
+        assert_eq!(
+            find_similar_name(candidates.clone(), "kidn").as_deref(),
+            Some("kind")
+        );
+        assert_eq!(find_similar_name(candidates, "dya").as_deref(), Some("day"));
     }
 }
