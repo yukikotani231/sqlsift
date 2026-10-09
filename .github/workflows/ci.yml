@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token: these jobs only build and test
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -47,6 +51,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-targets
+
+      - name: Run doctests
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo test --doc
 
   lint:
     name: Lint

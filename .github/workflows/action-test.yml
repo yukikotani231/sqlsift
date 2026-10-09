@@ -8,6 +8,10 @@ on:
     paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**"]
   workflow_dispatch:
 
+# Read-only token: these jobs only build and test
+permissions:
+  contents: read
+
 jobs:
   test-action:
     name: Test action (${{ matrix.os }})
