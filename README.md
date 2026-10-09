@@ -4,12 +4,13 @@
 [![npm](https://img.shields.io/npm/v/sqlsift-cli.svg)](https://www.npmjs.com/package/sqlsift-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Playground](https://img.shields.io/badge/try_it-playground-2ea44f.svg)](https://yukikotani231.github.io/sqlsift/)
+[![Docs](https://img.shields.io/badge/docs-user_guide-0f766e.svg)](https://yukikotani231.github.io/sqlsift/docs/)
 
 **Catch broken SQL before it reaches production — without a database.**
 
 sqlsift reads your schema (`CREATE TABLE`, migrations, `structure.sql`, …) and checks your raw SQL queries against it: missing tables, typo'd columns, type mismatches, wrong `INSERT` arity, ambiguous columns. It runs offline in milliseconds, so it fits in pre-commit hooks, CI, and your editor.
 
-**▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page.
+**▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://yukikotani231.github.io/sqlsift/docs/)** for everything else.
 
 ```sql
 -- schema.sql
@@ -111,100 +112,18 @@ sqlsift check --dialect mysql --schema schema.sql queries/*.sql
 git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queries/users.sql -
 ```
 
-To avoid repeating flags, add a `sqlsift.toml` to your project root (see [`sqlsift.toml`](sqlsift.toml) for all options):
+To avoid repeating flags, add a `sqlsift.toml` to your project root:
 
 ```toml
-schema = ["db/schema.sql"]
-# schema_dir = "db/migrations"
-# dialect = "postgresql"
+schema_dir = "db/migrations"     # or: schema = ["db/schema.sql"]
+files = ["queries/**/*.sql"]
+dialect = "postgresql"
 
-# [rules]
-# ambiguous-column = "warn"   # report, but don't fail the check
+[rules]
+ambiguous-column = "warn"        # report, but don't fail the check
 ```
 
-Then just run `sqlsift check queries/**/*.sql`.
-
-### Inspecting the loaded schema
-
-When a query is flagged unexpectedly, check what sqlsift actually understood from your schema. `sqlsift schema` takes the same schema options as `check` (`--schema`, `--schema-dir`, `--config`, `--dialect`) and falls back to `sqlsift.toml`:
-
-```console
-$ sqlsift schema --schema-dir migrations
-Schema Information:
-==================
-Dialect: postgresql
-Schema files:
-  migrations/001_init.sql
-
-Schema: public
-  Table: users
-    - id integer NOT NULL PRIMARY KEY DEFAULT nextval('users_id_seq'::regclass)
-    - name text NOT NULL
-    - feeling mood NULL
-  View: user_names
-    - id integer
-    - name text
-  Materialized view: user_count
-    - n bigint
-
-Enum types:
-  mood: 'sad', 'ok', 'happy'
-```
-
-Objects are listed per schema in definition order. Statements sqlsift had to skip are reported as warnings on stderr.
-
-`sqlsift schema --format json` prints the same information as JSON:
-
-```jsonc
-{
-  "dialect": "postgresql",
-  "default_schema": "public",
-  "schema_files": ["migrations/001_init.sql"],
-  "schemas": [{
-    "name": "public",
-    "tables": [{
-      "name": "users",
-      "columns": [{ "name": "id", "type": "integer", "nullable": false, "primary_key": true,
-                    "identity": null, "auto_increment": false, "default": "nextval(...)" }],
-      "primary_key": ["id"],           // or null
-      "foreign_keys": [{ "name": null, "columns": ["..."], "references_table": "...", "references_columns": ["..."] }],
-      "unique": [["..."]]
-    }],
-    "views": [{ "name": "user_names", "materialized": false,
-                "columns": [{ "name": "id", "type": "integer" }] }]   // type is null when unknown
-  }],
-  "enums": [{ "name": "mood", "values": ["sad", "ok", "happy"] }]
-}
-```
-
-<details>
-<summary><b>Configuration file reference</b></summary>
-
-`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
-
-```toml
-schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
-# schema_dir = "db/migrations"    # all .sql files under this directory, in filename order
-files = ["queries/**/*.sql"]      # query files to check (glob patterns supported)
-ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
-dialect = "postgresql"            # postgresql, mysql or sqlite
-format = "human"                  # human, json, sarif or github
-# max_warnings = 0                # fail when more than this many warnings are reported
-disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
-
-[rules]                           # per-rule level: "off", "warn" or "error"
-E0008 = "warn"                    # by code...
-ambiguous-column = "off"          # ...or by name
-
-[categories]                      # level of every rule in a category
-correctness = "error"
-```
-
-Relative paths in the file are resolved against the directory containing `sqlsift.toml`. `ignore` patterns apply to the files from `files` and to files given on the command line (and the editor shows no diagnostics for them); `*` and `?` match within a directory, `**` matches any number of directories, and a pattern that matches a directory skips everything below it. `--ignore <PATTERN>` (repeatable, relative to the current directory) adds to the file's `ignore` list. Unknown keys produce a warning; invalid `dialect` or `format` values, unknown rules and invalid levels are errors.
-
-Exit codes: `0` when no errors were found, `1` when diagnostics with error severity were reported (or more warnings than `max_warnings` / `--max-warnings`), `2` for usage or configuration errors (missing files, patterns that match no files, invalid config, etc.).
-
-</details>
+Then just run `sqlsift check`. See the [configuration reference](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) for every key, and `sqlsift schema` to [inspect what sqlsift loaded](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html#inspecting-the-loaded-schema) from your schema.
 
 ## Use It With Your Stack
 
@@ -218,18 +137,13 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
 
-Only the "up" direction of migrations is applied: `--schema-dir` skips rollback files (`*.down.sql` from sqlx / golang-migrate, Flyway undo files `U<version>__*.sql`), and in any schema file everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored. Files passed explicitly with `--schema` are always loaded.
+Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
 
 ## Editor Integration
 
-sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type.
-
-- **VS Code** — install the **sqlsift** extension (`sqlsift.sqlsift`). Platform builds bundle the language server, so no extra setup is required. See [`editors/vscode`](editors/vscode) for details.
-- **Other editors** (Neovim, Helix, Zed, …) — install the server with `cargo install --git https://github.com/yukikotani231/sqlsift sqlsift-lsp` and register `sqlsift-lsp` as a language server for SQL files. It reads `sqlsift.toml` from the workspace root.
+sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type. Install the **sqlsift** VS Code extension (`sqlsift.sqlsift`), which bundles the server, or [set it up in Neovim, Helix and other editors](https://yukikotani231.github.io/sqlsift/docs/integrations/editors.html).
 
 ## CI Integration
-
-### GitHub Action
 
 ```yaml
 # .github/workflows/sqlsift.yml
@@ -246,291 +160,31 @@ jobs:
           files: queries/**/*.sql
 ```
 
-Errors are shown as annotations on the pull request diff. All inputs are optional when you have a `sqlsift.toml`:
-
-| Input | Description |
-|-------|-------------|
-| `files` | Query files (space-separated paths or globs) |
-| `schema` / `schema-dir` | Schema files, or a directory of migrations |
-| `dialect` | `postgresql`, `mysql` or `sqlite` |
-| `config` | Path to `sqlsift.toml` |
-| `disable` | Rules to disable, e.g. `E0006 E0008` |
-| `sarif-file` | Also write a SARIF report (see below) |
-| `fail-on-error` | Fail the step on errors (default `true`) |
-| `version` | `sqlsift-cli` version from npm (default `latest`) |
-
-The `exit-code` output is `0` (clean), `1` (errors found) or `2` (configuration error).
-
-Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql` works in any CI (add `--format github` for annotations in GitHub Actions).
-
-Rolling out a rule as `warn`? `--max-warnings <N>` (or `max_warnings` in `sqlsift.toml`) fails the check when more than `N` warnings are reported, so the backlog can only shrink.
-
-### Re-check everything when the schema changes
-
-sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
-
-```yaml
-on: pull_request
-jobs:
-  sqlsift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: changed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          changed=$(git diff --name-only --diff-filter=d "$BASE" HEAD)
-          if grep -q '^db/' <<< "$changed"; then
-            files='queries/**/*.sql'  # schema changed: check every query
-          else
-            files=$(grep '^queries/.*\.sql$' <<< "$changed" | tr '\n' ' ' || true)
-          fi
-          echo "files=$files" >> "$GITHUB_OUTPUT"
-      - if: steps.changed.outputs.files != ''
-        uses: yukikotani231/sqlsift@main
-        with:
-          schema-dir: db/migrations
-          files: ${{ steps.changed.outputs.files }}
-```
-
-### GitHub Code Scanning (SARIF)
-
-Show errors in the Security tab and as code scanning alerts:
-
-```yaml
-jobs:
-  sqlsift:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: yukikotani231/sqlsift@main
-        with:
-          schema: db/schema.sql
-          files: queries/**/*.sql
-          sarif-file: results.sarif
-          fail-on-error: "false"
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-```
-
-### JSON output
-
-`--format json` writes a single JSON document to stdout (logs and the summary go to stderr). Only files with diagnostics are listed; `files` is empty when everything passes.
-
-```json
-{
-  "files": [
-    {
-      "file": "queries/fetch.sql",
-      "diagnostics": [
-        {
-          "code": "E0002",
-          "kind": "ColumnNotFound",
-          "severity": "error",
-          "message": "Column 'user_id' not found in table 'users'",
-          "help": "Did you mean 'id'?",
-          "line": 3,
-          "column": 15,
-          "span": { "line": 3, "column": 15, "length": 7, "offset": 62 },
-          "labels": []
-        }
-      ]
-    }
-  ]
-}
-```
-
-`line` and `column` are 1-indexed (columns count characters); `span.offset` is the 0-indexed byte offset of the same position in the file, and `span.length` is in bytes.
-
-### GitHub Actions annotations
-
-Running sqlsift inside your own job (a `make lint` step, a script, a container)? `--format github` prints one [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) per diagnostic on stdout, which GitHub turns into annotations on the pull request diff:
-
-```
-::error file=queries/fetch.sql,line=3,col=15,endLine=3,endColumn=22,title=E0002 column-not-found::Column 'user_id' not found%0Ahelp: Did you mean 'id'?
-::warning file=queries/report.sql,line=6,col=8,endLine=6,endColumn=10,title=E0006 ambiguous-column::Column 'id' is ambiguous
-```
-
-Warnings become `::warning`, errors `::error`. The summary still goes to stderr.
-
-### Other formats
-
-The SARIF 2.1.0 log (`--format sarif`) contains a single run with results for all files and a `tool.driver.rules` entry for every diagnostic rule. Human output uses colors only when stderr is a terminal and `NO_COLOR` is not set.
+Errors are shown as annotations on the pull request diff. The [CI guide](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html) covers the action's inputs, re-checking every query when the schema changes, GitHub Code Scanning (SARIF), `--format github` / `json` for other setups, and `--max-warnings` for rolling out a rule gradually. There is also a [pre-commit recipe](https://yukikotani231.github.io/sqlsift/docs/integrations/pre-commit.html).
 
 ## Diagnostic Rules
 
-| Code | Name | Category | Description |
-|------|------|----------|-------------|
-| E0001 | table-not-found | correctness | Referenced table does not exist in schema |
-| E0002 | column-not-found | correctness | Referenced column does not exist in table |
-| E0003 | type-mismatch | correctness | Type incompatibility in expressions (comparisons, arithmetic) |
-| E0004 | potential-null-violation | correctness | Potential NOT NULL violation (explicit NULL assignment) |
-| E0005 | column-count-mismatch | correctness | INSERT column count doesn't match values |
-| E0006 | ambiguous-column | correctness | Column reference is ambiguous across tables |
-| E0007 | join-type-mismatch | correctness | JOIN condition compares incompatible types |
-| E0008 | missing-required-column | correctness | INSERT omits a NOT NULL column that has no default |
+| Code | Name | Description |
+|------|------|-------------|
+| [E0001](https://yukikotani231.github.io/sqlsift/docs/rules/E0001.html) | table-not-found | Referenced table does not exist in schema |
+| [E0002](https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html) | column-not-found | Referenced column does not exist in table |
+| [E0003](https://yukikotani231.github.io/sqlsift/docs/rules/E0003.html) | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic, INSERT/UPDATE values, enums) |
+| [E0004](https://yukikotani231.github.io/sqlsift/docs/rules/E0004.html) | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) |
+| [E0005](https://yukikotani231.github.io/sqlsift/docs/rules/E0005.html) | column-count-mismatch | INSERT column count doesn't match values |
+| [E0006](https://yukikotani231.github.io/sqlsift/docs/rules/E0006.html) | ambiguous-column | Column reference is ambiguous across tables |
+| [E0007](https://yukikotani231.github.io/sqlsift/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
+| [E0008](https://yukikotani231.github.io/sqlsift/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
 
-`sqlsift rules` prints this list. Like [oxlint](https://oxc.rs/docs/guide/usage/linter.html), every rule belongs to a category that sets its default level:
+Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments. See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 
-| Category | Default | Meaning |
-|----------|---------|---------|
-| `correctness` | error | The query fails or does something unintended |
-| `suspicious` | warn | The query is most likely wrong |
-| `pedantic` | off | Stricter checks that may have false positives |
-| `style` | off | Conventions and readability |
-| `restriction` | off | Bans on features some codebases don't want |
+## Documentation
 
-Set the level of a rule or a whole category to `off`, `warn` or `error` with `[rules]` / `[categories]` in `sqlsift.toml`, or with `-A` (allow), `-W` (warn) and `-D` (deny) on the command line, using a rule's code or name or a category name. A rule's own level wins over its category's; command line flags win over the config file. Warnings are reported but don't fail `sqlsift check`.
+The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
-```bash
-sqlsift check -W ambiguous-column -A E0008 queries/*.sql
-```
-
-### Inline Suppression
-
-Suppress diagnostics on specific lines using SQL comments:
-
-```sql
--- Suppress a specific rule on the next line
--- sqlsift:disable E0002
-SELECT legacy_col FROM users;
-
--- Suppress on the same line
-SELECT legacy_col FROM users; -- sqlsift:disable E0002
-
--- Suppress multiple rules (codes or names)
-SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, column-not-found
-
--- Suppress all rules on the next line
--- sqlsift:disable
-SELECT bad_col FROM missing_table;
-```
-
-Suppress rules for a whole file with `sqlsift:disable-file` (rules by code or name, comma-separated; all rules when none are listed, including parse errors `E1000`):
-
-```sql
--- sqlsift:disable-file E0006, missing-required-column
-
--- or turn off every rule for this file
--- sqlsift:disable-file
-```
-
-A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it. It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file. To skip files entirely without editing them, use `ignore` in `sqlsift.toml` or `--ignore` (see the configuration file reference).
-
-<details>
-<summary><b>Type inference coverage (E0003, E0007)</b></summary>
-
-**Currently Detected:**
-- ✅ WHERE clause comparisons (`WHERE id = 'text'`)
-- ✅ Arithmetic operations (`SELECT name + 10`)
-- ✅ JOIN conditions (`ON users.id = orders.user_name`)
-- ✅ Set operations column validation (`UNION` / `INTERSECT` / `EXCEPT` column count and type compatibility)
-- ✅ Potential NOT NULL violation checks for explicit `NULL` assignment in `INSERT` / `UPDATE` (`E0004`)
-- ✅ INSERT value type mismatches (`INSERT INTO users (id) VALUES ('text')`)
-- ✅ UPDATE assignment type mismatches (`UPDATE users SET id = 'text'`)
-- ✅ CAST expression type inference (`CAST(name AS INTEGER)`)
-- ✅ Function return type inference (e.g., `COUNT`, `SUM`, `UPPER`, `LENGTH`, `COALESCE`)
-- ✅ Nested expressions (`WHERE (a + b) * 2 = 'text'`)
-- ✅ All comparison operators (=, !=, <, >, <=, >=)
-- ✅ Numeric type compatibility (INTEGER, BIGINT, DECIMAL, etc.)
-- ✅ String literals coerce to the column type like in the database (`created_at > '2024-01-01'`, `status = 'active'`, `id = '42'`), while impossible values are still reported (`id = 'abc'`)
-- ✅ Date/time arithmetic (`now() - interval '7 days'`, `placed_on + 7`, `ts1 - ts2`)
-- ✅ CASE expression branch consistency (`THEN total ELSE 'cheap'`) and result type
-- ✅ Enum values for PostgreSQL enum types and MySQL inline `ENUM(...)` (`status = 'opne'` → "Did you mean 'open'?")
-- ✅ Column types through CTEs, subqueries, views and `CREATE TABLE ... AS` (`WITH t AS (SELECT id FROM users) SELECT * FROM t WHERE id = 'abc'`)
-
-</details>
-
-<details>
-<summary><b>Supported SQL</b></summary>
-
-### Queries
-
-- SELECT, INSERT, UPDATE, DELETE with full column/table validation
-- JOINs (INNER, LEFT, RIGHT, FULL, CROSS, NATURAL) with ON/USING clause validation
-- CTEs (WITH clause) including recursive CTEs
-- Subqueries (WHERE IN/EXISTS, FROM derived tables, scalar subqueries)
-- LATERAL vs non-LATERAL scope isolation
-- UPDATE ... FROM / DELETE ... USING (PostgreSQL extensions)
-- Window functions (OVER, PARTITION BY, FILTER)
-- GROUPING SETS, CUBE, ROLLUP
-- DISTINCT ON, UNION / INTERSECT / EXCEPT
-- ORDER BY with SELECT alias support
-- Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
-- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
-
-### DDL
-
-- `CREATE TABLE` (columns, constraints, primary keys, foreign keys, UNIQUE)
-- `CREATE VIEW` (column inference from SELECT projection)
-- `CREATE TYPE AS ENUM`
-- `ALTER TABLE` (ADD/DROP/RENAME COLUMN, ADD CONSTRAINT, RENAME TABLE)
-- `CHECK` constraints (column-level and table-level)
-- `GENERATED AS IDENTITY` columns (ALWAYS / BY DEFAULT)
-- Resilient parsing — unsupported DDL (functions, triggers, domains, etc.) is gracefully skipped
-- DDL inside a query file (`CREATE [TEMP] TABLE`, `CREATE TABLE ... AS SELECT`, `CREATE VIEW`, `ALTER TABLE`, `DROP`) applies to the later statements of that file only
-
-### Dialects
-
-- **PostgreSQL** (default) — fully supported
-- **MySQL** — supported (`--dialect mysql`)
-- **SQLite** — supported (`--dialect sqlite`)
-
-Use the `--dialect` flag to specify the dialect.
-
-</details>
-
-<details>
-<summary><b>CLI reference</b></summary>
-
-```
-sqlsift check [OPTIONS] <FILES>...
-
-Arguments:
-  <FILES>...                SQL files to validate (supports glob patterns; `-` reads stdin)
-
-Options:
-  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
-      --schema-dir <DIR>    Directory containing schema files
-      --ignore <PATTERN>    Skip query files matching a glob pattern (can be specified multiple times)
-  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
-  -A, --allow <RULE>        Turn a rule or category off (alias: --disable)
-  -W, --warn <RULE>         Report a rule or category as warnings
-  -D, --deny <RULE>         Report a rule or category as errors
-  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
-  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
-      --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
-      --max-warnings <N>    Fail (exit 1) when more than N warnings are reported
-      --stdin-filename <PATH>
-                            File name to report for the query read from stdin (`-`)
-  -v, --verbose             Enable verbose logging to stderr (-vv for debug)
-  -q, --quiet               Suppress summary/non-error output
-  -h, --help                Print help
-```
-
-```
-sqlsift schema [OPTIONS] [FILES]...
-
-Arguments:
-  [FILES]...                Schema definition files (same as --schema)
-
-Options:
-  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
-      --schema-dir <DIR>    Directory containing schema files
-  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
-  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
-  -f, --format <FORMAT>     Output format: human, json [default: human]
-```
-
-`sqlsift rules` lists every rule with its category and default level.
-
-</details>
+- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files)
+- [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
+- [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
+- [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)
 
 ## Roadmap
 

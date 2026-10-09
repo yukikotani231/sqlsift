@@ -1,0 +1,18 @@
+[book]
+title = "sqlsift"
+description = "Check raw SQL queries against your schema, without a database."
+authors = ["yukikotani231"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/yukikotani231/sqlsift"
+edit-url-template = "https://github.com/yukikotani231/sqlsift/edit/main/docs/{path}"
+site-url = "/sqlsift/docs/"
+no-section-label = true
+
+[output.html.playground]
+runnable = false
