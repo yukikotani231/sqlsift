@@ -7,18 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.2)"
-        required: true
+        description: "Release tag (e.g. v0.1.2); ignored in identity mode"
+        required: false
+      identity:
+        description: "Only sign in to the Marketplace and print the identity to add to the publisher's Members"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-vsix:
     name: Build VSIX (${{ matrix.vscode_target }})
     runs-on: ubuntu-latest
     if: >
-      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'workflow_dispatch' && !inputs.identity) ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch != null &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
@@ -60,6 +64,10 @@ jobs:
             TAG="${{ github.event.inputs.tag }}"
           else
             TAG="${{ github.event.workflow_run.head_branch }}"
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "::error::A release tag is required unless identity mode is on"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
@@ -110,10 +118,12 @@ jobs:
           name: vsix-${{ matrix.vscode_target }}
           path: editors/vscode/*.vsix
 
-  publish:
-    name: Publish to Marketplace & GitHub Release
+  release-assets:
+    name: Upload VSIX to GitHub Release
     needs: build-vsix
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Determine release tag
         id: tag
@@ -144,8 +154,47 @@ jobs:
               --repo "${{ github.repository }}"
           done
 
+  # Signs in with GitHub OIDC to a Microsoft Entra ID app (no stored token; global
+  # Azure DevOps PATs are retired on 2026-12-01). See PUBLISHING.md for the setup.
+  marketplace:
+    name: Publish to VS Code Marketplace
+    needs: build-vsix
+    # Run on its own in identity mode, where build-vsix is skipped.
+    if: >
+      always() && vars.PUBLISH_VSCODE == 'true' &&
+      (needs.build-vsix.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.identity))
+    runs-on: ubuntu-latest
+    environment: vscode-marketplace
+    permissions:
+      id-token: write
+    steps:
+      - name: Sign in to Microsoft Entra ID
+        uses: azure/login@053f7285eb20bf5469ef084617b0b24d3cec53fc # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # The id to add to the publisher's Members (Contributor). Only readable while
+      # signed in as the identity; connectionData works for service principals too.
+      - name: Show Marketplace identity
+        run: |
+          az rest -u "https://app.vssps.visualstudio.com/_apis/connectionData" \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query "authenticatedUser.{id: id, name: providerDisplayName}"
+
+      - name: Verify publish rights
+        run: npx -y @vscode/vsce@3 verify-pat --azure-credential sqlsift
+
+      - name: Download all VSIX artifacts
+        if: needs.build-vsix.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vsix-*
+          path: vsix/
+          merge-multiple: true
+
       - name: Publish to VS Code Marketplace
-        if: vars.PUBLISH_VSCODE == 'true'
-        run: npx @vscode/vsce publish --packagePath vsix/*.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        if: needs.build-vsix.result == 'success'
+        run: npx -y @vscode/vsce@3 publish --azure-credential --skip-duplicate --packagePath vsix/*.vsix

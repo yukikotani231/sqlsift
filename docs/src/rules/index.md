@@ -2,6 +2,8 @@
 
 Every rule has a code, a name and a category. All current rules are in the `correctness` category and are errors by default. See [Rules and levels](../guide/rules.md) to change their levels and [Suppressing diagnostics](../guide/suppression.md) for exceptions.
 
+The `E` in a rule code is sqlsift's prefix, not a severity: a rule's level comes from its category and your configuration, so a warning can carry an `E` code too. Codes are assigned in order as rules are added and never change or get reused, so they are safe to keep in config files, suppression comments and baselines. Names are easier to read in config and comments; codes are shorter.
+
 The examples on these pages use this schema:
 
 ```sql
