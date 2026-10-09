@@ -208,7 +208,7 @@ The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 - [x] SQL embedded in application code (sqlc query names and parameters, TypeScript tagged templates)
 
 #### Planned
-- [ ] Custom rule plugins
+See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## Contributing
 

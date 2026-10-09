@@ -108,7 +108,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ### Adding a New Diagnostic Rule
 
-1. Add variant to `DiagnosticKind` in `error.rs` and its entry (code, name, category, summary) to `RULES` in `rules.rs`, in the same position (the registry is indexed by the variant)
+1. Add variant to `DiagnosticKind` in `error.rs` and its entry (code, name, category, summary) to `RULES` in `rules.rs`, in the same position (the registry is indexed by the variant). Give it the next free `E00xx` code: the `E` is a prefix, not a severity, and a code is never changed or reused once released
 2. Pick the category by how sure the rule is: `correctness` (definitely wrong, default error), `suspicious` (likely wrong, default warn), `pedantic` / `style` / `restriction` (opt-in)
 3. Implement detection logic in `analyzer/resolver.rs` (names) or `analyzer/type_check.rs` (types); look names up through `Scope`, never by walking FROM clauses yourself
 4. Add test cases (`crates/sqlsift-core/tests/`), the rule to the README rule table and a rule page in `docs/src/rules/` (user guide, mdBook)
