@@ -115,9 +115,26 @@ error[E0002]: Column 'titel' not found in table 'posts'
 
 A statement belongs to the last `-- name: <Name> :<command>` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
 
+sqlc's named parameters are untyped placeholders, like `$1`:
+
+```sql
+-- name: ListPosts :many
+SELECT id, title FROM posts
+WHERE id > @after_id AND author_id = sqlc.arg(author_id)
+  AND (title = sqlc.narg('title') OR sqlc.narg('title') IS NULL)
+LIMIT @page_size;
+
+-- name: GetPostsByIDs :many
+SELECT id, title FROM posts WHERE id IN (sqlc.slice(ids));
+```
+
+- `sqlc.arg(name)`, `sqlc.narg(name)` and `sqlc.slice(name)` (with the name bare or quoted) are placeholders in every dialect.
+- `@name` is a placeholder with the PostgreSQL dialect only. PostgreSQL's `@` operators are left alone: `@>`, `<@`, `@@`, and `@` followed by a space (absolute value). With MySQL, `@name` stays a user variable (`SET @x = 1`), and with SQLite a bind parameter; sqlc supports `@name` for neither, so use `sqlc.arg(name)` there.
+- Parameters in string literals, quoted identifiers and comments are left alone.
+
 ## SQL in TypeScript and JavaScript
 
-Files ending in `.ts`, `.tsx`, `.js`, `.jsx`, `.mts` or `.cts` are checked for SQL in tagged template literals, as used by postgres.js, Slonik, `@vercel/postgres`, Prisma and others:
+Files ending in `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs` or `.cjs` are checked for SQL in tagged template literals, as used by postgres.js, Slonik, kysely, `@vercel/postgres`, Prisma and others. In Vue (`.vue`) and Svelte (`.svelte`) components, the `<script>` blocks are checked the same way:
 
 ```ts
 const posts = await sql`
@@ -129,20 +146,46 @@ const posts = await sql`
 sqlsift check -s schema.sql 'src/**/*.ts'
 ```
 
-Diagnostics point at the query's line and column in the source file. Which templates are SQL is decided by their tag: `embedded_sql_tags` in `sqlsift.toml` lists the tags (default `["sql"]`), and a tag matches the last identifier of the tag expression, so `"sql"` also matches `db.sql` and `Prisma.sql`, and `"$queryRaw"` matches `prisma.$queryRaw<User[]>`:
+Diagnostics point at the query's line and column in the source file. When a glob pattern matches TypeScript or JavaScript files in `node_modules`, `dist`, `build`, `.next`, `.nuxt` or `.svelte-kit` directories (installed packages and build output), they are skipped; name such a file, or start the pattern in such a directory (`'dist/**/*.js'`), to check it anyway.
+
+### Tags
+
+Which templates are SQL is decided by their tag: `embedded_sql_tags` in `sqlsift.toml` lists the tags (default `["sql"]`). The tag expression may be a chain of member accesses and calls, and matches when its last or its first identifier is one of the tags:
+
+| Tag expression | Matches `"sql"` because of |
+|---|---|
+| `` sql`...` ``, `` db.sql`...` ``, `` Prisma.sql`...` `` | the last identifier |
+| `` sql.unsafe`...` ``, `` sql.type(schema)`...` ``, `` sql.typeAlias('id')`...` `` (Slonik) | the first identifier |
+
+Type arguments are skipped (`` sql<boolean>`...` ``, `` prisma.$queryRaw<User[]>`...` ``). Tags per library:
+
+| Library | `embedded_sql_tags` |
+|---|---|
+| postgres.js, Slonik, kysely, `@vercel/postgres`, `sql-template-strings` | `["sql"]` (the default) |
+| Prisma | `["$queryRaw", "$executeRaw"]` (and `"sql"` for `Prisma.sql` fragments) |
 
 ```toml
 embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]
 ```
 
-Each template is checked as one statement:
+### Statements and fragments
+
+A template is checked only when it starts with a statement keyword (`SELECT`, `WITH`, `INSERT`, `UPDATE`, `DELETE`, `VALUES`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `MERGE`, ..., after comments and opening parentheses). Other templates written with the same tag are query fragments, such as kysely's `` sql`published = ${x}` ``, `` Prisma.sql`WHERE id > ${minId}` `` or `` sql`AND published` ``, and are skipped. (A misspelled statement keyword, as in `` sql`SELEC id FROM posts` ``, is still checked and reported as a syntax error.)
+
+Each checked template is one statement:
 
 - `${expr}` is an untyped placeholder, like `$1` (`?` for MySQL and SQLite), or a parenthesized list after `IN`.
 - `${expr}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE` or `TABLE`) is a name sqlsift can't know, so no "not found" diagnostic is reported for it, as for psql's `:"var"`.
-- Templates inside another SQL template's `${...}` are taken as query fragments and not checked on their own. A tag that is used for fragments (e.g. `sql` for `` sql`AND published` ``) reports them as parse errors; give fragments a different tag, or skip the file with `ignore`.
+- `${expr}` after a value or a name is a fragment between clauses, and is left out: `` WHERE a = ${a} ${cond ? sql`AND b` : sql``} ORDER BY id ``, or Prisma's `` SELECT id FROM users ${where} ``.
+- postgres.js helpers are rows and columns sqlsift can't know: `` INSERT INTO users ${sql(user, 'name')} ``, `` INSERT INTO posts (a, b) VALUES ${sql(rows)} `` and `` UPDATE users SET ${sql(patch)} WHERE ... `` are checked without their column lists.
+- Templates inside another SQL template's `${...}` are fragments and are not checked on their own.
 - SQL built by string concatenation, and untagged templates, are not checked.
 
-`--stdin-filename` with a TypeScript or JavaScript extension checks stdin the same way. Inline `-- sqlsift:disable` comments work inside the template.
+`--stdin-filename` with a TypeScript, JavaScript, Vue or Svelte extension checks stdin the same way.
+
+### Directives
+
+[Suppression comments](suppression.md) work as code comments (`// sqlsift:disable-file`, `/* sqlsift:disable E0002 */`) and as SQL comments inside a template. A `sqlsift:disable` comment on a line of its own applies to the next line of SQL (for a template starting on the next line, its first line of SQL); after a query, it applies to that line. A block comment followed by code on the same line is ignored. A `sqlsift:disable-file` comment applies to the whole file, also when it is written inside one of its templates.
 
 ## Exit codes
 

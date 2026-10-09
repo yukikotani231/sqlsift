@@ -17,7 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
-use crate::sqlc::QueryNames;
+use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Templating};
 
 use comment_directives::InlineDirectives;
@@ -164,7 +164,38 @@ impl<'a> Analyzer<'a> {
     /// ```
     pub fn analyze_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Vec<Diagnostic> {
         let (source, bom) = strip_bom(source);
-        let extracted = crate::embedded::extract(source, tags, self.dialect);
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Script);
+        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        shift_offsets(&mut diagnostics, bom);
+        diagnostics
+    }
+
+    /// Analyze the SQL in the `<script>` blocks of a Vue or Svelte component, as
+    /// [`Analyzer::analyze_embedded`] does for a TypeScript or JavaScript file
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = "<script setup>\nconst u = await sql`SELECT nme FROM users`;\n</script>\n<p>`sql`</p>";
+    /// let diagnostics = Analyzer::new(&catalog).analyze_embedded_component(source, &["sql"]);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// ```
+    pub fn analyze_embedded_component<S: AsRef<str>>(
+        &mut self,
+        source: &str,
+        tags: &[S],
+    ) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
+        let extracted =
+            crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Component);
         let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
         shift_offsets(&mut diagnostics, bom);
         diagnostics
@@ -196,10 +227,12 @@ impl<'a> Analyzer<'a> {
             SqlDialect::PostgreSQL => psql::preprocess(&template.text),
             SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
         };
+        // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
+        let text = sqlc::mask_parameters(&source.text, self.dialect);
 
         // Parse the SQL
-        let lines = LineIndex::new(&source.text);
-        let statements = self.parse_statements(&source.text, &lines);
+        let lines = LineIndex::new(&text);
+        let statements = self.parse_statements(&text, &lines);
 
         // Tables, views and types created, altered or dropped by the file's own
         // statements, applied to a copy of the catalog made on the first such
