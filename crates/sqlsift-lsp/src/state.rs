@@ -7,6 +7,7 @@ use tower_lsp::lsp_types::{self, Url};
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
+use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::config::Config;
@@ -135,7 +136,7 @@ impl ServerState {
         for schema_file in &self.schema_files {
             match std::fs::read_to_string(schema_file) {
                 Ok(content) => {
-                    if let Err(diags) = builder.parse(&content) {
+                    if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
                         for d in diags {
                             errors.push(format!("{}: {}", schema_file.display(), d.message));
                         }
@@ -157,12 +158,16 @@ impl ServerState {
         errors
     }
 
-    /// Analyze a SQL document and return diagnostics
+    /// Analyze a SQL document and return diagnostics. The analysis runs on a
+    /// thread with a large stack, so a very long expression can't overflow the
+    /// server's stack.
     pub fn analyze_document(&self, text: &str) -> Vec<Diagnostic> {
-        let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
-            .with_rules(self.rules.clone())
-            .with_templating(self.templating);
-        analyzer.analyze(text)
+        with_analysis_stack(|| {
+            let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
+                .with_rules(self.rules.clone())
+                .with_templating(self.templating);
+            analyzer.analyze(text)
+        })
     }
 
     /// Diagnostics to show for the document at `uri`: none for ignored files

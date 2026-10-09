@@ -3423,3 +3423,73 @@ fn stdin_filename_extension_selects_typescript() {
         .assert_code(1)
         .assert_stderr_contains("E1000");
 }
+
+// ---------------------------------------------------------------------------
+// Robustness: long operator chains and byte order marks (#116)
+// ---------------------------------------------------------------------------
+
+/// `SELECT id FROM users WHERE id = 0 OR id = 1 OR ...` with `terms` terms
+fn long_or_query(terms: usize) -> String {
+    let filter: Vec<String> = (0..terms).map(|i| format!("id = {i}")).collect();
+    format!("SELECT id FROM users WHERE {};\n", filter.join(" OR "))
+}
+
+#[test]
+fn long_or_chains_in_several_files_do_not_overflow_the_stack() {
+    let t = with_users_schema("long-or-multi");
+    let query = long_or_query(3000);
+    for name in ["a.sql", "b.sql", "c.sql"] {
+        t.write(name, &query);
+    }
+    t.write("d.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "a.sql",
+        "b.sql",
+        "c.sql",
+        "d.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("Column 'nme' not found");
+}
+
+#[test]
+fn very_long_or_chain_in_one_file_does_not_overflow_the_stack() {
+    let t = with_users_schema("long-or-single");
+    t.write("q.sql", &long_or_query(20_000));
+    t.run(&["check", "-s", "schema.sql", "q.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("All 1 file(s) passed validation");
+}
+
+#[test]
+fn byte_order_mark_is_ignored_in_query_and_schema_files() {
+    let t = TempDir::new("bom");
+    t.write("schema.sql", &format!("\u{feff}{USERS_SCHEMA}"));
+    t.write("ok.sql", "\u{feff}SELECT 1;\n");
+    t.write("bad.sql", "\u{feff}SELECT nme FROM users;\n");
+    t.run(&["check", "-s", "schema.sql", "ok.sql"])
+        .assert_code(0);
+    let run = t.run(&["check", "-s", "schema.sql", "--format", "json", "bad.sql"]);
+    run.assert_code(1);
+    let v = run.json();
+    assert_eq!(diag_codes(&v), ["ColumnNotFound"]);
+    // The column is the one an editor shows (the BOM is invisible)
+    let span = &v["files"][0]["diagnostics"][0]["span"];
+    assert_eq!(span["line"], 1);
+    assert_eq!(span["column"], 8);
+    // Human output shows the source line without an E1000
+    t.run(&["check", "-s", "schema.sql", "bad.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("bad.sql:1:8")
+        .assert_stderr_lacks("E1000");
+}
+
+#[test]
+fn byte_order_mark_is_ignored_on_stdin() {
+    let t = with_users_schema("bom-stdin");
+    t.run_stdin(&["check", "-s", "schema.sql", "-"], "\u{feff}SELECT 1;\n")
+        .assert_code(0);
+}

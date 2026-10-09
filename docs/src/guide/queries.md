@@ -32,6 +32,12 @@ git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queri
 
 This is how editors and [pre-commit hooks](../integrations/pre-commit.md) can check content that isn't saved on disk.
 
+## File encoding
+
+Query and schema files are read as UTF-8. A byte order mark at the start of a file (written by many Windows editors, SSMS and DBeaver exports) is ignored, both in files and on stdin. Columns in diagnostics don't count it, matching what an editor shows.
+
+Very long expressions, such as generated `WHERE id = 1 OR id = 2 OR ...` filters with tens of thousands of terms, are fine: analysis runs with a large stack.
+
 ## What a query can see
 
 sqlsift follows SQL's visibility rules rather than just matching names:

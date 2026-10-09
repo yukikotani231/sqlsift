@@ -387,6 +387,46 @@ fn table_not_found_range() {
 }
 
 #[test]
+fn byte_order_mark_is_ignored_and_ranges_count_it() {
+    let t = TempDir::new("bom");
+    t.write("schema.sql", &format!("\u{feff}{USERS_SCHEMA}"));
+    t.write("sqlsift.toml", "schema = [\"schema.sql\"]\n");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    lsp.open(&uri, "\u{feff}SELECT nme FROM users;");
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diags), ["E0002"], "{diags:#?}");
+    // LSP positions count the BOM (one UTF-16 unit) as part of the document
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 0, "character": 8})
+    );
+    assert_eq!(
+        diags[0]["range"]["end"],
+        json!({"line": 0, "character": 11})
+    );
+}
+
+#[test]
+fn very_long_or_chain_does_not_crash_the_server() {
+    let t = workspace("long-or", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let filter: Vec<String> = (0..100_000).map(|i| format!("id = {i}")).collect();
+    lsp.open(
+        &uri,
+        &format!("SELECT id FROM users WHERE {};", filter.join(" OR ")),
+    );
+    assert!(lsp.diagnostics_for(&uri).is_empty());
+    // Still serving
+    let other = t.uri("other.sql");
+    lsp.open(&other, "SELECT nme FROM users;");
+    assert_eq!(codes(&lsp.diagnostics_for(&other)), ["E0002"]);
+}
+
+#[test]
 fn valid_document_publishes_empty_diagnostics() {
     let t = workspace("open-valid", "");
     let mut lsp = Lsp::spawn();
