@@ -5,7 +5,7 @@
 | Dialect | Flag | Notes |
 |---------|------|-------|
 | PostgreSQL | default, `--dialect postgresql` | Most complete: enums, `DISTINCT ON`, `LATERAL`, JSON operators, psql scripts |
-| MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`; booleans are integers |
+| MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`, `mysqldump` files, `INSERT ... SET`, index hints ([details](queries.md#mysql-syntax)); booleans are integers |
 | SQLite | `--dialect sqlite` | SQLite's loose typing: booleans are integers |
 
 Set it once in `sqlsift.toml` with `dialect = "mysql"`.

@@ -106,7 +106,8 @@ impl SchemaBuilder {
         // psql meta-commands in dumps and scripts (`\connect`, `\restrict`, `\i`, ...)
         let source = match self.dialect {
             SqlDialect::PostgreSQL => psql::preprocess(sql),
-            SqlDialect::MySQL | SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
+            SqlDialect::MySQL => crate::mysql::preprocess(sql),
+            SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
         };
         let sql: &str = &source.text;
 
@@ -166,11 +167,30 @@ impl SchemaBuilder {
         err: &ParserError,
     ) {
         let parser_dialect = self.dialect.parser_dialect();
-        let Ok(tokens) = Tokenizer::new(parser_dialect.as_ref(), stmt)
-            .with_unescape(false)
-            .tokenize_with_location()
-        else {
-            return;
+        let tokenize = |text: &str| {
+            Tokenizer::new(parser_dialect.as_ref(), text)
+                .with_unescape(false)
+                .tokenize_with_location()
+        };
+        // If the statement can't be tokenized, the text before the error still tells
+        // what it defines (so a skipped definition is reported)
+        let mut text = stmt;
+        let tokens = loop {
+            match tokenize(text) {
+                Ok(tokens) => break tokens,
+                Err(error) => {
+                    let end = byte_offset_of(
+                        text,
+                        usize::try_from(error.location.line).unwrap_or(0),
+                        usize::try_from(error.location.column).unwrap_or(0),
+                    )
+                    .unwrap_or(0);
+                    if end == 0 || end >= text.len() {
+                        return;
+                    }
+                    text = &text[..end];
+                }
+            }
         };
         let significant: Vec<_> = tokens
             .iter()
