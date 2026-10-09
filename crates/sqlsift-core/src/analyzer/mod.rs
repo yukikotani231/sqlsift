@@ -17,7 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
-use crate::sqlc::QueryNames;
+use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Templating};
 
 use comment_directives::InlineDirectives;
@@ -190,10 +190,12 @@ impl<'a> Analyzer<'a> {
             SqlDialect::PostgreSQL => psql::preprocess(&template.text),
             SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
         };
+        // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
+        let text = sqlc::mask_parameters(&source.text, self.dialect);
 
         // Parse the SQL
-        let lines = LineIndex::new(&source.text);
-        let statements = self.parse_statements(&source.text, &lines);
+        let lines = LineIndex::new(&text);
+        let statements = self.parse_statements(&text, &lines);
 
         // Tables, views and types created, altered or dropped by the file's own
         // statements, applied to a copy of the catalog made on the first such
