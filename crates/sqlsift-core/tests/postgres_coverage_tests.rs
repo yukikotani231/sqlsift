@@ -114,6 +114,23 @@ fn analyze(catalog: &Catalog, sql: &str) -> Vec<Diagnostic> {
     Analyzer::new(catalog).analyze(sql)
 }
 
+#[test]
+fn postgres_maintenance_statements_are_skipped_after_parse_failures() {
+    let catalog = catalog();
+    let sql = "-- leading comment\nanalyze events;\nVACUUM ANALYZE events;\n\
+        refresh materialized view concurrently mv;\n\
+        DO $$ BEGIN RAISE NOTICE 'inside; block'; END $$;\n\
+        SELECT bogus FROM events;";
+
+    let diags = analyze(&catalog, sql);
+    assert_eq!(diags.len(), 1, "{}", fmt_diags(&diags));
+    assert_eq!(diags[0].kind, DiagnosticKind::ColumnNotFound);
+
+    let parse_error = analyze(&catalog, "SELEC bogus FROM events;");
+    assert_eq!(parse_error.len(), 1, "{}", fmt_diags(&parse_error));
+    assert_eq!(parse_error[0].kind, DiagnosticKind::ParseError);
+}
+
 fn fmt_diags(diags: &[Diagnostic]) -> String {
     diags
         .iter()
