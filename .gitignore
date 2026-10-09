@@ -8,3 +8,7 @@ editors/vscode/*.vsix
 
 # Playground build output (scripts/build-playground.sh)
 /site/pkg
+
+# User guide build output (mdbook build docs)
+/docs/book
+/site/docs

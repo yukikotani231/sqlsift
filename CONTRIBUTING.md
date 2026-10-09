@@ -54,6 +54,7 @@ cargo test --all-targets
 | `crates/sqlsift-wasm` | WebAssembly bindings for the playground |
 | `editors/vscode` | VS Code extension (LSP client) |
 | `site` | Browser playground, deployed to GitHub Pages |
+| `docs` | User guide ([mdBook](https://rust-lang.github.io/mdBook/)), deployed to GitHub Pages under `/docs/` |
 | `tests/fixtures` | SQL fixtures, including real-world schemas (Chinook, Pagila, Northwind) |
 
 The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) and turned into an in-memory `Catalog` by `SchemaBuilder`; each query is then walked once by the `Resolver`, which resolves names through `Scope` and infers types, emitting diagnostics. [`CLAUDE.md`](CLAUDE.md) has a more detailed architecture overview and the current list of limitations.
@@ -71,11 +72,11 @@ The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/da
 1. Add a variant to `DiagnosticKind` in `crates/sqlsift-core/src/error.rs`, and its entry (code, name, category, summary) to `RULES` in `rules.rs` in the same position.
 2. Pick the category by how sure the rule is: `correctness` (definitely wrong, error by default), `suspicious` (likely wrong, warning by default), or `pedantic` / `style` / `restriction` (opt-in).
 3. Implement detection in `analyzer/resolver.rs` or `analyzer/type_check.rs`. Look names up through `Scope` rather than walking FROM clauses yourself.
-4. Add tests and add the rule to the rule table in the README.
+4. Add tests, add the rule to the rule table in the README and `docs/src/rules/index.md`, and add a page for it in `docs/src/rules/` (listed in `docs/src/SUMMARY.md`).
 
 ### Adding a CLI or config option
 
-Add the flag in `crates/sqlsift-cli/src/args.rs`, the matching field in `config.rs` (with `#[serde(default)]` and an entry in `KNOWN_KEYS`), merge it in `Config::merge_with_args()`, and document it in the sample `sqlsift.toml` and the README.
+Add the flag in `crates/sqlsift-cli/src/args.rs`, the matching field in `config.rs` (with `#[serde(default)]` and an entry in `KNOWN_KEYS`), merge it in `Config::merge_with_args()`, and document it in the sample `sqlsift.toml` and the user guide (`docs/src/reference/`).
 
 ### Working on the VS Code extension
 
@@ -86,6 +87,10 @@ cd editors/vscode && npm ci && npm run compile
 
 Then open `editors/vscode` in VS Code and press F5 to launch an Extension Development Host.
 
+### Working on the user guide
+
+The guide is an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`. Install it with `cargo install mdbook` and run `mdbook serve docs --open` to preview changes as you edit.
+
 ### Working on the playground
 
 `scripts/build-playground.sh` builds the wasm bundle into `site/` (it needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli`). Serve `site/` with any static file server to try it locally.
@@ -94,7 +99,7 @@ Then open `editors/vscode` in VS Code and press F5 to launch an Extension Develo
 
 - Keep each PR focused on one change, with tests for user-visible behavior.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`; add `!` for breaking changes). Releases and the changelog are generated from them by [release-plz](https://release-plz.dev/), so don't edit version numbers or `CHANGELOG.md` by hand.
-- Update the README or the sample `sqlsift.toml` when behavior or options change.
+- Update the user guide in `docs/` (and the README or the sample `sqlsift.toml` where relevant) when behavior or options change.
 
 ## License
 
