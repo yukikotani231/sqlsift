@@ -258,7 +258,7 @@ fn quoted_identifier_unknown_column_suggests_quoted_name() {
     let c = catalog(r#"CREATE TABLE "Users" ("Id" int, "firstName" text);"#);
     let d = single(&c, r#"SELECT "lastName" FROM "Users""#);
     assert_eq!(d.kind, DiagnosticKind::ColumnNotFound);
-    assert_eq!(d.message, "Column 'lastName' not found");
+    assert_eq!(d.message, "Column 'lastName' not found in table 'Users'");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'firstName'?"));
     // Span covers the quoted identifier including its quotes.
     assert_eq!(loc(&d), (1, 8, 10));
@@ -313,7 +313,7 @@ fn schema_qualified_table_queries() {
     assert_clean(&c, "SELECT a.id FROM app.accounts a WHERE a.owner = 'x'");
     assert_clean(&c, "SELECT accounts.id FROM app.accounts");
     let d = single(&c, "SELECT nope FROM app.accounts");
-    assert_eq!(d.message, "Column 'nope' not found");
+    assert_eq!(d.message, "Column 'nope' not found in table 'app.accounts'");
 }
 
 #[test]
@@ -889,7 +889,7 @@ fn alter_multiple_operations_in_one_statement() {
     assert_eq!(table(&c, "u").column_names(), vec!["id", "b", "c"]);
     assert_clean(&c, "SELECT b, c FROM u");
     let d = single(&c, "SELECT a FROM u");
-    assert_eq!(d.message, "Column 'a' not found");
+    assert_eq!(d.message, "Column 'a' not found in table 'u'");
 }
 
 #[test]
@@ -931,7 +931,10 @@ fn alter_rename_column_old_name_is_error_with_suggestion() {
     assert_clean(&c, "SELECT uid FROM u");
     let d = single(&c, "SELECT id FROM u");
     assert_eq!(d.kind, DiagnosticKind::ColumnNotFound);
-    assert_eq!(d.help.as_deref(), Some("Did you mean 'uid'?"));
+    assert_eq!(
+        d.help.as_deref(),
+        Some("'id' was renamed to 'uid' by ALTER TABLE in the schema")
+    );
 }
 
 #[test]
@@ -1187,7 +1190,7 @@ fn view_column_inference_with_aliases_and_expressions() {
     assert_eq!(view_columns(&c, "v"), vec!["user_id", "nx", "n"]);
     assert_clean(&c, "SELECT user_id, nx, n FROM v");
     let d = single(&c, "SELECT id FROM v");
-    assert_eq!(d.message, "Column 'id' not found");
+    assert_eq!(d.message, "Column 'id' not found in view 'v'");
 }
 
 #[test]
@@ -1644,7 +1647,10 @@ fn e0001_message_help_and_span() {
     let diags = analyze(&c, "SELECT 1 FROM zzzzzz");
     assert_eq!(
         diags[0].help.as_deref(),
-        Some("Check that the table exists in your schema definition")
+        Some(
+            "Check that the table exists in your schema definition; \
+             run `sqlsift schema <schema files>` to list the tables that were loaded"
+        )
     );
     assert_eq!(loc(d), (1, 15, 5));
 }
@@ -1714,7 +1720,7 @@ fn e0002_message_help_and_span() {
     let d = single(&c, "SELECT naem FROM users");
     assert_eq!(d.code(), "E0002");
     assert_eq!(d.kind.name(), "column-not-found");
-    assert_eq!(d.message, "Column 'naem' not found");
+    assert_eq!(d.message, "Column 'naem' not found in table 'users'");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'name'?"));
     assert_eq!(loc(&d), (1, 8, 4));
 }
@@ -1732,7 +1738,10 @@ fn e0002_qualified_message_includes_table() {
 fn e0002_without_close_match_has_no_help() {
     let c = diag_catalog();
     let d = single(&c, "SELECT completely_unrelated FROM users");
-    assert_eq!(d.message, "Column 'completely_unrelated' not found");
+    assert_eq!(
+        d.message,
+        "Column 'completely_unrelated' not found in table 'users'"
+    );
     assert!(d.help.is_none(), "unexpected help: {:?}", d.help);
 }
 
@@ -1760,7 +1769,7 @@ fn e0002_span_second_statement() {
 fn e0002_span_in_where_on_third_line() {
     let c = diag_catalog();
     let d = single(&c, "SELECT id\nFROM users\nWHERE nme = 'x'");
-    assert_eq!(d.message, "Column 'nme' not found");
+    assert_eq!(d.message, "Column 'nme' not found in table 'users'");
     assert_eq!(loc(&d), (3, 7, 3));
 }
 
@@ -1811,7 +1820,7 @@ fn e0002_multibyte_identifier_length_in_chars() {
     let c = diag_catalog();
     let diags = analyze(&c, "SELECT \"名前\" FROM users");
     assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0].message, "Column '名前' not found");
+    assert_eq!(diags[0].message, "Column '名前' not found in table 'users'");
     // Two chars + two quotes.
     assert_eq!(loc(&diags[0]), (1, 8, 4));
 }
@@ -2300,7 +2309,7 @@ fn suppress_same_line_only_affects_that_line() {
         &c,
         "SELECT\n  naem, -- sqlsift:disable E0002\n  emial\nFROM users",
     );
-    assert_eq!(d.message, "Column 'emial' not found");
+    assert_eq!(d.message, "Column 'emial' not found in table 'users'");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'email'?"));
     assert_eq!(loc(&d), (3, 3, 5));
 }

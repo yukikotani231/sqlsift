@@ -266,6 +266,35 @@ fn invalid_query_exits_one_with_error_summary() {
 }
 
 #[test]
+fn tables_created_in_a_query_file_are_local_to_that_file() {
+    let t = with_users_schema("file-local-tables");
+    t.write(
+        "a.sql",
+        "CREATE TEMP TABLE tmp_names AS SELECT id, name FROM users;\n\
+         SELECT name FROM tmp_names;\n\
+         SELECT nmae FROM tmp_names;\n\
+         DROP TABLE tmp_names;\n",
+    );
+    t.write("b.sql", "SELECT name FROM tmp_names;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "a.sql", "b.sql"]);
+    run.assert_code(1);
+    let v = run.json();
+    let files = v["files"].as_array().expect("files array");
+    let codes_of = |name: &str| -> Vec<String> {
+        files
+            .iter()
+            .filter(|f| f["file"] == name)
+            .flat_map(|f| f["diagnostics"].as_array().expect("diagnostics").clone())
+            .map(|d| d["kind"].as_str().expect("kind").to_string())
+            .collect()
+    };
+    // The typo against the temp table is reported, the table itself is found
+    assert_eq!(codes_of("a.sql"), vec!["ColumnNotFound"]);
+    // The temp table isn't visible in other files
+    assert_eq!(codes_of("b.sql"), vec!["TableNotFound"]);
+}
+
+#[test]
 fn short_schema_flag_is_accepted() {
     let t = with_users_schema("short-s");
     t.write("q.sql", "SELECT id FROM users;\n");
@@ -683,7 +712,204 @@ fn schema_subcommand_prints_tables_and_columns() {
 #[test]
 fn schema_subcommand_requires_files() {
     let t = TempDir::new("schema-cmd-none");
-    t.run(&["schema"]).assert_code(2);
+    let run = t.run(&["schema"]);
+    run.assert_code(2);
+    if temp_root_is_config_free(&t) {
+        run.assert_stderr_contains("No schema files specified");
+    }
+}
+
+const RICH_SCHEMA: &str = "\
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, feeling mood);
+CREATE VIEW user_names AS SELECT id, name FROM users;
+CREATE MATERIALIZED VIEW user_count AS SELECT COUNT(*) AS n FROM users;
+CREATE TABLE audit.events (id BIGINT NOT NULL, user_id INTEGER REFERENCES users (id));
+";
+
+#[test]
+fn schema_subcommand_accepts_schema_flag() {
+    let t = TempDir::new("schema-cmd-flag");
+    t.write("a.sql", USERS_SCHEMA);
+    t.write("b.sql", ORDERS_SCHEMA);
+    t.run(&["schema", "-s", "a.sql", "--schema", "b.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("Table: orders");
+}
+
+#[test]
+fn schema_subcommand_accepts_schema_dir() {
+    let t = TempDir::new("schema-cmd-dir");
+    t.write("migrations/001_users.sql", USERS_SCHEMA);
+    t.write("migrations/002_orders.sql", ORDERS_SCHEMA);
+    t.write(
+        "migrations/003_alter.sql",
+        "ALTER TABLE users ADD COLUMN email TEXT;\n",
+    );
+    let run = t.run(&["schema", "--schema-dir", "migrations"]);
+    run.assert_code(0)
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("Table: orders")
+        .assert_stdout_contains("- email text");
+}
+
+#[test]
+fn schema_subcommand_missing_schema_dir_exits_two() {
+    let t = TempDir::new("schema-cmd-dir-missing");
+    t.run(&["schema", "--schema-dir", "nope"])
+        .assert_code(2)
+        .assert_stderr_contains("Schema directory not found");
+}
+
+#[test]
+fn schema_subcommand_falls_back_to_config() {
+    let t = TempDir::new("schema-cmd-config");
+    t.write("db/migrations/001.sql", USERS_SCHEMA);
+    t.write("sqlsift.toml", "schema_dir = \"db/migrations\"\n");
+    t.run(&["schema"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users");
+
+    // From a subdirectory, the config is discovered and paths stay relative to it
+    let sub = t.mkdir("src/queries");
+    t.run_in(&sub, &["schema"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: users");
+}
+
+#[test]
+fn schema_subcommand_explicit_config_path() {
+    let t = TempDir::new("schema-cmd-config-path");
+    t.write("conf/schema.sql", ORDERS_SCHEMA);
+    t.write(
+        "conf/custom.toml",
+        "schema = [\"schema.sql\"]\ndialect = \"postgresql\"\n",
+    );
+    t.run(&["schema", "-c", "conf/custom.toml"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: orders");
+}
+
+#[test]
+fn schema_subcommand_cli_overrides_config() {
+    let t = TempDir::new("schema-cmd-override");
+    t.write("a.sql", USERS_SCHEMA);
+    t.write("b.sql", ORDERS_SCHEMA);
+    t.write("sqlsift.toml", "schema = [\"a.sql\"]\n");
+    let run = t.run(&["schema", "b.sql"]);
+    run.assert_code(0).assert_stdout_contains("Table: orders");
+    assert!(
+        !run.stdout.contains("Table: users"),
+        "positional files should replace config schema\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn schema_subcommand_respects_dialect() {
+    let t = TempDir::new("schema-cmd-dialect");
+    t.write(
+        "schema.sql",
+        "CREATE TABLE `items` (`id` INT NOT NULL AUTO_INCREMENT, `kind` ENUM('a', 'b'), PRIMARY KEY (`id`));\n",
+    );
+    t.run(&["schema", "-d", "mysql", "-s", "schema.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("Table: items")
+        .assert_stdout_contains("- kind enum('a', 'b')");
+    t.run(&["schema", "-d", "oracle", "-s", "schema.sql"])
+        .assert_code(2);
+}
+
+#[test]
+fn schema_subcommand_shows_views_enums_and_schemas() {
+    let t = TempDir::new("schema-cmd-rich");
+    t.write("schema.sql", RICH_SCHEMA);
+    let run = t.run(&["schema", "-s", "schema.sql"]);
+    run.assert_code(0)
+        .assert_stdout_contains("Schema: public")
+        .assert_stdout_contains("Schema: audit")
+        .assert_stdout_contains("Table: users")
+        .assert_stdout_contains("- id integer NOT NULL PRIMARY KEY")
+        .assert_stdout_contains("- feeling mood NULL")
+        .assert_stdout_contains("View: user_names")
+        .assert_stdout_contains("Materialized view: user_count")
+        .assert_stdout_contains("- n bigint")
+        .assert_stdout_contains("Table: events")
+        .assert_stdout_contains("Enum types:")
+        .assert_stdout_contains("mood: 'sad', 'ok', 'happy'");
+
+    // Output is deterministic and follows definition order
+    let again = t.run(&["schema", "-s", "schema.sql"]);
+    assert_eq!(run.stdout, again.stdout);
+    let users = run.stdout.find("Table: users").unwrap();
+    let view = run.stdout.find("View: user_names").unwrap();
+    assert!(
+        users < view,
+        "tables are listed before views\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn schema_subcommand_json_output() {
+    let t = TempDir::new("schema-cmd-json");
+    t.write("schema.sql", RICH_SCHEMA);
+    let run = t.run(&["schema", "--format", "json", "-s", "schema.sql"]);
+    run.assert_code(0);
+    let json = run.json();
+
+    assert_eq!(json["dialect"], "postgresql");
+    assert_eq!(json["default_schema"], "public");
+    assert_eq!(json["schema_files"][0], "schema.sql");
+
+    let schemas = json["schemas"].as_array().expect("schemas array");
+    let names: Vec<_> = schemas
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["public", "audit"]);
+
+    let public = &schemas[0];
+    let users = &public["tables"][0];
+    assert_eq!(users["name"], "users");
+    assert_eq!(users["primary_key"], serde_json::json!(["id"]));
+    assert_eq!(users["columns"][0]["name"], "id");
+    assert_eq!(users["columns"][0]["type"], "integer");
+    assert_eq!(users["columns"][0]["nullable"], false);
+    assert_eq!(users["columns"][0]["primary_key"], true);
+    assert_eq!(users["columns"][2]["type"], "mood");
+    assert_eq!(users["columns"][2]["nullable"], true);
+
+    let views = public["views"].as_array().expect("views array");
+    assert_eq!(views[0]["name"], "user_names");
+    assert_eq!(views[0]["materialized"], false);
+    assert_eq!(views[0]["columns"][1]["name"], "name");
+    assert_eq!(views[0]["columns"][1]["type"], "text");
+    assert_eq!(views[1]["name"], "user_count");
+    assert_eq!(views[1]["materialized"], true);
+
+    let events = &schemas[1]["tables"][0];
+    assert_eq!(events["name"], "events");
+    assert_eq!(
+        events["foreign_keys"][0]["columns"],
+        serde_json::json!(["user_id"])
+    );
+    assert_eq!(events["foreign_keys"][0]["references_table"], "users");
+
+    assert_eq!(json["enums"][0]["name"], "mood");
+    assert_eq!(
+        json["enums"][0]["values"],
+        serde_json::json!(["sad", "ok", "happy"])
+    );
+}
+
+#[test]
+fn schema_subcommand_rejects_sarif_format() {
+    let t = with_users_schema("schema-cmd-sarif");
+    t.run(&["schema", "--format", "sarif", "-s", "schema.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("possible values: human, json");
 }
 
 #[test]
@@ -1239,6 +1465,64 @@ fn disable_unknown_code_is_an_error() {
 }
 
 #[test]
+fn misspelled_rule_flag_suggests_the_rule() {
+    let t = with_users_schema("allow-typo");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-A",
+        "ambigous-column",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("--allow: unknown rule or category 'ambigous-column'")
+    .assert_stderr_contains("Did you mean 'ambiguous-column'?");
+    t.run(&["check", "-s", "schema.sql", "-W", "suspicous", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("Did you mean 'suspicious'?");
+}
+
+#[test]
+fn misspelled_rule_names_in_config_suggest_the_rule() {
+    let t = with_users_schema("cfg-typo");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    for (config, expected) in [
+        (
+            "[rules]\ncolumn-not-fond = \"off\"\n",
+            "[rules]: unknown rule 'column-not-fond'. Did you mean 'column-not-found'?",
+        ),
+        (
+            "[categories]\npedantc = \"warn\"\n",
+            "[categories]: unknown category 'pedantc'. Did you mean 'pedantic'?",
+        ),
+        (
+            "disable = [\"type-mismach\"]\n",
+            "disable: unknown rule or category 'type-mismach'. Did you mean 'type-mismatch'?",
+        ),
+    ] {
+        t.write(
+            "sqlsift.toml",
+            &format!("schema = [\"schema.sql\"]\n{config}"),
+        );
+        let run = t.run(&["check", "q.sql"]);
+        run.assert_code(2);
+        // miette wraps long messages: compare without the layout
+        let squash = |s: &str| {
+            s.chars()
+                .filter(|c| !c.is_whitespace() && *c != '│')
+                .collect::<String>()
+        };
+        assert!(
+            squash(&run.stderr).contains(&squash(expected)),
+            "expected {expected:?} in:\n{}",
+            run.stderr
+        );
+    }
+}
+
+#[test]
 fn rule_names_work_like_codes() {
     let t = with_users_schema("disable-name");
     t.write("q.sql", "SELECT nme FROM users;\n");
@@ -1526,7 +1810,7 @@ fn json_output_structure() {
     let d = &diags[0];
     assert_eq!(d["kind"], "ColumnNotFound");
     assert_eq!(d["severity"], "error");
-    assert_eq!(d["message"], "Column 'nme' not found");
+    assert_eq!(d["message"], "Column 'nme' not found in table 'users'");
     assert_eq!(d["help"], "Did you mean 'name'?");
     assert_eq!(d["span"]["line"], 2);
     assert_eq!(d["span"]["column"], 3);
@@ -1651,7 +1935,10 @@ fn sarif_results_have_rule_level_message_and_region() {
     let r = &results[0];
     assert_eq!(r["ruleId"], "E0002");
     assert_eq!(r["level"], "error");
-    assert_eq!(r["message"]["text"], "Column 'nme' not found");
+    assert_eq!(
+        r["message"]["text"],
+        "Column 'nme' not found in table 'users'"
+    );
     let loc = &r["locations"][0]["physicalLocation"];
     assert_eq!(loc["artifactLocation"]["uri"], "queries/q.sql");
     assert_eq!(loc["region"]["startLine"], 2);
@@ -2257,7 +2544,7 @@ fn github_format_prints_one_workflow_command_per_diagnostic() {
     assert_eq!(
         lines,
         vec![
-            "::error file=sql/q.sql,line=1,col=8,endLine=1,endColumn=11,title=E0002 column-not-found::Column 'nme' not found%0Ahelp: Did you mean 'name'?",
+            "::error file=sql/q.sql,line=1,col=8,endLine=1,endColumn=11,title=E0002 column-not-found::Column 'nme' not found in table 'users'%0Ahelp: Did you mean 'name'?",
             "::error file=sql/q.sql,line=2,col=28,endLine=2,endColumn=30,title=E0003 type-mismatch::Type mismatch: cannot compare integer with text%0Ahelp: Types are not implicitly compatible. Consider using explicit CAST.",
         ],
         "stdout:\n{}",

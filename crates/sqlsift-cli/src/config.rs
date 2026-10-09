@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use sqlsift_core::rules::{find_category, find_rule, RuleConfig, RuleLevel};
+use sqlsift_core::rules::{
+    find_category, find_rule, similar_category_name, similar_rule_name, RuleConfig, RuleLevel,
+};
 
 /// Keys recognized in `sqlsift.toml`
 const KNOWN_KEYS: &[&str] = &[
@@ -171,9 +173,14 @@ impl Config {
 
         for (name, level) in &self.categories {
             if find_category(name).is_none() {
+                let hint = match similar_category_name(name) {
+                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    None => String::new(),
+                };
                 miette::bail!(
-                    "[categories]: unknown category '{}' (expected one of: {})",
+                    "[categories]: unknown category '{}'{} (expected one of: {})",
                     name,
+                    hint,
                     sqlsift_core::RuleCategory::ALL.map(|c| c.name()).join(", ")
                 );
             }
@@ -181,9 +188,14 @@ impl Config {
         }
         for (id, level) in &self.rules {
             if find_rule(id).is_none() {
+                let hint = match similar_rule_name(id) {
+                    Some(suggestion) => format!(". Did you mean '{}'?", suggestion),
+                    None => String::new(),
+                };
                 miette::bail!(
-                    "[rules]: unknown rule '{}' (run `sqlsift rules` to list rules)",
-                    id
+                    "[rules]: unknown rule '{}'{} (run `sqlsift rules` to list rules)",
+                    id,
+                    hint
                 );
             }
             set(id, parse_level(level, "[rules]")?, "[rules]")?;

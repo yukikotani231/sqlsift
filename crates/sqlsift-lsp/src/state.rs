@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{self, Url};
 
-use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
+use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
 
 use crate::config::Config;
@@ -275,9 +275,8 @@ fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
         };
         let pattern = format!("{abs_dir}/**/*.sql");
         if let Ok(paths) = glob::glob(&pattern) {
-            for path in paths.flatten() {
-                files.push(path);
-            }
+            // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
+            files.extend(paths.flatten().filter(|p| !is_rollback_migration(p)));
         }
     }
 
@@ -318,6 +317,45 @@ mod tests {
         let diagnostics = state.analyze_document("SELECT bad_column FROM users");
         assert!(!diagnostics.is_empty());
         assert_eq!(diagnostics[0].code(), "E0002");
+    }
+
+    #[test]
+    fn test_schema_dir_skips_rollback_migrations() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sqlsift-lsp-rollbacks-{}-{nanos}",
+            std::process::id()
+        ));
+        let migrations = root.join("migrations");
+        std::fs::create_dir_all(&migrations).unwrap();
+        std::fs::write(root.join("sqlsift.toml"), "schema_dir = \"migrations\"\n").unwrap();
+        let files = [
+            ("000001_users.down.sql", "DROP TABLE users;"),
+            ("000001_users.up.sql", "CREATE TABLE users (id INT);"),
+            (
+                "000002_orders.sql",
+                "-- migrate:up\nCREATE TABLE orders (id INT);\n-- migrate:down\nDROP TABLE orders;\n",
+            ),
+            ("V3__items.sql", "CREATE TABLE items (id INT);"),
+            ("U3__items.sql", "DROP TABLE items;"),
+        ];
+        for (name, sql) in files {
+            std::fs::write(migrations.join(name), sql).unwrap();
+        }
+
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(state.schema_files.len(), 3, "{:?}", state.schema_files);
+        let diagnostics =
+            state.analyze_document("SELECT u.id, o.id, i.id FROM users u, orders o, items i");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

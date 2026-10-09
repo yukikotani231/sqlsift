@@ -100,7 +100,8 @@ sqlsift check --schema schema.sql queries/*.sql
 # Use multiple schema files
 sqlsift check -s users.sql -s orders.sql queries/*.sql
 
-# Use a migrations directory (all *.sql files, recursively, in filename order)
+# Use a migrations directory (all *.sql files, recursively, in filename order;
+# rollback files such as *.down.sql are skipped)
 sqlsift check --schema-dir ./migrations queries/*.sql
 
 # Other dialects
@@ -123,10 +124,63 @@ schema = ["db/schema.sql"]
 
 Then just run `sqlsift check queries/**/*.sql`.
 
+### Inspecting the loaded schema
+
+When a query is flagged unexpectedly, check what sqlsift actually understood from your schema. `sqlsift schema` takes the same schema options as `check` (`--schema`, `--schema-dir`, `--config`, `--dialect`) and falls back to `sqlsift.toml`:
+
+```console
+$ sqlsift schema --schema-dir migrations
+Schema Information:
+==================
+Dialect: postgresql
+Schema files:
+  migrations/001_init.sql
+
+Schema: public
+  Table: users
+    - id integer NOT NULL PRIMARY KEY DEFAULT nextval('users_id_seq'::regclass)
+    - name text NOT NULL
+    - feeling mood NULL
+  View: user_names
+    - id integer
+    - name text
+  Materialized view: user_count
+    - n bigint
+
+Enum types:
+  mood: 'sad', 'ok', 'happy'
+```
+
+Objects are listed per schema in definition order. Statements sqlsift had to skip are reported as warnings on stderr.
+
+`sqlsift schema --format json` prints the same information as JSON:
+
+```jsonc
+{
+  "dialect": "postgresql",
+  "default_schema": "public",
+  "schema_files": ["migrations/001_init.sql"],
+  "schemas": [{
+    "name": "public",
+    "tables": [{
+      "name": "users",
+      "columns": [{ "name": "id", "type": "integer", "nullable": false, "primary_key": true,
+                    "identity": null, "auto_increment": false, "default": "nextval(...)" }],
+      "primary_key": ["id"],           // or null
+      "foreign_keys": [{ "name": null, "columns": ["..."], "references_table": "...", "references_columns": ["..."] }],
+      "unique": [["..."]]
+    }],
+    "views": [{ "name": "user_names", "materialized": false,
+                "columns": [{ "name": "id", "type": "integer" }] }]   // type is null when unknown
+  }],
+  "enums": [{ "name": "mood", "values": ["sad", "ok", "happy"] }]
+}
+```
+
 <details>
 <summary><b>Configuration file reference</b></summary>
 
-`sqlsift check` looks for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
+`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents (or uses `--config <FILE>`). Command-line options override values from the file.
 
 ```toml
 schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
@@ -162,6 +216,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+
+Only the "up" direction of migrations is applied: `--schema-dir` skips rollback files (`*.down.sql` from sqlx / golang-migrate, Flyway undo files `U<version>__*.sql`), and in any schema file everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored. Files passed explicitly with `--schema` are always loaded.
 
 ## Editor Integration
 
@@ -208,6 +264,37 @@ Prefer plain commands? `npx sqlsift-cli check --schema schema.sql queries/*.sql`
 
 Rolling out a rule as `warn`? `--max-warnings <N>` (or `max_warnings` in `sqlsift.toml`) fails the check when more than `N` warnings are reported, so the backlog can only shrink.
 
+### Re-check everything when the schema changes
+
+sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
+
+```yaml
+on: pull_request
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=d "$BASE" HEAD)
+          if grep -q '^db/' <<< "$changed"; then
+            files='queries/**/*.sql'  # schema changed: check every query
+          else
+            files=$(grep '^queries/.*\.sql$' <<< "$changed" | tr '\n' ' ' || true)
+          fi
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - if: steps.changed.outputs.files != ''
+        uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: ${{ steps.changed.outputs.files }}
+```
+
 ### GitHub Code Scanning (SARIF)
 
 Show errors in the Security tab and as code scanning alerts:
@@ -245,7 +332,7 @@ jobs:
           "code": "E0002",
           "kind": "ColumnNotFound",
           "severity": "error",
-          "message": "Column 'user_id' not found",
+          "message": "Column 'user_id' not found in table 'users'",
           "help": "Did you mean 'id'?",
           "line": 3,
           "column": 15,
@@ -364,6 +451,7 @@ SELECT bad_col FROM missing_table;
 - DISTINCT ON, UNION / INTERSECT / EXCEPT
 - ORDER BY with SELECT alias support
 - Comprehensive expression coverage (CASE, CAST, JSON operators, AT TIME ZONE, ARRAY, etc.)
+- psql scripts (PostgreSQL): backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, ...) are skipped, `\g` / `\gset` / `\gx` end a query like `;`, and `:var` / `:'var'` / `:"var"` interpolations are accepted as untyped placeholders or unknown identifiers
 
 ### DDL
 
@@ -374,6 +462,7 @@ SELECT bad_col FROM missing_table;
 - `CHECK` constraints (column-level and table-level)
 - `GENERATED AS IDENTITY` columns (ALWAYS / BY DEFAULT)
 - Resilient parsing — unsupported DDL (functions, triggers, domains, etc.) is gracefully skipped
+- DDL inside a query file (`CREATE [TEMP] TABLE`, `CREATE TABLE ... AS SELECT`, `CREATE VIEW`, `ALTER TABLE`, `DROP`) applies to the later statements of that file only
 
 ### Dialects
 
@@ -411,6 +500,22 @@ Options:
   -q, --quiet               Suppress summary/non-error output
   -h, --help                Print help
 ```
+
+```
+sqlsift schema [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...                Schema definition files (same as --schema)
+
+Options:
+  -s, --schema <FILE>       Schema definition file (can be specified multiple times)
+      --schema-dir <DIR>    Directory containing schema files
+  -c, --config <FILE>       Path to configuration file [default: sqlsift.toml]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
+
+`sqlsift rules` lists every rule with its category and default level.
 
 </details>
 

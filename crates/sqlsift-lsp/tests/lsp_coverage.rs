@@ -560,6 +560,15 @@ fn unknown_rule_in_config_is_reported() {
 }
 
 #[test]
+fn misspelled_rule_in_config_gets_a_suggestion() {
+    let t = workspace("typo-rule", "[rules]\nambigous-column = \"off\"\n");
+    let mut lsp = Lsp::spawn();
+    lsp.initialize(Some(&t.root_uri()));
+    let msg = wait_for_warning(&mut lsp, "ambigous-column");
+    assert!(msg.contains("Did you mean 'ambiguous-column'?"), "{msg}");
+}
+
+#[test]
 fn config_schema_dir_is_loaded_in_order() {
     let t = TempDir::new("cfg-schema-dir");
     t.write("migrations/001_create.sql", USERS_SCHEMA);
