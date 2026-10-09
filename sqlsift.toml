@@ -39,6 +39,10 @@ schema = [
 # Use 0 to fail on any warning without turning warnings into errors.
 # max_warnings = 0
 
+# Baseline of known diagnostics, which are not reported (by `sqlsift check` or
+# the language server). Create or refresh it with `sqlsift check --write-baseline`.
+# baseline = "sqlsift-baseline.json"
+
 # Disable specific rules (codes or names)
 # disable = ["E0001", "column-not-found"]
 

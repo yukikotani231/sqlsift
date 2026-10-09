@@ -23,6 +23,7 @@ const KNOWN_KEYS: &[&str] = &[
     "categories",
     "max_warnings",
     "templating",
+    "baseline",
 ];
 
 /// Configuration for sqlsift
@@ -58,6 +59,10 @@ pub struct Config {
     #[serde(default)]
     pub max_warnings: Option<usize>,
 
+    /// Baseline file of known diagnostics that are not reported
+    #[serde(default)]
+    pub baseline: Option<String>,
+
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
     pub disable: Vec<String>,
@@ -81,7 +86,7 @@ pub struct Config {
 impl Config {
     /// Load configuration from a TOML file.
     ///
-    /// Relative paths in `schema`, `files`, `ignore` and `schema_dir` are
+    /// Relative paths in `schema`, `files`, `ignore`, `schema_dir` and `baseline` are
     /// resolved against the directory containing the configuration file.
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
@@ -108,6 +113,7 @@ impl Config {
         config.schema = config.schema.iter().map(resolve).collect();
         config.files = config.files.iter().map(resolve).collect();
         config.schema_dir = config.schema_dir.as_ref().map(resolve);
+        config.baseline = config.baseline.as_ref().map(resolve);
         // Ignore patterns are matched later; the base directory is literal text
         for pattern in &config.ignore {
             glob::Pattern::new(pattern).map_err(|e| {
@@ -161,6 +167,7 @@ impl Config {
         dialect: Option<&str>,
         templating: Option<&str>,
         max_warnings: Option<usize>,
+        baseline: Option<&Path>,
     ) -> Self {
         self.ignore.extend(ignore.iter().cloned());
 
@@ -191,6 +198,10 @@ impl Config {
 
         if max_warnings.is_some() {
             self.max_warnings = max_warnings;
+        }
+
+        if let Some(baseline) = baseline {
+            self.baseline = Some(baseline.display().to_string());
         }
 
         self

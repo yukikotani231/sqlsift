@@ -15,6 +15,7 @@ dialect = "postgresql"            # postgresql, mysql or sqlite
 templating = "jinja"              # jinja (dbt models) or none
 format = "human"                  # human, json, sarif or github
 max_warnings = 0                  # fail when more than this many warnings are reported
+baseline = "sqlsift-baseline.json"  # known diagnostics that are not reported
 
 # Rules
 disable = ["E0006"]               # rules to turn off (same as `E0006 = "off"` below)
@@ -39,6 +40,7 @@ correctness = "error"
 | `templating` | string | auto | `jinja` masks dbt / Jinja templates in query files, `none` turns that off. When unset, `jinja` is used if a `dbt_project.yml` is in the current directory or next to `sqlsift.toml`. See [dbt and Jinja templates](../guide/queries.md#dbt-and-jinja-templates) |
 | `format` | string | `"human"` | `human`, `json`, `sarif` or `github` |
 | `max_warnings` | integer | none | Fail when more than this many warnings are reported |
+| `baseline` | path | none | Baseline file of known diagnostics, hidden by `sqlsift check` and the language server; `--baseline` overrides it. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline) |
 | `disable` | list of rules | `[]` | Rules (codes or names) to turn off |
 | `[rules]` | table | | Level per rule: `"off"`, `"warn"` or `"error"` |
 | `[categories]` | table | | Level per category: `correctness`, `suspicious`, `pedantic`, `style`, `restriction` |

@@ -87,6 +87,16 @@ pub enum Command {
         /// Fail (exit 1) when more than N warnings are reported
         #[arg(long, value_name = "N")]
         max_warnings: Option<usize>,
+
+        /// Baseline file of known diagnostics, which are not reported
+        /// (default: `baseline` in sqlsift.toml)
+        #[arg(long, value_name = "PATH")]
+        baseline: Option<PathBuf>,
+
+        /// Write every current diagnostic to the baseline file and exit 0
+        /// (the file is `--baseline`, `baseline` in sqlsift.toml, or sqlsift-baseline.json)
+        #[arg(long)]
+        write_baseline: bool,
     },
 
     /// List all rules with their category and default level

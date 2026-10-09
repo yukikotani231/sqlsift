@@ -49,6 +49,21 @@ Make the rule a warning and cap the number of warnings with `--max-warnings` (or
 sqlsift check -W missing-required-column --max-warnings 12
 ```
 
+## Adopting sqlsift on an existing codebase
+
+When a project already has many diagnostics, record them in a baseline and fail CI only on new ones:
+
+```bash
+sqlsift check --write-baseline          # writes sqlsift-baseline.json; commit it
+```
+
+```toml
+# sqlsift.toml
+baseline = "sqlsift-baseline.json"
+```
+
+From then on `sqlsift check` (and the editor) hides the recorded diagnostics, and new ones fail the check as usual. When a recorded problem is fixed, sqlsift prints a note; re-run `--write-baseline` to shrink the file. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
+
 ## Re-check everything when the schema changes
 
 sqlsift's main job is catching queries broken by a schema or migration change, and those query files usually aren't in the PR diff. The simplest setup is to always check every query file, as above: sqlsift checks hundreds of files in well under a second. If you only check changed files, check all of them whenever the schema changes:
