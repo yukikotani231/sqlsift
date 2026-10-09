@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/yukikotani231/sqlsift/compare/v0.1.4...v0.1.5) - 2026-10-09
+
+### Added
+
+- *(suggest)* support adjacent letter transpositions using Damerau-Levenshtein distance ([#126](https://github.com/yukikotani231/sqlsift/pull/126)) ([#151](https://github.com/yukikotani231/sqlsift/pull/151))
+- sqlc query names and SQL in TypeScript tagged templates ([#115](https://github.com/yukikotani231/sqlsift/pull/115))
+- mask dbt/Jinja templates in query files ([#114](https://github.com/yukikotani231/sqlsift/pull/114))
+- add baseline to suppress existing diagnostics ([#113](https://github.com/yukikotani231/sqlsift/pull/113))
+- file-level suppression and ignore patterns for query files ([#108](https://github.com/yukikotani231/sqlsift/pull/108))
+- *(cli)* stdin input, --format github and --max-warnings ([#106](https://github.com/yukikotani231/sqlsift/pull/106))
+- schema command reads config and schema dirs, shows views and enums ([#105](https://github.com/yukikotani231/sqlsift/pull/105))
+- clearer table, column, enum and rule-name diagnostics ([#109](https://github.com/yukikotani231/sqlsift/pull/109))
+- make tables created in a query file visible to later statements ([#103](https://github.com/yukikotani231/sqlsift/pull/103))
+- skip psql meta-commands and accept psql variables ([#107](https://github.com/yukikotani231/sqlsift/pull/107))
+- rule registry with categories and per-rule levels ([#80](https://github.com/yukikotani231/sqlsift/pull/80))
+- check CASE branch types and MySQL inline ENUM values ([#77](https://github.com/yukikotani231/sqlsift/pull/77))
+- add a GitHub Action (`uses: yukikotani231/sqlsift@...`)
+- report INSERTs that omit a NOT NULL column without a default (E0008)
+
+### Fixed
+
+- *(baseline)* clear error message when baseline file has merge conflict markers ([#133](https://github.com/yukikotani231/sqlsift/pull/133)) ([#150](https://github.com/yukikotani231/sqlsift/pull/150))
+- dbt loop separators, if/else, block tags, quoted vars, project detection and source() ([#148](https://github.com/yukikotani231/sqlsift/pull/148))
+- baseline crash on non-ASCII, stale entries for gone files, partial writes and robust matching ([#146](https://github.com/yukikotani231/sqlsift/pull/146))
+- COPY data blocks, schema-qualified enums, UNLOGGED/WITH NO DATA, SELECT INTO and search_path ([#147](https://github.com/yukikotani231/sqlsift/pull/147))
+- mysqldump views, HAVING aliases, INSERT ... SET and index hints in MySQL ([#145](https://github.com/yukikotani231/sqlsift/pull/145))
+- stack overflow on long OR chains and UTF-8 BOM parse errors ([#149](https://github.com/yukikotani231/sqlsift/pull/149))
+- postgres.js helpers, fragments, Slonik tags and Vue/Svelte in embedded SQL ([#144](https://github.com/yukikotani231/sqlsift/pull/144))
+- treat sqlc named parameters as placeholders ([#143](https://github.com/yukikotani231/sqlsift/pull/143))
+- ignore rollback migrations when loading schema directories ([#104](https://github.com/yukikotani231/sqlsift/pull/104))
+- treat views with unknown columns as unknown; allow NULL for generated integer keys
+- *(schema)* apply ALTER COLUMN, DROP VIEW, ALTER TYPE, LIKE/CTAS and warn on skipped DDL
+- *(types)* map FLOAT, FLOAT(p), NVARCHAR and MySQL TEXT/BLOB variants
+- locate parse errors and literal type mismatches, analyze statements independently
+- validate RETURNING, ON CONFLICT, enum literals and other missed clauses
+- *(cli)* make JSON/SARIF output valid and fix config, color and location bugs
+- resolve GROUP BY aliases, whole-row refs, system columns and multi-table DML
+- follow PostgreSQL identifier case rules for table, view and CTE names
+- scope set operations, USING/NATURAL and LATERAL correctly; type check every query block
+- eliminate common false positives and noisy diagnostics
+
+### Other
+
+- add a roadmap for v0.2, v0.3 and beyond ([#163](https://github.com/yukikotani231/sqlsift/pull/163))
+- enable clippy pedantic lints and drop unneeded clones ([#111](https://github.com/yukikotani231/sqlsift/pull/111))
+- add an mdBook user guide and slim down the README ([#112](https://github.com/yukikotani231/sqlsift/pull/112))
+- add CONTRIBUTING.md ([#110](https://github.com/yukikotani231/sqlsift/pull/110))
+- CI recipe for re-checking queries when the schema changes ([#102](https://github.com/yukikotani231/sqlsift/pull/102))
+- unify name resolution and type checking in one scoped walk ([#79](https://github.com/yukikotani231/sqlsift/pull/79))
+- linear-time recovery from syntax errors, parallel file analysis ([#78](https://github.com/yukikotani231/sqlsift/pull/78))
+- Merge remote-tracking branch 'origin/main' into feat/github-action
+- link the browser playground from the README
+- Merge remote-tracking branch 'origin/main' into fix/cli-lsp
+- Merge remote-tracking branch 'origin/main' into test/coverage
+- update README example output to the aligned human format
+- Merge remote-tracking branch 'origin/main' into fix/cli-lsp
+- Merge remote-tracking branch 'origin/main' into docs/readme-revamp
+- update coverage expectations for table suggestions and boolean literals
+- add schema building and diagnostic quality tests
+- add MySQL and SQLite dialect coverage tests
+- add PostgreSQL query coverage tests
+- fix clippy lints reported by current stable toolchain
+- rework README to lead with a real example and comparison
+
 ## [0.1.4](https://github.com/yukikotani231/sqlsift/compare/v0.1.3...v0.1.4) - 2026-03-04
 
 ### Added
