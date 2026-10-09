@@ -52,7 +52,7 @@ sqlsift follows SQL's visibility rules rather than just matching names:
 
 ## DDL inside query files
 
-Query files can create their own tables. `CREATE [TEMP] TABLE`, `CREATE TABLE ... AS SELECT`, `CREATE VIEW`, `ALTER TABLE` and `DROP` statements in a query file apply to the later statements of **that file only**:
+Query files can create their own tables. `CREATE [TEMP | UNLOGGED] TABLE`, `CREATE TABLE ... AS SELECT [WITH [NO] DATA]`, `SELECT ... INTO [TEMP] t`, `CREATE VIEW`, `ALTER TABLE` and `DROP` statements in a query file apply to the later statements of **that file only**:
 
 ```sql
 CREATE TEMP TABLE recent_orders AS
@@ -61,6 +61,10 @@ SELECT id, user_id FROM orders WHERE created_at > now() - interval '7 days';
 SELECT user_id, count(*) FROM recent_orders GROUP BY user_id;  -- OK
 ```
 
+If a `CREATE TABLE` or `CREATE VIEW` can't be parsed, the "table not found" errors for it later in the file say so.
+
+`SET search_path TO analytics, public` (also `SET LOCAL search_path`, `SET search_path = ...`) is followed for the rest of the file: unqualified names are looked up in the listed schemas, in order, and tables created without a schema go in the first one. `SET search_path TO DEFAULT` goes back to the default schema.
+
 ## psql scripts
 
 With the PostgreSQL dialect, files written for `psql` are accepted:
@@ -68,6 +72,7 @@ With the PostgreSQL dialect, files written for `psql` are accepted:
 - Backslash meta-commands (`\set`, `\i`, `\connect`, `\if`, …) are skipped.
 - `\g`, `\gset` and `\gx` end a query like `;`.
 - `:var` and `:'var'` interpolations are treated as untyped placeholders, and `:"var"` as an identifier whose name sqlsift can't know, so no "not found" diagnostic is reported for it.
+- The data of a `COPY ... FROM stdin;` (the lines up to `\.`, as in `pg_dump` output and seed files) is skipped, in query files and schema files.
 
 ## MySQL syntax
 

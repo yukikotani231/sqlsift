@@ -37,7 +37,10 @@ When reading migrations, sqlsift applies only the "up" direction:
 - `CREATE TABLE` with column types, `NOT NULL`, defaults, primary keys, foreign keys, `UNIQUE` and `CHECK` constraints
 - `SERIAL`, `GENERATED ... AS IDENTITY` and `AUTO_INCREMENT` columns (they count as having a default)
 - `CREATE VIEW` and `CREATE MATERIALIZED VIEW`, with column names and types inferred from the query
-- `CREATE TYPE ... AS ENUM` (and MySQL inline `ENUM(...)` columns)
+- `CREATE TYPE ... AS ENUM`, also schema-qualified (`CREATE TYPE billing.state AS ENUM ...`, columns of type `public.mood`), and MySQL inline `ENUM(...)` columns
+- `CREATE UNLOGGED TABLE`, `CREATE TABLE ... AS SELECT ... WITH [NO] DATA` and `SELECT ... INTO t`
+- `SET search_path TO ...`, for the rest of the file it is in
+- `COPY ... FROM stdin` data blocks in `pg_dump` output are skipped
 - `ALTER TABLE`: `ADD` / `DROP` / `RENAME COLUMN`, `ADD CONSTRAINT`, `RENAME TO`
 
 Statements sqlsift doesn't model (functions, triggers, domains, grants, …) are skipped, and the rest of the file is still loaded. Problems while loading the schema (such as an `ALTER TABLE` on a table that doesn't exist) are reported as warnings on stderr by both `check` and `schema`.

@@ -239,3 +239,135 @@ fn file_local_tables_in_mysql_and_sqlite() {
         );
     }
 }
+
+// Issue #117: PostgreSQL scripts
+
+#[test]
+fn unlogged_table_is_visible_to_later_statements() {
+    assert_valid(
+        "CREATE UNLOGGED TABLE stage_pay (LIKE payment INCLUDING ALL);
+         SELECT amount FROM stage_pay;",
+    );
+    let diagnostics = analyze(
+        "CREATE UNLOGGED TABLE stage_pay (LIKE payment INCLUDING ALL);
+         SELECT amont FROM stage_pay;",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn create_table_as_with_no_data_is_visible_to_later_statements() {
+    assert_valid(
+        "CREATE TABLE IF NOT EXISTS t3 AS SELECT * FROM customer WITH NO DATA;
+         SELECT first_name FROM t3;
+         CREATE TABLE t4 AS SELECT customer_id FROM payment WITH DATA;
+         SELECT customer_id FROM t4;",
+    );
+    let diagnostics = analyze(
+        "CREATE TABLE t3 AS SELECT * FROM customer WITH NO DATA;
+         SELECT last_name FROM t3;",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+    // Locations in the retried statement are kept
+    let diagnostics =
+        analyze("SELECT 1;\nCREATE UNLOGGED TABLE t5 AS SELECT nope FROM customer WITH NO DATA;");
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!((span.line, span.column), (2, 36));
+}
+
+#[test]
+fn table_whose_create_failed_to_parse_says_so() {
+    let diagnostics = analyze(
+        "CREATE TABLE t2 (id INTEGER);
+         CREATE TABLE t3 (id INTEGER) bogus syntax here;
+         SELECT id FROM t3;",
+    );
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![DiagnosticKind::ParseError, DiagnosticKind::TableNotFound]
+    );
+    let help = diagnostics[1].help.as_deref().unwrap();
+    assert!(
+        help.contains("'t3' on line 2 could not be parsed"),
+        "{help}"
+    );
+    // Only for the later statements
+    let diagnostics = analyze(
+        "SELECT id FROM t3;
+         CREATE TABLE t3 (id INTEGER) bogus syntax here;",
+    );
+    let help = diagnostics[0].help.as_deref().unwrap();
+    assert!(!help.contains("could not be parsed"), "{help}");
+}
+
+#[test]
+fn select_into_creates_a_table() {
+    assert_valid(
+        "SELECT customer_id, first_name INTO TEMP tmp_c FROM customer;
+         SELECT first_name FROM tmp_c;
+         SELECT customer_id INTO TEMPORARY TABLE tmp_p FROM payment;
+         SELECT customer_id FROM tmp_p;
+         SELECT 1 AS one INTO UNLOGGED tmp_o;
+         SELECT one FROM tmp_o;
+         SELECT * INTO plain FROM payment;
+         SELECT amount FROM plain;",
+    );
+    let diagnostics = analyze(
+        "SELECT customer_id INTO TEMP tmp_c FROM customer;
+         SELECT first_name FROM tmp_c;",
+    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn set_search_path_is_followed() {
+    let schema = "
+        CREATE SCHEMA analytics;
+        CREATE TABLE analytics.daily_active (day DATE, dau INTEGER);
+        CREATE TABLE users (id INTEGER);
+    ";
+    let catalog = catalog(schema, SqlDialect::PostgreSQL);
+    let analyze = |sql: &str| Analyzer::new(&catalog).analyze(sql);
+    for sql in [
+        "SET search_path TO analytics, public;
+         SELECT dau FROM daily_active JOIN users ON users.id = dau;",
+        "SET search_path = analytics;
+         SELECT dau FROM daily_active;",
+        "SET LOCAL search_path TO \"$user\", analytics;
+         SELECT dau FROM daily_active;",
+        "SET search_path = 'analytics, public';
+         SELECT dau FROM daily_active;",
+        // Tables created afterwards go in the first schema
+        "SET search_path TO analytics;
+         CREATE TABLE fresh (x INTEGER);
+         SELECT x FROM analytics.fresh;",
+    ] {
+        let diagnostics = analyze(sql);
+        assert!(diagnostics.is_empty(), "{sql}: {diagnostics:#?}");
+    }
+    // Only for the rest of the file
+    assert_eq!(
+        kinds(&analyze(
+            "SELECT dau FROM daily_active;
+             SET search_path TO analytics;
+             SELECT nope FROM daily_active;
+             SET search_path TO DEFAULT;
+             SELECT dau FROM daily_active;"
+        )),
+        vec![
+            DiagnosticKind::TableNotFound,
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::TableNotFound
+        ]
+    );
+    // A schema left out of the path is not searched
+    assert_eq!(
+        kinds(&analyze(
+            "SET search_path TO analytics;
+             SELECT id FROM users;"
+        )),
+        vec![DiagnosticKind::TableNotFound]
+    );
+    assert_eq!(analyze("SELECT dau FROM daily_active").len(), 1);
+}

@@ -115,7 +115,7 @@ impl SchemaReport<'_> {
             .catalog
             .enums
             .values()
-            .map(|e| json!({ "name": e.name, "values": e.values }))
+            .map(|e| json!({ "name": e.name, "schema": e.schema, "values": e.values }))
             .collect();
         json!({
             "dialect": self.dialect.to_string(),
