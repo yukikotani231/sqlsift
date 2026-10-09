@@ -1000,6 +1000,33 @@ fn baselined_diagnostics_are_hidden() {
 }
 
 #[test]
+fn baselined_diagnostics_are_hidden_in_typescript_documents() {
+    let t = workspace("baseline-ts", "baseline = \"baseline.json\"\n");
+    t.write(
+        "baseline.json",
+        &baseline_json("src/q.ts", "SELECT nme FROM users;"),
+    );
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.ts");
+    // Only the SQL is matched, not the TypeScript around it
+    lsp.open_as(
+        &uri,
+        "typescript",
+        "const renamed = sql`SELECT nme FROM users`;\nconst b = sql`SELECT bad FROM users`;\n",
+    );
+    let diagnostics = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diagnostics), vec!["E0002"], "{diagnostics:#?}");
+    assert!(
+        diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'bad'"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn missing_baseline_file_is_reported() {
     let t = workspace("baseline-missing", "baseline = \"nope.json\"\n");
     let mut lsp = Lsp::spawn();

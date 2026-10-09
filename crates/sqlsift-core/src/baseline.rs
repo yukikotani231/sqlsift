@@ -375,7 +375,15 @@ pub fn sql_text<S: AsRef<str>>(
     dialect: SqlDialect,
 ) -> String {
     if crate::embedded::is_embedded_sql_file(name) {
-        crate::embedded::extract(source, tags, dialect).text
+        // As `Analyzer::analyze_embedded`: the BOM is not part of the script
+        let (script, bom) = crate::analyzer::strip_bom(source);
+        let host = if crate::embedded::is_component_file(name) {
+            crate::embedded::Host::Component
+        } else {
+            crate::embedded::Host::Script
+        };
+        let text = crate::embedded::extract(script, tags, dialect, host).text;
+        format!("{}{text}", &source[..bom])
     } else {
         source.to_string()
     }
