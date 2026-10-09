@@ -63,6 +63,27 @@ With the PostgreSQL dialect, files written for `psql` are accepted:
 - `\g`, `\gset` and `\gx` end a query like `;`.
 - `:var` and `:'var'` interpolations are treated as untyped placeholders, and `:"var"` as an identifier whose name sqlsift can't know, so no "not found" diagnostic is reported for it.
 
+## sqlc query files
+
+[sqlc](https://sqlc.dev) query files are plain SQL with a `-- name:` comment before each query, so they can be checked as they are. Diagnostics name the query they are in:
+
+```sql
+-- name: ListPosts :many
+SELECT id, titel FROM posts WHERE author_id = $1;
+```
+
+```text
+error[E0002]: Column 'titel' not found in table 'posts'
+  --> queries/posts.sql:2:12
+    |
+  2 | SELECT id, titel FROM posts WHERE author_id = $1;
+    |            ^^^^^
+    = note: in query 'ListPosts'
+    = help: Did you mean 'title'?
+```
+
+A statement belongs to the last `-- name: <Name> :<command>` comment before it. The name is the `query_name` field in JSON output, a logical location in SARIF output, and is added to the message in SARIF, `github` and editor diagnostics.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -17,6 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
+use crate::sqlc::QueryNames;
 
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
@@ -116,6 +117,8 @@ impl<'a> Analyzer<'a> {
 
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
+        // sqlc query names (`-- name: GetPost :one`)
+        let query_names = QueryNames::parse(sql);
 
         // psql meta-commands and variables (the rewrite keeps every location)
         let source = match self.dialect {
@@ -190,6 +193,7 @@ impl<'a> Analyzer<'a> {
                 if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }
+                d.query_name = query_names.at(span.line).map(str::to_string);
                 if let Some(note) = directives.unknown_id_help(span.line) {
                     d.help = Some(match d.help.take() {
                         Some(help) => format!("{help}\n{note}"),

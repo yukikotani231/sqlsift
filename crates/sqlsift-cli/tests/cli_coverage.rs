@@ -2918,3 +2918,79 @@ fn disable_file_directive_suppresses_parse_errors_and_everything() {
         .assert_code(0)
         .assert_stderr_contains("All 2 file(s) passed validation");
 }
+
+// ---------------------------------------------------------------------------
+// SQL embedded in application code (tests/fixtures/embedded)
+// ---------------------------------------------------------------------------
+
+/// The repository root, where the `tests/fixtures` paths below are relative to
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repository root")
+}
+
+/// Run `sqlsift check` on embedded-SQL fixtures, with their schema
+fn check_embedded_fixture(extra: &[&str]) -> Run {
+    let t = TempDir::new("embedded");
+    let mut args = vec!["check", "-s", "tests/fixtures/embedded/schema.sql"];
+    args.extend_from_slice(extra);
+    t.run_in(&repository_root(), &args)
+}
+
+#[test]
+fn sqlc_query_names_in_human_output() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.sql:8:12")
+        .assert_stderr_contains("= note: in query 'ListPosts'")
+        .assert_stderr_contains("queries.sql:18:22")
+        .assert_stderr_contains("= note: in query 'GetAuthor'")
+        .assert_stderr_lacks("'GetPost'");
+}
+
+#[test]
+fn sqlc_query_names_in_json_output() {
+    let run = check_embedded_fixture(&["-f", "json", "tests/fixtures/embedded/queries.sql"]);
+    run.assert_code(1);
+    let json = run.json();
+    let names: Vec<&str> = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|d| d["query_name"].as_str().expect("query_name"))
+        .collect();
+    assert_eq!(names, ["ListPosts", "GetAuthor"]);
+}
+
+#[test]
+fn json_output_has_no_query_name_outside_sqlc_queries() {
+    let t = with_users_schema("no-query-name");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "q.sql"]);
+    let json = run.json();
+    assert!(json["files"][0]["diagnostics"][0]
+        .get("query_name")
+        .is_none());
+}
+
+#[test]
+fn sqlc_query_names_in_sarif_output() {
+    let run = check_embedded_fixture(&["-f", "sarif", "tests/fixtures/embedded/queries.sql"]);
+    run.assert_code(1);
+    let json = run.json();
+    let result = &json["runs"][0]["results"][0];
+    assert_eq!(
+        result["message"]["text"],
+        "Column 'titel' not found in table 'posts' (in query 'ListPosts')"
+    );
+    assert_eq!(
+        result["locations"][0]["logicalLocations"][0]["name"],
+        "ListPosts"
+    );
+    assert_eq!(
+        result["locations"][0]["physicalLocation"]["region"]["startLine"],
+        8
+    );
+}

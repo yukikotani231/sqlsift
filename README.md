@@ -181,7 +181,7 @@ Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sql
 
 The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
-- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files)
+- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL, psql scripts and sqlc query files)
 - [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
 - [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
 - [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)

@@ -13,6 +13,7 @@ pub mod ignore;
 mod psql;
 pub mod rules;
 pub mod schema;
+mod sqlc;
 mod suggest;
 pub mod types;
 
