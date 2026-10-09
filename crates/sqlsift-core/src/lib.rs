@@ -7,6 +7,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod analyzer;
+pub mod baseline;
 pub mod dialect;
 pub mod error;
 pub mod ignore;

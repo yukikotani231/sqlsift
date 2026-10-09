@@ -97,7 +97,7 @@ fn compile(base: &Path, pattern: &str) -> Result<Pattern, String> {
 
 /// Make `path` absolute (against the current directory) and remove `.` and `..`
 /// components without touching the file system
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

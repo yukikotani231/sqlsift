@@ -4,12 +4,14 @@ mod args;
 mod config;
 mod output;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
+use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
@@ -128,6 +130,23 @@ fn analyze_files(
         .into_iter()
         .map(|r| r.expect("every file is analyzed"))
         .collect()
+}
+
+/// Read the baseline file of known diagnostics
+fn load_baseline(path: &Path) -> Result<BaselineFilter> {
+    let json = fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            miette::miette!(
+                "Baseline file not found: {} (create it with --write-baseline)",
+                path.display()
+            )
+        } else {
+            miette::miette!("Failed to read baseline {}: {}", path.display(), e)
+        }
+    })?;
+    let baseline =
+        Baseline::from_json(&json).map_err(|e| miette::miette!("{}: {}", path.display(), e))?;
+    Ok(BaselineFilter::new(&baseline))
 }
 
 /// Print the rule registry as a table
@@ -273,6 +292,8 @@ fn run(args: Args) -> Result<bool> {
             max_errors,
             max_warnings,
             stdin_filename,
+            baseline,
+            write_baseline,
         } => {
             // Load configuration; CLI args take precedence over the config file
             let config = load_config(config_path.as_deref())?.merge_with_args(
@@ -283,6 +304,7 @@ fn run(args: Args) -> Result<bool> {
                 format,
                 dialect.as_deref(),
                 max_warnings,
+                baseline.as_deref(),
             );
             tracing::info!(
                 schema_count = config.schema.len(),
@@ -377,6 +399,28 @@ fn run(args: Args) -> Result<bool> {
                 }
             };
 
+            // The baseline file: read unless it is being written
+            let baseline_path = config.baseline.as_ref().map(PathBuf::from);
+            let baseline_filter = match &baseline_path {
+                Some(path) if !write_baseline => Some(load_baseline(path)?),
+                _ => None,
+            };
+            let baseline_target = baseline_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_BASELINE_FILE));
+            // Files are named relative to the baseline file's directory
+            let baseline_dir = baseline_target
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_path_buf();
+            let file_key = |path: &Path| -> String {
+                let name = display_name(path);
+                if stdin.is_some() && is_stdin(path) && stdin_filename.is_none() {
+                    return name;
+                }
+                baseline::file_key(Path::new(&name), &baseline_dir)
+            };
+
             // Skip ignored files (`ignore` in sqlsift.toml and `--ignore`); patterns
             // from the config file were already made relative to the current directory
             let ignore_patterns = IgnorePatterns::new(Path::new(""), &config.ignore)
@@ -402,6 +446,41 @@ fn run(args: Args) -> Result<bool> {
             // order, so output and --max-errors behave exactly as when run sequentially
             let analyzed = analyze_files(&query_files, stdin.as_deref(), &catalog, dialect, &rules);
 
+            if write_baseline {
+                let mut baseline = Baseline::default();
+                for (query_file, analyzed) in query_files.iter().zip(analyzed) {
+                    let (content, diagnostics) = analyzed?;
+                    baseline.add_file(&file_key(query_file), &content, &diagnostics);
+                }
+                fs::write(&baseline_target, baseline.to_json()).map_err(|e| {
+                    miette::miette!(
+                        "Failed to write baseline {}: {}",
+                        baseline_target.display(),
+                        e
+                    )
+                })?;
+                if !quiet {
+                    eprintln!(
+                        "Wrote {} baseline entr{} for {} file(s) to {}",
+                        baseline.entries.len(),
+                        if baseline.entries.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
+                        query_files.len(),
+                        baseline_target.display()
+                    );
+                    if baseline_path.is_none() {
+                        eprintln!(
+                            "Use it with `--baseline {0}`, or add `baseline = \"{0}\"` to sqlsift.toml",
+                            baseline_target.display()
+                        );
+                    }
+                }
+                return Ok(false);
+            }
+
             let mut total_errors = 0;
             let mut total_warnings = 0;
             let mut files_checked = 0;
@@ -412,6 +491,11 @@ fn run(args: Args) -> Result<bool> {
                 max_errors
             };
             let mut limit_reached = false;
+            // Diagnostics hidden by the baseline, the entries they matched and the
+            // files they were looked up in
+            let mut baselined = 0;
+            let mut matched = HashSet::new();
+            let mut checked_keys = HashSet::new();
 
             for (query_file, analyzed) in query_files.iter().zip(analyzed) {
                 if total_errors >= max_errors {
@@ -421,6 +505,18 @@ fn run(args: Args) -> Result<bool> {
 
                 let (content, diagnostics) = analyzed?;
                 files_checked += 1;
+
+                let diagnostics = match &baseline_filter {
+                    Some(filter) => {
+                        let key = file_key(query_file);
+                        let filtered = filter.filter(&key, &content, diagnostics);
+                        baselined += filtered.suppressed.len();
+                        matched.extend(filtered.suppressed);
+                        checked_keys.insert(key);
+                        filtered.kept
+                    }
+                    None => diagnostics,
+                };
 
                 let mut diagnostics_to_print = Vec::new();
                 for diag in diagnostics {
@@ -473,6 +569,23 @@ fn run(args: Args) -> Result<bool> {
                 } else {
                     eprintln!("All {files_checked} file(s) passed validation");
                 }
+
+                if baselined > 0 {
+                    eprintln!("{baselined} known diagnostic(s) hidden by the baseline");
+                }
+                // Entries of a file that was only partly checked can't be stale
+                let stale = baseline_filter
+                    .as_ref()
+                    .filter(|_| !limit_reached)
+                    .map_or(0, |filter| filter.stale(&checked_keys, &matched));
+                if stale > 0 {
+                    eprintln!(
+                        "Note: {stale} baseline entr{} no longer occur{}; re-run with --write-baseline to remove {}",
+                        if stale == 1 { "y" } else { "ies" },
+                        if stale == 1 { "s" } else { "" },
+                        if stale == 1 { "it" } else { "them" },
+                    );
+                }
             }
 
             // Too many warnings fail the check; the reason is printed even with
@@ -514,6 +627,7 @@ fn run(args: Args) -> Result<bool> {
                 &[],
                 None,
                 dialect.as_deref(),
+                None,
                 None,
             );
             let dialect = config_dialect(&config)?;
