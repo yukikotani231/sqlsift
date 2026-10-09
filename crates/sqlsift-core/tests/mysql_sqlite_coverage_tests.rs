@@ -2150,3 +2150,265 @@ fn ddl_views_are_registered() {
         );
     }
 }
+
+// =====================================================================
+// mysqldump views, HAVING aliases, INSERT ... SET, index hints and
+// select modifiers (#118)
+// =====================================================================
+
+#[test]
+fn mysqldump_views_are_loaded() {
+    let cases: &[&str] = &[
+        // mysqldump: versioned comments around the view definition
+        "CREATE TABLE `t` (`a` int NOT NULL, PRIMARY KEY (`a`)) ENGINE=InnoDB;\n\
+         /*!50001 CREATE ALGORITHM=UNDEFINED */\n\
+         /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n\
+         /*!50001 VIEW `v` AS select `t`.`a` AS `a` from `t` */;",
+        // The same without the comments
+        "CREATE TABLE t (a int);\n\
+         CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW v AS select `t`.`a` AS `a` from `t`;",
+        "CREATE TABLE t (a int);\n\
+         CREATE OR REPLACE ALGORITHM = MERGE DEFINER = CURRENT_USER() SQL SECURITY INVOKER VIEW v AS SELECT a FROM t;",
+        "CREATE TABLE t (a int);\n\
+         CREATE DEFINER='app'@'localhost' VIEW v AS SELECT a FROM t;",
+        "CREATE TABLE t (a int);\n\
+         CREATE DEFINER=root@localhost SQL SECURITY DEFINER VIEW `v` AS SELECT a FROM t;",
+        // A full mysqldump view section: a stand-in view first, replaced at the end
+        "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n\
+         CREATE TABLE `t` (`a` int NOT NULL) ENGINE=InnoDB;\n\
+         DROP TABLE IF EXISTS `v`;\n\
+         /*!50001 DROP VIEW IF EXISTS `v`*/;\n\
+         SET @saved_cs_client     = @@character_set_client;\n\
+         /*!50503 SET character_set_client = utf8mb4 */;\n\
+         /*!50001 CREATE VIEW `v` AS SELECT \n 1 AS `a`*/;\n\
+         SET character_set_client = @saved_cs_client;\n\
+         /*!40000 ALTER TABLE `t` DISABLE KEYS */;\n\
+         /*!50001 DROP VIEW IF EXISTS `v`*/;\n\
+         /*!50001 SET @saved_cs_client          = @@character_set_client */;\n\
+         /*!50001 SET character_set_results     = utf8mb4 */;\n\
+         /*!50001 SET collation_connection      = utf8mb4_0900_ai_ci */;\n\
+         /*!50001 CREATE ALGORITHM=UNDEFINED */\n\
+         /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n\
+         /*!50001 VIEW `v` AS select `t`.`a` AS `a` from `t` */;\n\
+         /*!50001 SET character_set_client      = @saved_cs_client */;",
+    ];
+    for ddl in cases {
+        let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+        if let Err(diags) = builder.parse(ddl) {
+            panic!("{ddl}\n{}", fmt_diags(&diags));
+        }
+        let (catalog, warnings) = builder.build();
+        assert!(
+            catalog.view_exists(&QualifiedName::new("v")),
+            "view `v` should exist for:\n{ddl}\nwarnings:\n{}",
+            fmt_diags(&warnings)
+        );
+        let mut analyzer = Analyzer::with_dialect(&catalog, SqlDialect::MySQL);
+        let ok = analyzer.analyze("SELECT a FROM v");
+        assert!(ok.is_empty(), "{ddl}\n{}", fmt_diags(&ok));
+        let bad = analyzer.analyze("SELECT b FROM v");
+        assert!(
+            bad.len() == 1 && bad[0].kind == DiagnosticKind::ColumnNotFound,
+            "{ddl}\n{}",
+            fmt_diags(&bad)
+        );
+    }
+}
+
+#[test]
+fn mysqldump_triggers_are_skipped_quietly() {
+    let ddl = "CREATE TABLE `t` (`a` int NOT NULL) ENGINE=InnoDB;\n\
+               DELIMITER ;;\n\
+               /*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `tr` BEFORE INSERT ON `t` \
+               FOR EACH ROW BEGIN SET NEW.a = NEW.a + 1; END */;;\n\
+               DELIMITER ;\n\
+               CREATE TABLE `u` (`b` int) ENGINE=InnoDB;";
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+    if let Err(diags) = builder.parse(ddl) {
+        panic!("{}", fmt_diags(&diags));
+    }
+    let (catalog, warnings) = builder.build();
+    assert!(warnings.is_empty(), "{}", fmt_diags(&warnings));
+    assert!(catalog.get_table(&QualifiedName::new("t")).is_some());
+    assert!(catalog.get_table(&QualifiedName::new("u")).is_some());
+}
+
+#[test]
+fn mysql_unparsable_view_is_reported_as_skipped() {
+    for ddl in [
+        "CREATE TABLE t (a int);\n\
+         CREATE ALGORITHM=UNDEFINED VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION FOO;",
+        // sqlparser can't even tokenize this one (a quoted user variable)
+        "CREATE TABLE t (a int);\n\
+         /*!50001 CREATE ALGORITHM=UNDEFINED */\n\
+         /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n\
+         /*!50001 VIEW `v` AS select @`x` AS `a` from `t` */;",
+    ] {
+        let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+        if let Err(diags) = builder.parse(ddl) {
+            panic!("{}", fmt_diags(&diags));
+        }
+        let (catalog, warnings) = builder.build();
+        assert!(!catalog.view_exists(&QualifiedName::new("v")));
+        assert!(
+            warnings.len() == 1
+                && warnings[0]
+                    .message
+                    .contains("Skipped CREATE VIEW statement for '"),
+            "{ddl}\n{}",
+            fmt_diags(&warnings)
+        );
+    }
+}
+
+#[test]
+fn having_can_use_select_aliases_in_mysql_and_sqlite() {
+    mysql_clean(&[
+        "SELECT c.id, SUM(o.total) total_spent FROM customers c JOIN orders o ON o.customer_id = c.id \
+         GROUP BY c.id HAVING total_spent > 100",
+        "SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id HAVING n > 1 ORDER BY n",
+        "SELECT customer_id AS cid FROM orders GROUP BY cid HAVING cid > 1",
+    ]);
+    sqlite_clean(&["SELECT author_id, COUNT(*) AS n FROM posts GROUP BY author_id HAVING n > 2"]);
+    // An unknown name in HAVING is still reported
+    mysql_bad(&[bad(
+        "SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id HAVING m > 1",
+        DiagnosticKind::ColumnNotFound,
+        "'m'",
+        None,
+        Some((1, 75)),
+    )]);
+    // PostgreSQL rejects output aliases in HAVING
+    let catalog = build_catalog(
+        SqlDialect::PostgreSQL,
+        "CREATE TABLE orders (id int, customer_id int, total numeric);",
+    );
+    let diags = Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL)
+        .analyze("SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id HAVING n > 1");
+    assert!(
+        diags.len() == 1 && diags[0].kind == DiagnosticKind::ColumnNotFound,
+        "{}",
+        fmt_diags(&diags)
+    );
+}
+
+#[test]
+fn mysql_insert_set() {
+    use DiagnosticKind::*;
+    mysql_clean(&[
+        "INSERT INTO customers SET email = ?, full_name = 'A'",
+        "INSERT customers SET email = 'a@x.io', full_name = 'A', status = 'active'",
+        "INSERT IGNORE INTO customers SET email = 'a@x.io', full_name = CONCAT('A', 'B')",
+        "INSERT LOW_PRIORITY INTO `settings` SET `key` = 'theme', `value` = 'dark'",
+        "REPLACE INTO settings SET `key` = 'theme', `value` = 'dark'",
+        "INSERT INTO settings SET `key` = 'theme', `value` = 'dark' \
+         ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)",
+        "INSERT INTO settings SET `key` = 'theme', `value` = 'dark' AS new \
+         ON DUPLICATE KEY UPDATE `value` = new.`value`",
+        "INSERT INTO customers SET email = 'a@x.io', full_name = 'A';\nSELECT id FROM customers",
+    ]);
+    mysql_bad(&[
+        bad(
+            "INSERT INTO customers SET emial = 'a@x.io', full_name = 'A'",
+            ColumnNotFound,
+            "emial",
+            Some("Did you mean 'email'?"),
+            Some((1, 27)),
+        ),
+        bad(
+            "INSERT INTO customers SET email = 'a@x.io', full_name = 'A', balance = 'lots'",
+            TypeMismatch,
+            "balance",
+            None,
+            Some((1, 62)),
+        ),
+        bad(
+            "INSERT INTO customers SET email = NULL, full_name = 'A'",
+            PotentialNullViolation,
+            "email",
+            None,
+            None,
+        ),
+        bad(
+            "INSERT INTO customers SET full_name = 'A'",
+            MissingRequiredColumn,
+            "email",
+            None,
+            None,
+        ),
+        bad(
+            "INSERT INTO customer SET email = 'a@x.io', full_name = 'A'",
+            TableNotFound,
+            "customer",
+            None,
+            Some((1, 13)),
+        ),
+        bad(
+            "INSERT INTO settings SET `key` = 'k', `value` = 'v' ON DUPLICATE KEY UPDATE `valeu` = 'w'",
+            ColumnNotFound,
+            "valeu",
+            None,
+            Some((1, 77)),
+        ),
+        bad(
+            "SELECT 1;\nINSERT INTO customers SET emial = 'a@x.io', full_name = 'A'",
+            ColumnNotFound,
+            "emial",
+            None,
+            Some((2, 27)),
+        ),
+    ]);
+}
+
+#[test]
+fn mysql_index_hints_and_select_modifiers() {
+    use DiagnosticKind::*;
+    mysql_clean(&[
+        "SELECT id FROM orders FORCE INDEX (fk_orders_customer) WHERE customer_id = 1",
+        "SELECT id FROM orders USE INDEX () WHERE customer_id = 1",
+        "SELECT o.id FROM orders o USE KEY (fk_orders_customer) WHERE o.customer_id = 1",
+        "SELECT o.id FROM orders AS o IGNORE INDEX FOR JOIN (`PRIMARY`, fk_orders_customer) \
+         IGNORE INDEX FOR ORDER BY (fk_orders_customer) WHERE o.customer_id = 1 ORDER BY o.id",
+        "SELECT o.id FROM orders o FORCE INDEX FOR GROUP BY (fk_orders_customer) \
+         JOIN customers c USE INDEX (PRIMARY) ON c.id = o.customer_id GROUP BY o.id",
+        "UPDATE orders FORCE INDEX (fk_orders_customer) SET status = 'paid' WHERE customer_id = 1",
+        "SELECT STRAIGHT_JOIN o.id FROM orders o JOIN customers c ON c.id = o.customer_id",
+        "SELECT o.id FROM orders o STRAIGHT_JOIN customers c ON c.id = o.customer_id",
+        "SELECT SQL_CALC_FOUND_ROWS id FROM orders LIMIT 10",
+        "SELECT DISTINCT HIGH_PRIORITY SQL_SMALL_RESULT SQL_BUFFER_RESULT SQL_NO_CACHE status FROM orders",
+        "SELECT DISTINCTROW status FROM orders",
+        "SELECT SQL_BIG_RESULT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+        "SELECT /*+ NO_INDEX_MERGE(orders) */ id FROM orders",
+        "SELECT id FROM orders /*!40000 USE INDEX (fk_orders_customer) */ WHERE customer_id = 1",
+    ]);
+    mysql_bad(&[
+        bad(
+            "SELECT id FROM orders FORCE INDEX (fk_orders_customer) WHERE custmer_id = 1",
+            ColumnNotFound,
+            "custmer_id",
+            None,
+            Some((1, 62)),
+        ),
+        bad(
+            "SELECT STRAIGHT_JOIN o.idd FROM orders o STRAIGHT_JOIN customers c ON c.id = o.customer_id",
+            ColumnNotFound,
+            "idd",
+            None,
+            Some((1, 24)),
+        ),
+        bad(
+            "SELECT SQL_CALC_FOUND_ROWS idd FROM orders",
+            ColumnNotFound,
+            "idd",
+            None,
+            Some((1, 28)),
+        ),
+        bad(
+            "SELECT 'STRAIGHT_JOIN', `FORCE` FROM orders",
+            ColumnNotFound,
+            "FORCE",
+            None,
+            Some((1, 25)),
+        ),
+    ]);
+}

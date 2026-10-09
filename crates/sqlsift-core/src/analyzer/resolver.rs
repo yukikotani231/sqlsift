@@ -710,7 +710,15 @@ impl<'a> Resolver<'a> {
         }
 
         if let Some(having) = &select.having {
-            self.expr(having);
+            // MySQL and SQLite also resolve output column aliases in HAVING
+            // (PostgreSQL doesn't)
+            if matches!(self.dialect, SqlDialect::MySQL | SqlDialect::SQLite) {
+                self.scope.current().select_aliases = aliases;
+                self.expr(having);
+                aliases = std::mem::take(&mut self.scope.current().select_aliases);
+            } else {
+                self.expr(having);
+            }
         }
 
         let columns = self.projection_columns(&select.projection);

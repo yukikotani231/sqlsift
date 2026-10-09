@@ -12,6 +12,7 @@ pub mod dialect;
 pub mod embedded;
 pub mod error;
 pub mod ignore;
+mod mysql;
 mod psql;
 pub mod rules;
 pub mod schema;

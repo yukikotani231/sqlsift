@@ -21,6 +21,7 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **Rails** (`schema_format = :sql`) | `sqlsift check --schema db/structure.sql queries/*.sql` |
 | **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
+| **`mysqldump --no-data`** | `sqlsift check -d mysql --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
 
 ## Migrations: only the "up" direction
