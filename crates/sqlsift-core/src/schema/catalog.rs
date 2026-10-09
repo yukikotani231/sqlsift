@@ -57,19 +57,13 @@ impl Catalog {
 
     /// Get or create a schema
     pub fn get_or_create_schema(&mut self, name: &str) -> &mut Schema {
-        if !self.schemas.contains_key(name) {
-            self.schemas.insert(
-                name.to_string(),
-                Schema {
-                    name: name.to_string(),
-                    tables: IndexMap::new(),
-                    views: IndexMap::new(),
-                },
-            );
-        }
         self.schemas
-            .get_mut(name)
-            .expect("schema was just inserted")
+            .entry(name.to_string())
+            .or_insert_with(|| Schema {
+                name: name.to_string(),
+                tables: IndexMap::new(),
+                views: IndexMap::new(),
+            })
     }
 
     /// Add a table to the catalog
@@ -430,7 +424,10 @@ impl TableDef {
 
     /// Get all column names
     pub fn column_names(&self) -> Vec<&str> {
-        self.columns.keys().map(|s| s.as_str()).collect()
+        self.columns
+            .keys()
+            .map(std::string::String::as_str)
+            .collect()
     }
 }
 
@@ -461,16 +458,19 @@ impl ColumnDef {
         }
     }
 
+    #[must_use]
     pub fn not_null(mut self) -> Self {
         self.nullable = false;
         self
     }
 
+    #[must_use]
     pub fn with_default(mut self, default: DefaultValue) -> Self {
         self.default = Some(default);
         self
     }
 
+    #[must_use]
     pub fn primary_key(mut self) -> Self {
         self.is_primary_key = true;
         self.nullable = false;

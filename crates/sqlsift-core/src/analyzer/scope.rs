@@ -129,7 +129,7 @@ impl Relation {
             .map(|c| Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type)))
             .collect();
         let mut relation = Self::new(RelationKind::Table, name.to_string(), Some(columns));
-        relation.former_columns = table.former_columns.clone();
+        relation.former_columns.clone_from(&table.former_columns);
         Some(relation)
     }
 
@@ -183,7 +183,7 @@ impl Relation {
         let mut columns = columns.unwrap_or_default();
         for (i, name) in names.iter().enumerate() {
             match columns.get_mut(i) {
-                Some(col) => col.name = name.clone(),
+                Some(col) => col.name.clone_from(name),
                 None => columns.push(Column::new(name.clone(), ExpressionType::Unknown)),
             }
         }
@@ -390,7 +390,7 @@ impl Scope {
             }
             match found.len() {
                 0 if maybe => return ColumnLookup::Unknown,
-                0 => continue,
+                0 => {}
                 1 => return ColumnLookup::Found(found[0].1),
                 _ if frame.using_columns.contains(&name.to_lowercase()) => {
                     return ColumnLookup::Found(found[0].1)

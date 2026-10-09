@@ -22,3 +22,6 @@ wasm-bindgen = "=0.2.100"
 # Not a distributable binary; keep cargo-dist from picking it up.
 [package.metadata.dist]
 dist = false
+
+[lints]
+workspace = true

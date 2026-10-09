@@ -32,7 +32,7 @@ fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("Error: {:?}", e);
+            eprintln!("Error: {e:?}");
             ExitCode::from(2)
         }
     }
@@ -94,7 +94,7 @@ fn analyze_files(
     };
 
     let workers = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
+        .map_or(1, std::num::NonZeroUsize::get)
         .min(files.len());
     if workers <= 1 {
         return files.iter().map(analyze_one).collect();
@@ -206,7 +206,7 @@ fn schema_files(config: &Config) -> Result<Vec<PathBuf>> {
             miette::bail!("Schema directory not found: {}", dir);
         }
         // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
-        let matches: Vec<PathBuf> = expand_glob(&format!("{}/**/*.sql", dir))?
+        let matches: Vec<PathBuf> = expand_glob(&format!("{dir}/**/*.sql"))?
             .into_iter()
             .filter(|path| !is_rollback_migration(path))
             .collect();
@@ -277,11 +277,11 @@ fn run(args: Args) -> Result<bool> {
             // Load configuration; CLI args take precedence over the config file
             let config = load_config(config_path.as_deref())?.merge_with_args(
                 &schema,
-                &schema_dir,
+                schema_dir.as_deref(),
                 &files,
                 &ignore,
-                &format,
-                &dialect,
+                format,
+                dialect.as_deref(),
                 max_warnings,
             );
             tracing::info!(
@@ -434,7 +434,7 @@ fn run(args: Args) -> Result<bool> {
                     match diag.severity {
                         sqlsift_core::Severity::Error => total_errors += 1,
                         sqlsift_core::Severity::Warning => total_warnings += 1,
-                        _ => {}
+                        sqlsift_core::Severity::Info => {}
                     }
                     diagnostics_to_print.push(diag);
                 }
@@ -468,11 +468,10 @@ fn run(args: Args) -> Result<bool> {
                 if total_errors > 0 || total_warnings > 0 {
                     eprintln!();
                     eprintln!(
-                        "Found {} error(s), {} warning(s) in {} file(s)",
-                        total_errors, total_warnings, files_checked
+                        "Found {total_errors} error(s), {total_warnings} warning(s) in {files_checked} file(s)"
                     );
                 } else {
-                    eprintln!("All {} file(s) passed validation", files_checked);
+                    eprintln!("All {files_checked} file(s) passed validation");
                 }
             }
 
@@ -510,11 +509,11 @@ fn run(args: Args) -> Result<bool> {
             schema.extend(files);
             let config = load_config(config_path.as_deref())?.merge_with_args(
                 &schema,
-                &schema_dir,
+                schema_dir.as_deref(),
                 &[],
                 &[],
-                &None,
-                &dialect,
+                None,
+                dialect.as_deref(),
                 None,
             );
             let dialect = config_dialect(&config)?;
@@ -542,22 +541,22 @@ fn run(args: Args) -> Result<bool> {
         }
 
         Command::Parse { file } => {
+            use sqlparser::parser::Parser;
+
             // Parse and display AST (for debugging)
             let content = read_file(&file)?;
-
-            use sqlparser::parser::Parser;
 
             let dialect = SqlDialect::default().parser_dialect();
             match Parser::parse_sql(dialect.as_ref(), &content) {
                 Ok(statements) => {
                     for (i, stmt) in statements.iter().enumerate() {
                         println!("Statement {}:", i + 1);
-                        println!("{:#?}", stmt);
+                        println!("{stmt:#?}");
                         println!();
                     }
                 }
                 Err(e) => {
-                    eprintln!("Parse error: {}", e);
+                    eprintln!("Parse error: {e}");
                     return Ok(true);
                 }
             }

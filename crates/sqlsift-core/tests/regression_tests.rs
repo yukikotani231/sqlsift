@@ -1,11 +1,13 @@
 // Regression tests for false positives and noisy diagnostics found by
 // running real-world style queries against PostgreSQL, MySQL and SQLite schemas.
+use std::fmt::Write as _;
+
 use sqlsift_core::analyzer::Analyzer;
 use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::error::{Diagnostic, DiagnosticKind};
 use sqlsift_core::schema::{Catalog, SchemaBuilder};
 
-const PG_SCHEMA: &str = r#"
+const PG_SCHEMA: &str = r"
     CREATE TYPE status AS ENUM ('active', 'inactive');
     CREATE TABLE users (
         id BIGSERIAL PRIMARY KEY,
@@ -26,9 +28,9 @@ const PG_SCHEMA: &str = r#"
         placed_on DATE,
         note VARCHAR(500)
     );
-"#;
+";
 
-const MYSQL_SCHEMA: &str = r#"
+const MYSQL_SCHEMA: &str = r"
     CREATE TABLE users (
         id INT NOT NULL AUTO_INCREMENT,
         name VARCHAR(100) NOT NULL,
@@ -36,11 +38,11 @@ const MYSQL_SCHEMA: &str = r#"
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id)
     );
-"#;
+";
 
-const SQLITE_SCHEMA: &str = r#"
+const SQLITE_SCHEMA: &str = r"
     CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active INTEGER);
-"#;
+";
 
 fn catalog(schema: &str, dialect: SqlDialect) -> Catalog {
     let mut builder = SchemaBuilder::with_dialect(dialect);
@@ -565,10 +567,10 @@ fn system_columns_and_tables_are_known() {
     }
 }
 
-const MYSQL_SHOP: &str = r#"
+const MYSQL_SHOP: &str = r"
     CREATE TABLE customers (id INT PRIMARY KEY, balance DECIMAL(10,2), created_at DATETIME);
     CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total DECIMAL(10,2), placed_at DATETIME);
-"#;
+";
 
 #[test]
 fn mysql_multi_table_update_and_delete() {
@@ -937,13 +939,13 @@ fn case_result_type_is_inferred() {
     );
 }
 
-const MYSQL_ENUM: &str = r#"
+const MYSQL_ENUM: &str = r"
     CREATE TABLE tickets (
         id INT AUTO_INCREMENT PRIMARY KEY,
         status ENUM('open', 'closed', 'pending') NOT NULL DEFAULT 'open',
         priority INT
     );
-"#;
+";
 
 #[test]
 fn mysql_inline_enum_values_are_checked() {
@@ -1097,7 +1099,7 @@ fn large_input_with_a_syntax_error_is_analyzed_in_linear_time() {
     // Re-parsing the whole input for every statement made this quadratic
     let mut sql = String::new();
     for i in 0..3000 {
-        sql.push_str(&format!("SELECT id, name FROM users WHERE id = {i};\n"));
+        let _ = writeln!(sql, "SELECT id, name FROM users WHERE id = {i};");
     }
     sql.push_str("SELECT FROM WHERE;\n");
     let catalog = catalog(PG_SCHEMA, SqlDialect::PostgreSQL);

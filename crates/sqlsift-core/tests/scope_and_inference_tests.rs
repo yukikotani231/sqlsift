@@ -7,7 +7,7 @@ use sqlsift_core::error::{Diagnostic, DiagnosticKind};
 use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::SqlType;
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
     CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped');
     CREATE TABLE users (
         id INTEGER PRIMARY KEY,
@@ -27,7 +27,7 @@ const SCHEMA: &str = r#"
         FROM users u JOIN orders o ON o.user_id = u.id
         GROUP BY u.id;
     CREATE TABLE user_copy AS SELECT id, name FROM users;
-"#;
+";
 
 fn catalog() -> Catalog {
     let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);

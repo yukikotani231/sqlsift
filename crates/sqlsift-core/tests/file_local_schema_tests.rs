@@ -5,7 +5,7 @@ use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::error::{Diagnostic, DiagnosticKind};
 use sqlsift_core::schema::{Catalog, SchemaBuilder};
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
     CREATE TABLE customer (
         customer_id INTEGER PRIMARY KEY,
         first_name TEXT NOT NULL
@@ -15,7 +15,7 @@ const SCHEMA: &str = r#"
         customer_id INTEGER NOT NULL REFERENCES customer(customer_id),
         amount NUMERIC(5, 2) NOT NULL
     );
-"#;
+";
 
 fn catalog(schema: &str, dialect: SqlDialect) -> Catalog {
     let mut builder = SchemaBuilder::with_dialect(dialect);

@@ -120,8 +120,7 @@ fn fmt_diags(diags: &[Diagnostic]) -> String {
         .map(|d| {
             let loc = d
                 .span
-                .map(|s| format!("{}:{}", s.line, s.column))
-                .unwrap_or_else(|| "-".into());
+                .map_or_else(|| "-".into(), |s| format!("{}:{}", s.line, s.column));
             format!(
                 "    [{} @ {}] {} (help: {:?})",
                 d.code(),

@@ -177,7 +177,7 @@ impl SchemaBuilder {
                 _ => String::new(),
             })
             .collect();
-        let word = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+        let word = |i: usize| words.get(i).map_or("", String::as_str);
         let sig_tokens: Vec<&Token> = significant.iter().map(|t| &t.token).collect();
 
         if word(0) == "ALTER" && word(1) == "TYPE" {
@@ -304,8 +304,7 @@ impl SchemaBuilder {
         let length = sql[start_offset..]
             .lines()
             .next()
-            .map(|l| l.trim_end().len())
-            .unwrap_or(0)
+            .map_or(0, |l| l.trim_end().len())
             .max(1);
 
         self.catalog.skipped_definitions.push(SkippedDefinition {
@@ -454,8 +453,7 @@ impl SchemaBuilder {
                 None => self.diagnostics.push(Diagnostic::warning(
                     DiagnosticKind::TableNotFound,
                     format!(
-                        "Table '{}' inherits from table '{}' which was not found in schema",
-                        child, parent_name
+                        "Table '{child}' inherits from table '{parent_name}' which was not found in schema"
                     ),
                 )),
             }
@@ -498,9 +496,11 @@ impl SchemaBuilder {
             return false;
         };
         let mut table = TableDef::new(name);
-        table.columns = parent_table.columns.clone();
-        table.primary_key = parent_table.primary_key.clone();
-        table.check_constraints = parent_table.check_constraints.clone();
+        table.columns.clone_from(&parent_table.columns);
+        table.primary_key.clone_from(&parent_table.primary_key);
+        table
+            .check_constraints
+            .clone_from(&parent_table.check_constraints);
         self.catalog.add_table(table);
         true
     }
@@ -647,10 +647,14 @@ impl SchemaBuilder {
             let source = self.catalog.qualified_name(like);
             match self.catalog.get_table(&source) {
                 Some(source_table) => {
-                    table.columns = source_table.columns.clone();
-                    table.primary_key = source_table.primary_key.clone();
-                    table.unique_constraints = source_table.unique_constraints.clone();
-                    table.check_constraints = source_table.check_constraints.clone();
+                    table.columns.clone_from(&source_table.columns);
+                    table.primary_key.clone_from(&source_table.primary_key);
+                    table
+                        .unique_constraints
+                        .clone_from(&source_table.unique_constraints);
+                    table
+                        .check_constraints
+                        .clone_from(&source_table.check_constraints);
                 }
                 None => self.warn_like_source_missing(&name, &source),
             }
@@ -701,8 +705,7 @@ impl SchemaBuilder {
                     None => self.diagnostics.push(Diagnostic::warning(
                         DiagnosticKind::ParseError,
                         format!(
-                            "Could not determine the columns of table '{}' created by CREATE TABLE ... AS",
-                            name
+                            "Could not determine the columns of table '{name}' created by CREATE TABLE ... AS"
                         ),
                     ).with_help("Queries that reference its columns may report missing columns")),
                 }
@@ -735,8 +738,7 @@ impl SchemaBuilder {
                     .insert(col_name.clone(), ColumnDef::new(col_name, SqlType::Unknown));
             }
         } else {
-            let name = table.name.clone();
-            self.warn_like_source_missing(&name, &source);
+            self.warn_like_source_missing(&table.name, &source);
         }
     }
 
@@ -745,8 +747,7 @@ impl SchemaBuilder {
             Diagnostic::warning(
                 DiagnosticKind::TableNotFound,
                 format!(
-                    "CREATE TABLE '{}' copies table '{}' (LIKE) which was not found in schema",
-                    table, source
+                    "CREATE TABLE '{table}' copies table '{source}' (LIKE) which was not found in schema"
                 ),
             )
             .with_help("Ensure the referenced table is created before the LIKE"),
@@ -765,7 +766,9 @@ impl SchemaBuilder {
         // inferred from SELECT. An empty list means the columns could not be determined.
         let inferred =
             analyzer::query_output_columns(&self.catalog, self.dialect, query).unwrap_or_default();
-        let (column_names, column_types) = if !columns.is_empty() {
+        let (column_names, column_types) = if columns.is_empty() {
+            inferred.into_iter().unzip()
+        } else {
             columns
                 .iter()
                 .enumerate()
@@ -774,8 +777,6 @@ impl SchemaBuilder {
                     (c.name.value.clone(), data_type)
                 })
                 .unzip()
-        } else {
-            inferred.into_iter().unzip()
         };
 
         let view = ViewDef {
@@ -818,8 +819,7 @@ impl SchemaBuilder {
                 Diagnostic::warning(
                     DiagnosticKind::TableNotFound,
                     format!(
-                        "ALTER TABLE references table '{}' which was not found in schema",
-                        table_name
+                        "ALTER TABLE references table '{table_name}' which was not found in schema"
                     ),
                 )
                 .with_help("Ensure the CREATE TABLE statement appears before ALTER TABLE"),
@@ -859,7 +859,7 @@ impl SchemaBuilder {
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(index) = column_index(table, &old_column_name.value) {
                             let mut col = table.columns[index].clone();
-                            col.name = new_column_name.value.clone();
+                            col.name.clone_from(&new_column_name.value);
                             let old_name = table.columns[index].name.clone();
                             table.record_column_rename(&old_name, &col.name);
                             replace_column(table, index, col);
@@ -905,16 +905,13 @@ impl SchemaBuilder {
                     );
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         merge_constraints(table, constraints);
-                        match column_index(table, &col_name.value) {
-                            Some(index) => {
-                                let old_name = table.columns[index].name.clone();
-                                table.record_column_rename(&old_name, &col.name);
-                                replace_column(table, index, col);
-                            }
-                            None => {
-                                table.forget_former_column(&col.name);
-                                table.columns.insert(col.name.clone(), col);
-                            }
+                        if let Some(index) = column_index(table, &col_name.value) {
+                            let old_name = table.columns[index].name.clone();
+                            table.record_column_rename(&old_name, &col.name);
+                            replace_column(table, index, col);
+                        } else {
+                            table.forget_former_column(&col.name);
+                            table.columns.insert(col.name.clone(), col);
                         }
                     }
                 }
@@ -925,9 +922,8 @@ impl SchemaBuilder {
                     let schema_name = table_name
                         .schema
                         .as_ref()
-                        .unwrap_or(&self.catalog.default_schema)
-                        .clone();
-                    if let Some(schema) = self.catalog.schemas.get_mut(&schema_name) {
+                        .unwrap_or(&self.catalog.default_schema);
+                    if let Some(schema) = self.catalog.schemas.get_mut(schema_name) {
                         if let Some(mut table) = schema.tables.shift_remove(&table_name.name) {
                             table.name = new_qualified.clone();
                             schema.tables.insert(new_qualified.name, table);
@@ -974,17 +970,14 @@ impl SchemaBuilder {
         representation: &UserDefinedTypeRepresentation,
     ) {
         let qualified = self.catalog.qualified_name(name);
-        match representation {
-            UserDefinedTypeRepresentation::Enum { labels } => {
-                let enum_def = EnumTypeDef {
-                    name: qualified.name,
-                    values: labels.iter().map(|l| l.value.clone()).collect(),
-                };
-                self.catalog.add_enum(enum_def);
-            }
-            _ => {
-                // Composite types and others - not yet supported
-            }
+        if let UserDefinedTypeRepresentation::Enum { labels } = representation {
+            let enum_def = EnumTypeDef {
+                name: qualified.name,
+                values: labels.iter().map(|l| l.value.clone()).collect(),
+            };
+            self.catalog.add_enum(enum_def);
+        } else {
+            // Composite types and others - not yet supported
         }
     }
 
@@ -1118,7 +1111,7 @@ fn build_column(
                 let kind = match generated_as {
                     GeneratedAs::Always => IdentityKind::Always,
                     GeneratedAs::ByDefault => IdentityKind::ByDefault,
-                    _ => continue,
+                    GeneratedAs::ExpStored => continue,
                 };
                 col.identity = Some(kind);
                 col.nullable = false; // IDENTITY columns are implicitly NOT NULL
@@ -1221,7 +1214,7 @@ fn replace_column(table: &mut TableDef, index: usize, col: ColumnDef) {
     let rename = |columns: &mut Vec<String>| {
         for c in columns.iter_mut() {
             if *c == old_name {
-                *c = new_name.clone();
+                c.clone_from(&new_name);
             }
         }
     };
@@ -1301,7 +1294,7 @@ fn split_object_names(tokens: &[&Token]) -> Vec<ObjectName> {
 fn line_column_at(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset];
     let line = before.matches('\n').count() + 1;
-    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     (line, before[line_start..].chars().count() + 1)
 }
 
@@ -1323,8 +1316,7 @@ fn byte_offset_of(text: &str, line: usize, column: usize) -> Option<usize> {
             let in_line = l
                 .char_indices()
                 .nth(column.saturating_sub(1))
-                .map(|(b, _)| b)
-                .unwrap_or(l.len());
+                .map_or(l.len(), |(b, _)| b);
             return Some(offset + in_line);
         }
         offset += l.len();
@@ -1531,14 +1523,14 @@ mod tests {
 
     #[test]
     fn test_parse_simple_table() {
-        let sql = r#"
+        let sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
                 email TEXT UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1561,13 +1553,13 @@ mod tests {
 
     #[test]
     fn test_parse_table_with_foreign_key() {
-        let sql = r#"
+        let sql = r"
             CREATE TABLE orders (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 total DECIMAL(10, 2)
             );
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1631,7 +1623,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_unsupported_statements() {
-        let sql = r#"
+        let sql = r"
             CREATE OR REPLACE PROCEDURAL LANGUAGE plpgsql;
 
             CREATE TABLE actor (
@@ -1645,7 +1637,7 @@ mod tests {
                 category_id integer NOT NULL,
                 name character varying(25) NOT NULL
             );
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1659,7 +1651,7 @@ mod tests {
     #[test]
     fn test_parse_sakila_like_schema() {
         // Simulates Sakila-style schema with mixed supported/unsupported statements
-        let sql = r#"
+        let sql = r"
             SET client_encoding = 'UTF8';
             SET standard_conforming_strings = off;
 
@@ -1698,7 +1690,7 @@ mod tests {
                 name character varying(25) NOT NULL,
                 last_update timestamp without time zone DEFAULT now() NOT NULL
             );
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1724,7 +1716,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_functions_and_triggers() {
-        let sql = r#"
+        let sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL
@@ -1742,7 +1734,7 @@ mod tests {
                 title TEXT NOT NULL,
                 user_id INTEGER NOT NULL
             );
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1754,7 +1746,7 @@ mod tests {
 
     #[test]
     fn test_drop_table() {
-        let sql = r#"
+        let sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL
@@ -1766,7 +1758,7 @@ mod tests {
             );
 
             DROP TABLE users;
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();
@@ -1785,7 +1777,7 @@ mod tests {
 
     #[test]
     fn test_drop_table_if_exists() {
-        let sql = r#"
+        let sql = r"
             CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL
@@ -1793,7 +1785,7 @@ mod tests {
 
             DROP TABLE IF EXISTS users;
             DROP TABLE IF EXISTS nonexistent;
-        "#;
+        ";
 
         let mut builder = SchemaBuilder::new();
         builder.parse(sql).unwrap();

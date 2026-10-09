@@ -42,3 +42,25 @@ sqlsift-core = { path = "crates/sqlsift-core", version = "0.1.4" }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Too noisy for this codebase
+must_use_candidate = "allow"
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+# Flags product names such as PostgreSQL as code
+doc_markdown = "allow"
+# Type mapping tables read better with one arm per type
+match_same_arms = "allow"
+# `assert!(v.is_empty())` reads better than `assert_eq!(v, [] as [T; 0])`
+assert_is_empty = "allow"
+# Line/column numbers (u64 in sqlparser, u32 in LSP) always fit
+cast_possible_truncation = "allow"
+# `use Enum::*` inside a function keeps long matches readable
+enum_glob_use = "allow"

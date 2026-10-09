@@ -44,25 +44,27 @@ impl Resolver<'_> {
         column: Option<String>,
         span: Option<Span>,
     ) -> bool {
-        let (enum_type, literal) = match (left, right) {
-            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit))
-            | (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => (t, lit),
-            _ => return false,
+        let ((ExpressionType::Known(enum_type), ExpressionType::StringLiteral(literal))
+        | (ExpressionType::StringLiteral(literal), ExpressionType::Known(enum_type))) =
+            (left, right)
+        else {
+            return false;
         };
         // Named enum type (CREATE TYPE ... AS ENUM) or inline ENUM(...) column type
+        let catalog = self.catalog;
         let (target, values) = match enum_type {
-            SqlType::Custom(name) => match self.catalog.get_enum(name) {
+            SqlType::Custom(name) => match catalog.get_enum(name) {
                 Some(enum_def) => (
                     format!("enum type '{}'", enum_def.name),
-                    enum_def.values.clone(),
+                    enum_def.values.as_slice(),
                 ),
                 None => return false,
             },
             SqlType::Enum(values) => match column {
-                Some(column) => (format!("enum column '{}'", column), values.clone()),
+                Some(column) => (format!("enum column '{column}'"), values.as_slice()),
                 None => (
                     format!("enum type '{}'", enum_type.display_name()),
-                    values.clone(),
+                    values.as_slice(),
                 ),
             },
             _ => return false,
@@ -70,21 +72,22 @@ impl Resolver<'_> {
         if values.is_empty() || values.iter().any(|v| v == literal) {
             return false;
         }
-        let help = find_similar_name(values.iter().cloned(), literal)
-            .map(|s| format!("Did you mean '{}'?", s))
-            .unwrap_or_else(|| {
+        let help = find_similar_name(values.iter().cloned(), literal).map_or_else(
+            || {
                 format!(
                     "Valid values: {}",
                     values
                         .iter()
-                        .map(|v| format!("'{}'", v))
+                        .map(|v| format!("'{v}'"))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
-            });
+            },
+            |s| format!("Did you mean '{s}'?"),
+        );
         let mut diag = Diagnostic::error(
             DiagnosticKind::TypeMismatch,
-            format!("Invalid value '{}' for {}", literal, target),
+            format!("Invalid value '{literal}' for {target}"),
         )
         .with_help(help);
         diag.span = span;
@@ -132,7 +135,7 @@ impl Resolver<'_> {
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
             let mut diag = Diagnostic::error(
                 DiagnosticKind::TypeMismatch,
-                format!("Type mismatch: cannot compare {} with {}", lt, rt),
+                format!("Type mismatch: cannot compare {lt} with {rt}"),
             )
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = span;
@@ -153,7 +156,7 @@ impl Resolver<'_> {
             self.diagnostics.push(
                 Diagnostic::error(
                     DiagnosticKind::JoinTypeMismatch,
-                    format!("JOIN condition type mismatch: {} vs {}", lt, rt),
+                    format!("JOIN condition type mismatch: {lt} vs {rt}"),
                 )
                 .with_span(span.unwrap_or_else(|| Span::from_sqlparser(&left.span())))
                 .with_help(
@@ -266,10 +269,7 @@ impl Resolver<'_> {
             if let Some((expected, actual)) = self.type_conflict(reference, ty) {
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::TypeMismatch,
-                    format!(
-                        "CASE branches have incompatible types: {} and {}",
-                        expected, actual
-                    ),
+                    format!("CASE branches have incompatible types: {expected} and {actual}"),
                 )
                 .with_help("All THEN/ELSE results of a CASE expression must have compatible types");
                 diag.span =
@@ -521,9 +521,13 @@ impl Resolver<'_> {
     /// Result type of a CASE expression: the first branch with a known type, or text
     /// when every branch is a string literal (as in PostgreSQL)
     fn infer_case_type(&self, branches: &[&Expr]) -> ExpressionType {
-        let types: Vec<ExpressionType> = branches.iter().map(|b| self.infer_expr_type(b)).collect();
-        if let Some(known) = types.iter().find(|t| matches!(t, ExpressionType::Known(_))) {
-            return known.clone();
+        let mut types: Vec<ExpressionType> =
+            branches.iter().map(|b| self.infer_expr_type(b)).collect();
+        if let Some(i) = types
+            .iter()
+            .position(|t| matches!(t, ExpressionType::Known(_)))
+        {
+            return types.swap_remove(i);
         }
         if !types.is_empty()
             && types
@@ -671,8 +675,7 @@ fn not_null_violation(column: &str, span: Span) -> Diagnostic {
     Diagnostic::error(
         DiagnosticKind::PotentialNullViolation,
         format!(
-            "Potential NOT NULL violation: column '{}' cannot be assigned NULL",
-            column
+            "Potential NOT NULL violation: column '{column}' cannot be assigned NULL"
         ),
     )
     .with_span(span)
@@ -685,10 +688,7 @@ fn not_null_violation(column: &str, span: Span) -> Diagnostic {
 fn assignment_mismatch(column: &str, expected: &str, actual: &str) -> Diagnostic {
     Diagnostic::error(
         DiagnosticKind::TypeMismatch,
-        format!(
-            "Type mismatch: column '{}' expects {}, but got {}",
-            column, expected, actual
-        ),
+        format!("Type mismatch: column '{column}' expects {expected}, but got {actual}"),
     )
     .with_help("Value type is not compatible with the column type. Consider using explicit CAST.")
 }
@@ -799,10 +799,10 @@ mod tests {
 
     #[test]
     fn test_join_type_mismatch() {
-        let schema_sql = r#"
+        let schema_sql = r"
             CREATE TABLE users (id INTEGER, name TEXT);
             CREATE TABLE orders (order_id INTEGER, user_name TEXT);
-        "#;
+        ";
         let mut builder = SchemaBuilder::new();
         builder.parse(schema_sql).unwrap();
         let (catalog, _) = builder.build();
@@ -840,21 +840,20 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Same type comparison should not produce errors: {:?}",
-            diagnostics
+            "Same type comparison should not produce errors: {diagnostics:?}"
         );
     }
 
     #[test]
     fn test_numeric_type_compatibility() {
-        let schema_sql = r#"
+        let schema_sql = r"
             CREATE TABLE data (
                 tiny SMALLINT,
                 small SMALLINT,
                 medium INTEGER,
                 big BIGINT
             );
-        "#;
+        ";
         let mut builder = SchemaBuilder::new();
         builder.parse(schema_sql).unwrap();
         let (catalog, _) = builder.build();
@@ -871,8 +870,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Numeric type implicit cast should be allowed: {:?}",
-            diagnostics
+            "Numeric type implicit cast should be allowed: {diagnostics:?}"
         );
 
         // INTEGER = BIGINT (implicit cast allowed)
@@ -885,8 +883,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Integer to BigInt implicit cast should be allowed: {:?}",
-            diagnostics
+            "Integer to BigInt implicit cast should be allowed: {diagnostics:?}"
         );
     }
 
@@ -909,7 +906,7 @@ mod tests {
         ];
 
         for (op, _name) in operators {
-            let query = format!("SELECT * FROM users WHERE id {} 'text'", op);
+            let query = format!("SELECT * FROM users WHERE id {op} 'text'");
             let statements =
                 sqlparser::parser::Parser::parse_sql(dialect.as_ref(), &query).unwrap();
 
@@ -917,8 +914,7 @@ mod tests {
             assert_eq!(
                 diagnostics.len(),
                 1,
-                "Operator {} should detect type mismatch",
-                op
+                "Operator {op} should detect type mismatch"
             );
             assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
         }
@@ -943,8 +939,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "NULL comparison should not produce type errors: {:?}",
-            diagnostics
+            "NULL comparison should not produce type errors: {diagnostics:?}"
         );
 
         // NULL with TEXT
@@ -957,8 +952,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "NULL with TEXT should not produce type errors: {:?}",
-            diagnostics
+            "NULL with TEXT should not produce type errors: {diagnostics:?}"
         );
     }
 
@@ -980,8 +974,7 @@ mod tests {
         assert_eq!(
             diagnostics.len(),
             2,
-            "Should detect multiple type errors: {:?}",
-            diagnostics
+            "Should detect multiple type errors: {diagnostics:?}"
         );
         assert!(diagnostics
             .iter()
@@ -1005,8 +998,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "INTEGER to DECIMAL implicit cast should be allowed: {:?}",
-            diagnostics
+            "INTEGER to DECIMAL implicit cast should be allowed: {diagnostics:?}"
         );
     }
 
@@ -1029,8 +1021,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "VARCHAR to TEXT implicit cast should be allowed: {:?}",
-            diagnostics
+            "VARCHAR to TEXT implicit cast should be allowed: {diagnostics:?}"
         );
 
         // CHAR = VARCHAR (implicit cast allowed)
@@ -1043,8 +1034,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "CHAR to VARCHAR implicit cast should be allowed: {:?}",
-            diagnostics
+            "CHAR to VARCHAR implicit cast should be allowed: {diagnostics:?}"
         );
     }
 
@@ -1071,10 +1061,10 @@ mod tests {
 
     #[test]
     fn test_complex_join_conditions() {
-        let schema_sql = r#"
+        let schema_sql = r"
             CREATE TABLE users (id INTEGER, name TEXT);
             CREATE TABLE orders (user_id INTEGER, product TEXT);
-        "#;
+        ";
         let mut builder = SchemaBuilder::new();
         builder.parse(schema_sql).unwrap();
         let (catalog, _) = builder.build();
@@ -1091,8 +1081,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Valid JOIN condition should not produce errors: {:?}",
-            diagnostics
+            "Valid JOIN condition should not produce errors: {diagnostics:?}"
         );
     }
 
@@ -1113,8 +1102,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Arithmetic on numeric types should not produce errors: {:?}",
-            diagnostics
+            "Arithmetic on numeric types should not produce errors: {diagnostics:?}"
         );
 
         // INTEGER + DECIMAL
@@ -1125,8 +1113,7 @@ mod tests {
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
             diagnostics.is_empty(),
-            "Mixed numeric arithmetic should not produce errors: {:?}",
-            diagnostics
+            "Mixed numeric arithmetic should not produce errors: {diagnostics:?}"
         );
     }
 }

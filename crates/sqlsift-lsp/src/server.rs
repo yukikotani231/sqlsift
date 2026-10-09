@@ -2,7 +2,14 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
+use tower_lsp::lsp_types::{
+    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, MarkupContent, MarkupKind, MessageType, SaveOptions, ServerCapabilities,
+    TextDocumentItem, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Url,
+};
 use tower_lsp::{Client, LanguageServer};
 
 use crate::diagnostics::to_lsp_diagnostics;
@@ -105,10 +112,7 @@ impl LanguageServer for Backend {
         self.client
             .log_message(
                 MessageType::INFO,
-                format!(
-                    "sqlsift LSP initialized ({} schema file(s) loaded)",
-                    schema_count
-                ),
+                format!("sqlsift LSP initialized ({schema_count} schema file(s) loaded)"),
             )
             .await;
 
@@ -122,8 +126,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        let text = params.text_document.text.clone();
+        let TextDocumentItem { uri, text, .. } = params.text_document;
 
         {
             let mut state = self.state.write().await;
@@ -134,7 +137,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
+        let uri = params.text_document.uri;
         // FULL sync: first content change contains the entire document
         if let Some(change) = params.content_changes.into_iter().next() {
             let text = change.text;
@@ -149,7 +152,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
+        let uri = params.text_document.uri;
 
         // Check if saved file is a schema file
         let is_schema = if let Ok(path) = uri.to_file_path() {
@@ -182,7 +185,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
+        let uri = params.text_document.uri;
 
         {
             let mut state = self.state.write().await;
@@ -198,15 +201,14 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
 
         let state = self.state.read().await;
-        let text = match state.open_documents.get(uri) {
-            Some(t) => t,
-            None => return Ok(None),
+        let Some(text) = state.open_documents.get(uri) else {
+            return Ok(None);
         };
 
-        let word = match word_at_position(text, position.line as usize, position.character as usize)
-        {
-            Some(w) => w,
-            None => return Ok(None),
+        let Some(word) =
+            word_at_position(text, position.line as usize, position.character as usize)
+        else {
+            return Ok(None);
         };
 
         match state.hover_info(&word) {

@@ -196,7 +196,7 @@ pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {
             }
             b':' => {
                 let next = bytes.get(i + 1).copied();
-                if matches!(next, Some(b':') | Some(b'=')) {
+                if matches!(next, Some(b':' | b'=')) {
                     // `::` cast, `:=` assignment
                     i += 2;
                     continue;

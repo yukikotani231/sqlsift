@@ -16,14 +16,39 @@ use std::collections::{HashMap, HashSet};
 use crate::error::DiagnosticKind;
 use crate::rules::{find_rule, similar_rule_name};
 
+/// Rules disabled by a directive
+#[derive(Debug)]
+enum Disabled {
+    /// A directive without rule names
+    All,
+    /// Rule codes or names, as written
+    Rules(HashSet<String>),
+}
+
+impl Disabled {
+    fn merge(&mut self, other: Disabled) {
+        match (self, other) {
+            (Disabled::All, _) => {}
+            (this, Disabled::All) => *this = Disabled::All,
+            (Disabled::Rules(ids), Disabled::Rules(new)) => ids.extend(new),
+        }
+    }
+
+    /// Whether the rule code or name `id` is disabled
+    fn contains(&self, id: &str) -> bool {
+        match self {
+            Disabled::All => true,
+            Disabled::Rules(ids) => ids.iter().any(|i| i.eq_ignore_ascii_case(id)),
+        }
+    }
+}
+
 /// Parsed inline disable directives from SQL comments
 pub struct InlineDirectives {
-    /// Map from line number (1-indexed) to disabled rule codes.
-    /// `None` means all rules are disabled on that line.
-    disabled_lines: HashMap<usize, Option<HashSet<String>>>,
-    /// Rules disabled for the whole file by `-- sqlsift:disable-file`.
-    /// `None`: no file directive; `Some(None)`: all rules are disabled.
-    disabled_file: Option<Option<HashSet<String>>>,
+    /// Map from line number (1-indexed) to the rules disabled on that line
+    disabled_lines: HashMap<usize, Disabled>,
+    /// Rules disabled for the whole file by `-- sqlsift:disable-file`
+    disabled_file: Option<Disabled>,
 }
 
 /// The kind of a `sqlsift:` comment directive
@@ -38,9 +63,9 @@ enum DirectiveScope {
 impl InlineDirectives {
     /// Parse inline disable directives from SQL text
     pub fn parse(sql: &str) -> Self {
-        let mut disabled_lines: HashMap<usize, Option<HashSet<String>>> = HashMap::new();
-        let mut pending_codes: Option<Option<HashSet<String>>> = None;
-        let mut disabled_file: Option<Option<HashSet<String>>> = None;
+        let mut disabled_lines: HashMap<usize, Disabled> = HashMap::new();
+        let mut pending_codes: Option<Disabled> = None;
+        let mut disabled_file: Option<Disabled> = None;
 
         for (idx, line) in sql.lines().enumerate() {
             let line_num = idx + 1; // 1-indexed to match sqlparser Span
@@ -49,7 +74,7 @@ impl InlineDirectives {
             let directive = parse_directive_from_line(line);
             if let Some((DirectiveScope::File, codes)) = directive {
                 match &mut disabled_file {
-                    Some(existing) => merge_codes(existing, codes),
+                    Some(existing) => existing.merge(codes),
                     None => disabled_file = Some(codes),
                 }
                 // Inline after SQL: the line still consumes a pending line directive
@@ -62,21 +87,18 @@ impl InlineDirectives {
                 if trimmed.starts_with("--") {
                     // Standalone comment line: accumulate and apply to next SQL line
                     match &mut pending_codes {
-                        Some(existing) => {
-                            merge_codes(existing, codes);
-                        }
-                        None => {
-                            pending_codes = Some(codes);
-                        }
+                        Some(existing) => existing.merge(codes),
+                        None => pending_codes = Some(codes),
                     }
                 } else {
                     // Inline comment (SQL + -- sqlsift:disable): applies to this line
                     merge_into_map(&mut disabled_lines, line_num, codes);
                 }
-            } else if pending_codes.is_some() && !trimmed.is_empty() && !trimmed.starts_with("--") {
+            } else if !trimmed.is_empty() && !trimmed.starts_with("--") {
                 // Non-comment, non-empty line: apply pending disables
-                let codes = pending_codes.take().unwrap();
-                merge_into_map(&mut disabled_lines, line_num, codes);
+                if let Some(codes) = pending_codes.take() {
+                    merge_into_map(&mut disabled_lines, line_num, codes);
+                }
             }
         }
 
@@ -97,28 +119,22 @@ impl InlineDirectives {
     /// Check if a diagnostic of the given kind is suppressed for the whole file
     /// (by `-- sqlsift:disable-file`), regardless of where it is reported
     pub fn is_suppressed_in_file(&self, kind: DiagnosticKind) -> bool {
-        match &self.disabled_file {
-            None => false,
-            Some(None) => true,
-            Some(Some(ids)) => ids.iter().any(|i| {
-                i.eq_ignore_ascii_case(kind.code()) || i.eq_ignore_ascii_case(kind.name())
-            }),
-        }
+        self.disabled_file
+            .as_ref()
+            .is_some_and(|d| d.contains(kind.code()) || d.contains(kind.name()))
     }
 
     /// Whether the rule code or name `id` is disabled on the given line
     fn suppresses(&self, id: &str, line: usize) -> bool {
-        match self.disabled_lines.get(&line) {
-            Some(None) => true, // All rules disabled
-            Some(Some(ids)) => ids.iter().any(|i| i.eq_ignore_ascii_case(id)),
-            None => false,
-        }
+        self.disabled_lines
+            .get(&line)
+            .is_some_and(|d| d.contains(id))
     }
 
     /// Names in the disable directives for the given line that are no rule code or
     /// name (most likely misspelled), sorted
     pub fn unknown_ids(&self, line: usize) -> Vec<&str> {
-        let Some(Some(ids)) = self.disabled_lines.get(&line) else {
+        let Some(Disabled::Rules(ids)) = self.disabled_lines.get(&line) else {
             return Vec::new();
         };
         let mut unknown: Vec<&str> = ids
@@ -138,12 +154,10 @@ impl InlineDirectives {
             .into_iter()
             .map(|id| match similar_rule_name(id) {
                 Some(suggestion) => format!(
-                    "'{}' in the sqlsift:disable comment is not a rule. Did you mean '{}'?",
-                    id, suggestion
+                    "'{id}' in the sqlsift:disable comment is not a rule. Did you mean '{suggestion}'?"
                 ),
                 None => format!(
-                    "'{}' in the sqlsift:disable comment is not a rule (run `sqlsift rules` to list rules)",
-                    id
+                    "'{id}' in the sqlsift:disable comment is not a rule (run `sqlsift rules` to list rules)"
                 ),
             })
             .collect();
@@ -152,9 +166,9 @@ impl InlineDirectives {
 }
 
 /// Parse a `-- sqlsift:disable ...` or `-- sqlsift:disable-file ...` directive from a line.
-/// Returns the directive's scope with `None` for "disable all" or `Some(set)` for
-/// specific codes. Returns `None` if no directive is found.
-fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Option<HashSet<String>>)> {
+/// Returns the directive's scope and the rules it disables, or `None` if no directive
+/// is found.
+fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Disabled)> {
     // Find `--` that's not inside a string literal
     let comment_start = find_line_comment(line)?;
     let comment = &line[comment_start + 2..]; // skip "--"
@@ -169,7 +183,7 @@ fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Option<HashS
 
     if rest.is_empty() {
         // `-- sqlsift:disable` (no codes = disable all)
-        return Some((scope, None));
+        return Some((scope, Disabled::All));
     }
 
     // Must be followed by whitespace or comma
@@ -179,15 +193,15 @@ fn parse_directive_from_line(line: &str) -> Option<(DirectiveScope, Option<HashS
 
     let codes: HashSet<String> = rest
         .split([',', ' '])
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
 
     if codes.is_empty() {
-        Some((scope, None))
+        Some((scope, Disabled::All))
     } else {
-        Some((scope, Some(codes)))
+        Some((scope, Disabled::Rules(codes)))
     }
 }
 
@@ -238,33 +252,11 @@ fn find_line_comment(line: &str) -> Option<usize> {
 }
 
 /// Merge new codes into an existing entry in the map
-fn merge_into_map(
-    map: &mut HashMap<usize, Option<HashSet<String>>>,
-    line: usize,
-    codes: Option<HashSet<String>>,
-) {
+fn merge_into_map(map: &mut HashMap<usize, Disabled>, line: usize, codes: Disabled) {
     match map.get_mut(&line) {
-        Some(existing) => {
-            merge_codes(existing, codes);
-        }
+        Some(existing) => existing.merge(codes),
         None => {
             map.insert(line, codes);
-        }
-    }
-}
-
-/// Merge new codes into existing codes. `None` means "all rules disabled".
-fn merge_codes(existing: &mut Option<HashSet<String>>, new: Option<HashSet<String>>) {
-    match (existing.as_mut(), new) {
-        (_, None) => {
-            // New disables all → override
-            *existing = None;
-        }
-        (None, _) => {
-            // Already disabling all → keep as-is
-        }
-        (Some(existing_set), Some(new_set)) => {
-            existing_set.extend(new_set);
         }
     }
 }

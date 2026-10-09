@@ -86,6 +86,7 @@ impl<'a> Analyzer<'a> {
     /// let mut analyzer = Analyzer::new(&catalog).with_rules(rules);
     /// assert!(analyzer.analyze("SELECT 1 FROM missing").is_empty());
     /// ```
+    #[must_use]
     pub fn with_rules(mut self, rules: RuleConfig) -> Self {
         self.rules = rules;
         self
@@ -343,28 +344,24 @@ fn parse_error_diagnostic(
     };
     // Without a usable location (e.g. unexpected end of input), point at the end of
     // the statement's last token
-    let span = match location.filter(|(l, _)| *l > 0) {
-        // Relative to the statement's text: shift by where the statement starts
-        Some((line, column)) => {
-            let (start_line, start_column) = lines.line_column(range.start);
-            let mut span = Span::with_location(line, column, 1);
-            Origin {
-                line: start_line,
-                column: start_column,
-            }
-            .shift(&mut span);
-            span
+    let span = if let Some((line, column)) = location.filter(|(l, _)| *l > 0) {
+        let (start_line, start_column) = lines.line_column(range.start);
+        let mut span = Span::with_location(line, column, 1);
+        Origin {
+            line: start_line,
+            column: start_column,
         }
-        None => {
-            let text = &sql[range.clone()];
-            let end = range.start + text.trim_end().trim_end_matches(';').trim_end().len();
-            let (line, column) = lines.line_column(end);
-            Span::with_location(line, column, 1)
-        }
+        .shift(&mut span);
+        span
+    } else {
+        let text = &sql[range.clone()];
+        let end = range.start + text.trim_end().trim_end_matches(';').trim_end().len();
+        let (line, column) = lines.line_column(end);
+        Span::with_location(line, column, 1)
     };
     Diagnostic::error(
         DiagnosticKind::ParseError,
-        format!("Parse error: {}", message),
+        format!("Parse error: {message}"),
     )
     .with_span(span)
 }

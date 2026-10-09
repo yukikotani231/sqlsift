@@ -114,16 +114,19 @@ impl Diagnostic {
         }
     }
 
+    #[must_use]
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
         self
     }
 
+    #[must_use]
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
     }
 
+    #[must_use]
     pub fn with_label(mut self, message: impl Into<String>, span: Span) -> Self {
         self.labels.push(Label {
             message: message.into(),

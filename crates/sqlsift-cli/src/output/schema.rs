@@ -46,12 +46,12 @@ impl SchemaReport<'_> {
         }
 
         for (schema_name, schema) in &self.catalog.schemas {
-            let _ = writeln!(out, "\nSchema: {}", schema_name);
+            let _ = writeln!(out, "\nSchema: {schema_name}");
             if schema.tables.is_empty() && schema.views.is_empty() {
                 let _ = writeln!(out, "  (no tables or views)");
             }
             for (table_name, table) in &schema.tables {
-                let _ = writeln!(out, "  Table: {}", table_name);
+                let _ = writeln!(out, "  Table: {table_name}");
                 for col in table.columns.values() {
                     let _ = writeln!(out, "    - {}", column_line(col));
                 }
@@ -71,7 +71,7 @@ impl SchemaReport<'_> {
                 } else {
                     "View"
                 };
-                let _ = writeln!(out, "  {}: {}", kind, view_name);
+                let _ = writeln!(out, "  {kind}: {view_name}");
                 if view.columns.is_empty() {
                     let _ = writeln!(out, "    (columns unknown)");
                 }
@@ -81,7 +81,7 @@ impl SchemaReport<'_> {
                             let _ = writeln!(out, "    - {} {}", name, ty.display_name());
                         }
                         None => {
-                            let _ = writeln!(out, "    - {}", name);
+                            let _ = writeln!(out, "    - {name}");
                         }
                     }
                 }
