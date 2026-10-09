@@ -408,7 +408,7 @@ pub fn file_key(path: &Path, base_dir: &Path) -> String {
         .take_while(|(a, b)| a == b)
         .count();
     if common == 0 {
-        return normalize_separators(&path.to_string_lossy());
+        return normalize_separators(&absolute.to_string_lossy());
     }
     let parts: Vec<String> = std::iter::repeat("..".to_string())
         .take(base_parts.len() - common)
@@ -421,14 +421,16 @@ pub fn file_key(path: &Path, base_dir: &Path) -> String {
     parts.join("/")
 }
 
-/// `path` made absolute, with symbolic links resolved in the part of it that
-/// exists, and lexically normalized
+/// `path` made absolute, lexically normalized, and with symbolic links
+/// resolved in the part of it that exists
 fn resolve(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
+    // Normalized first so that a `..` never ends the walk below early
+    let absolute = crate::ignore::normalize(&absolute);
     let mut existing = absolute.as_path();
     let mut rest = Vec::new();
     loop {
@@ -436,7 +438,9 @@ fn resolve(path: &Path) -> PathBuf {
             let joined = rest
                 .iter()
                 .rev()
-                .fold(canonical, |path: PathBuf, part| path.join(part));
+                .fold(strip_verbatim(canonical), |path: PathBuf, part| {
+                    path.join(part)
+                });
             return crate::ignore::normalize(&joined);
         }
         match (existing.parent(), existing.file_name()) {
@@ -446,6 +450,19 @@ fn resolve(path: &Path) -> PathBuf {
             }
             _ => return crate::ignore::normalize(&absolute),
         }
+    }
+}
+
+/// `path` without the `\\?\` prefix that `canonicalize` adds on Windows, so
+/// it compares equal to paths that were not canonicalized
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
     }
 }
 
@@ -1139,6 +1156,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn verbatim_prefixes_are_stripped() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\C:\proj\q.sql")),
+            PathBuf::from(r"C:\proj\q.sql")
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\host\share\q.sql")),
+            PathBuf::from(r"\\host\share\q.sql")
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from("/proj/q.sql")),
+            PathBuf::from("/proj/q.sql")
+        );
+    }
+
     #[test]
     fn file_keys_resolve_symbolic_links() {
         let dir = std::env::temp_dir().join(format!("sqlsift-bl-link-{}", std::process::id()));
