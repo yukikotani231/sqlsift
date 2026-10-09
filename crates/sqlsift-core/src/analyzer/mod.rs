@@ -17,6 +17,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{Catalog, SchemaBuilder};
+use crate::templating::{self, Templating};
 
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
@@ -27,6 +28,7 @@ pub struct Analyzer<'a> {
     diagnostics: Vec<Diagnostic>,
     dialect: SqlDialect,
     rules: RuleConfig,
+    templating: Templating,
 }
 
 impl<'a> Analyzer<'a> {
@@ -47,6 +49,7 @@ impl<'a> Analyzer<'a> {
             diagnostics: Vec::new(),
             dialect: SqlDialect::default(),
             rules: RuleConfig::default(),
+            templating: Templating::None,
         }
     }
 
@@ -68,6 +71,7 @@ impl<'a> Analyzer<'a> {
             diagnostics: Vec::new(),
             dialect,
             rules: RuleConfig::default(),
+            templating: Templating::None,
         }
     }
 
@@ -89,6 +93,26 @@ impl<'a> Analyzer<'a> {
     #[must_use]
     pub fn with_rules(mut self, rules: RuleConfig) -> Self {
         self.rules = rules;
+        self
+    }
+
+    /// Treat query text as a template (e.g. dbt models with [`Templating::Jinja`]):
+    /// template syntax is masked before parsing, keeping every location
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::Catalog;
+    /// use sqlsift_core::Templating;
+    ///
+    /// let catalog = Catalog::default();
+    /// let mut analyzer = Analyzer::new(&catalog).with_templating(Templating::Jinja);
+    /// assert!(analyzer.analyze("SELECT id FROM {{ ref('orders') }}").is_empty());
+    /// ```
+    #[must_use]
+    pub fn with_templating(mut self, templating: Templating) -> Self {
+        self.templating = templating;
         self
     }
 
@@ -117,10 +141,15 @@ impl<'a> Analyzer<'a> {
         // Parse inline disable directives from comments
         let directives = InlineDirectives::parse(sql);
 
-        // psql meta-commands and variables (the rewrite keeps every location)
+        // Template tags, then psql meta-commands and variables (the rewrites keep
+        // every line and character column)
+        let template = match self.templating {
+            Templating::Jinja => templating::mask_jinja(sql),
+            Templating::None => Preprocessed::unchanged(sql),
+        };
         let source = match self.dialect {
-            SqlDialect::PostgreSQL => psql::preprocess(sql),
-            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(sql),
+            SqlDialect::PostgreSQL => psql::preprocess(&template.text),
+            SqlDialect::MySQL | SqlDialect::SQLite => Preprocessed::unchanged(&template.text),
         };
 
         // Parse the SQL
@@ -163,7 +192,15 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
 
-        // Spans are built from line/column locations: add their byte offsets
+        // Spans are built from line/column locations: add their byte offsets in the
+        // input (masking a template may change byte lengths, never columns)
+        let original_lines;
+        let lines = if template.text.len() == sql.len() {
+            &lines
+        } else {
+            original_lines = LineIndex::new(sql);
+            &original_lines
+        };
         for diagnostic in &mut self.diagnostics {
             let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
             for span in diagnostic.span.iter_mut().chain(labels) {
@@ -180,13 +217,15 @@ impl<'a> Analyzer<'a> {
                 let Some(span) = d.span else {
                     return (!directives.is_suppressed_in_file(d.kind)).then_some(d);
                 };
-                // A table or column name interpolated by psql (`FROM :"tbl"`) is unknown
+                // A table or column name interpolated by psql (`FROM :"tbl"`) or a
+                // template (`FROM {{ ref('tbl') }}`) is unknown
                 let substituted = matches!(
                     d.kind,
                     DiagnosticKind::TableNotFound
                         | DiagnosticKind::ColumnNotFound
                         | DiagnosticKind::AmbiguousColumn
-                ) && source.is_substituted(span.line, span.column);
+                ) && (source.is_substituted(span.line, span.column)
+                    || template.is_substituted(span.line, span.column));
                 if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }

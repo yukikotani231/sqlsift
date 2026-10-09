@@ -14,7 +14,7 @@ use miette::Result;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
-use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect};
+use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::args::{Args, Command, OutputFormat, SchemaFormat};
 use crate::config::{Config, RuleFlags};
@@ -81,6 +81,7 @@ fn analyze_files(
     stdin: Option<&str>,
     catalog: &Catalog,
     dialect: SqlDialect,
+    templating: Templating,
     rules: &RuleConfig,
 ) -> Vec<AnalyzedFile> {
     let analyze_one = |path: &PathBuf| -> AnalyzedFile {
@@ -91,6 +92,7 @@ fn analyze_files(
         };
         let diagnostics = Analyzer::with_dialect(catalog, dialect)
             .with_rules(rules.clone())
+            .with_templating(templating)
             .analyze(&content);
         Ok((content, diagnostics))
     };
@@ -288,6 +290,7 @@ fn run(args: Args) -> Result<bool> {
             warn,
             deny,
             dialect,
+            templating,
             format,
             max_errors,
             max_warnings,
@@ -303,6 +306,7 @@ fn run(args: Args) -> Result<bool> {
                 &ignore,
                 format,
                 dialect.as_deref(),
+                templating.as_deref(),
                 max_warnings,
                 baseline.as_deref(),
             );
@@ -319,6 +323,8 @@ fn run(args: Args) -> Result<bool> {
             })?;
 
             let dialect = config_dialect(&config)?;
+            let templating = config.templating()?;
+            tracing::info!(%templating, "Query file templating");
 
             // Determine output format
             let output_format = match config.format.as_deref() {
@@ -444,7 +450,14 @@ fn run(args: Args) -> Result<bool> {
 
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
-            let analyzed = analyze_files(&query_files, stdin.as_deref(), &catalog, dialect, &rules);
+            let analyzed = analyze_files(
+                &query_files,
+                stdin.as_deref(),
+                &catalog,
+                dialect,
+                templating,
+                &rules,
+            );
 
             if write_baseline {
                 let mut baseline = Baseline::default();
@@ -627,6 +640,7 @@ fn run(args: Args) -> Result<bool> {
                 &[],
                 None,
                 dialect.as_deref(),
+                None,
                 None,
                 None,
             );

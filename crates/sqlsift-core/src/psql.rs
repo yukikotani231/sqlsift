@@ -29,16 +29,22 @@ pub(crate) struct Preprocessed<'a> {
     identifiers: Vec<(usize, usize, usize)>,
 }
 
-impl Preprocessed<'_> {
+impl<'a> Preprocessed<'a> {
+    /// Rewritten text with identifier substitutions (line, first column, end column)
+    pub fn new(text: Cow<'a, str>, identifiers: Vec<(usize, usize, usize)>) -> Self {
+        Preprocessed { text, identifiers }
+    }
+
     /// The input unchanged
-    pub fn unchanged(sql: &str) -> Preprocessed<'_> {
+    pub fn unchanged(sql: &'a str) -> Self {
         Preprocessed {
             text: Cow::Borrowed(sql),
             identifiers: Vec::new(),
         }
     }
 
-    /// Whether `line`/`column` is inside an identifier substituted from a psql variable
+    /// Whether `line`/`column` is inside an identifier substituted from a psql
+    /// variable or a template expression
     pub fn is_substituted(&self, line: usize, column: usize) -> bool {
         self.identifiers
             .iter()

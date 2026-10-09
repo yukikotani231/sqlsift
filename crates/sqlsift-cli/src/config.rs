@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use sqlsift_core::rules::{
     find_category, find_rule, similar_category_name, similar_rule_name, RuleConfig, RuleLevel,
 };
+use sqlsift_core::Templating;
 
 /// Keys recognized in `sqlsift.toml`
 const KNOWN_KEYS: &[&str] = &[
@@ -21,6 +22,7 @@ const KNOWN_KEYS: &[&str] = &[
     "rules",
     "categories",
     "max_warnings",
+    "templating",
     "baseline",
 ];
 
@@ -43,6 +45,11 @@ pub struct Config {
     /// SQL dialect ("postgresql", "mysql", "sqlite")
     #[serde(default)]
     pub dialect: Option<String>,
+
+    /// Query file templating ("jinja", "none"); when unset, Jinja is used if a
+    /// `dbt_project.yml` is next to the config file or in the current directory
+    #[serde(default)]
+    pub templating: Option<String>,
 
     /// Output format (human, json, sarif, github)
     #[serde(default)]
@@ -70,6 +77,10 @@ pub struct Config {
 
     /// Schema directory
     pub schema_dir: Option<String>,
+
+    /// Directory of the configuration file this was loaded from
+    #[serde(skip)]
+    pub base_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -97,6 +108,7 @@ impl Config {
             .map_err(|e| miette::miette!("Failed to parse {}: {}", path.display(), e))?;
 
         let base = config_base_dir(path);
+        config.base_dir = Some(base.clone());
         let resolve = |p: &String| resolve_path(&base, p);
         config.schema = config.schema.iter().map(resolve).collect();
         config.files = config.files.iter().map(resolve).collect();
@@ -153,6 +165,7 @@ impl Config {
         ignore: &[String],
         format: Option<crate::args::OutputFormat>,
         dialect: Option<&str>,
+        templating: Option<&str>,
         max_warnings: Option<usize>,
         baseline: Option<&Path>,
     ) -> Self {
@@ -179,6 +192,10 @@ impl Config {
             self.dialect = Some(dialect.to_string());
         }
 
+        if let Some(templating) = templating {
+            self.templating = Some(templating.to_string());
+        }
+
         if max_warnings.is_some() {
             self.max_warnings = max_warnings;
         }
@@ -188,6 +205,27 @@ impl Config {
         }
 
         self
+    }
+}
+
+impl Config {
+    /// The configured templating of query files. When unset, Jinja is used for dbt
+    /// projects: a `dbt_project.yml` in the current directory or in the directory
+    /// of the configuration file.
+    pub fn templating(&self) -> Result<Templating> {
+        if let Some(templating) = &self.templating {
+            return templating.parse().map_err(|e: String| miette::miette!(e));
+        }
+        let dirs = [Some(Path::new("")), self.base_dir.as_deref()];
+        let dbt = dirs
+            .into_iter()
+            .flatten()
+            .any(|dir| dir.join("dbt_project.yml").is_file());
+        Ok(if dbt {
+            Templating::Jinja
+        } else {
+            Templating::None
+        })
     }
 }
 

@@ -15,6 +15,7 @@ mod psql;
 pub mod rules;
 pub mod schema;
 mod suggest;
+pub mod templating;
 pub mod types;
 
 pub use analyzer::Analyzer;
@@ -22,4 +23,5 @@ pub use dialect::SqlDialect;
 pub use error::{Diagnostic, DiagnosticKind, Severity, Span};
 pub use rules::{RuleCategory, RuleConfig, RuleLevel};
 pub use schema::{Catalog, ColumnDef, QualifiedName, Schema, TableDef};
+pub use templating::Templating;
 pub use types::SqlType;
