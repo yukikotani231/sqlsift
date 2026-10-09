@@ -1,11 +1,12 @@
 //! Schema builder - converts SQL AST to Catalog
 
 use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Ident,
-    ObjectName, ObjectType, Query, Statement, TableConstraint, UserDefinedTypeRepresentation,
+    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
+    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint,
+    UserDefinedTypeRepresentation, Value,
 };
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::analyzer;
 use crate::dialect::SqlDialect;
@@ -61,19 +62,27 @@ impl SchemaBuilder {
         self.process_statement(stmt);
     }
 
+    /// Record a definition in the query file that could not be parsed (for
+    /// diagnostics on the later statements that use it)
+    pub(crate) fn skip_definition(&mut self, definition: SkippedDefinition) {
+        self.catalog.skipped_definitions.push(definition);
+    }
+
     /// Whether `stmt` is a statement [`SchemaBuilder`] applies to the catalog
     pub(crate) fn changes_schema(stmt: &Statement) -> bool {
-        matches!(
-            stmt,
+        match stmt {
             Statement::CreateTable(_)
-                | Statement::CreateType { .. }
-                | Statement::CreateView { .. }
-                | Statement::AlterTable { .. }
-                | Statement::Drop {
-                    object_type: ObjectType::Table | ObjectType::View | ObjectType::Type,
-                    ..
-                }
-        )
+            | Statement::CreateType { .. }
+            | Statement::CreateView { .. }
+            | Statement::AlterTable { .. }
+            | Statement::Drop {
+                object_type: ObjectType::Table | ObjectType::View | ObjectType::Type,
+                ..
+            } => true,
+            Statement::Query(query) => select_into(query).is_some(),
+            Statement::SetVariable { variables, .. } => is_search_path(variables),
+            _ => false,
+        }
     }
 
     /// Parse SQL schema definitions and build the catalog.
@@ -91,6 +100,9 @@ impl SchemaBuilder {
         };
         let sql: &str = &source.text;
 
+        // A `SET search_path` applies to the rest of its file only
+        let search_path = self.catalog.search_path.clone();
+
         // Try parsing the entire SQL first (fast path)
         match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
@@ -103,6 +115,7 @@ impl SchemaBuilder {
                 self.parse_statements_individually(sql);
             }
         }
+        self.catalog.search_path = search_path;
 
         if self
             .diagnostics
@@ -227,7 +240,7 @@ impl SchemaBuilder {
         // Retry `CREATE TABLE c (LIKE p INCLUDING ...)` / `... WITH NO DATA` without
         // those clauses
         if matches!(kind, "CREATE TABLE" | "CREATE VIEW")
-            && self.retry_without_unsupported_clauses(&tokens)
+            && self.retry_without_unsupported_clauses(stmt)
         {
             return;
         }
@@ -310,6 +323,7 @@ impl SchemaBuilder {
         self.catalog.skipped_definitions.push(SkippedDefinition {
             kind: kind.to_string(),
             name: name.clone(),
+            line: None,
         });
 
         let parser_message = relocate_parser_message(&err.to_string(), (base_line, base_column));
@@ -334,94 +348,15 @@ impl SchemaBuilder {
         );
     }
 
-    /// Re-parse a CREATE TABLE / CREATE VIEW statement without clauses that don't
-    /// affect columns and that sqlparser can't parse: `LIKE p INCLUDING x` /
-    /// `EXCLUDING x` options, and a trailing `WITH [NO] DATA`. Returns true if
-    /// something was removed and the statement then parsed and was applied.
-    fn retry_without_unsupported_clauses(&mut self, tokens: &[TokenWithSpan]) -> bool {
-        let is_word = |t: &Token, kw: &str| matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(kw));
-        // Indexes (into `tokens`) of significant tokens, and which ones to drop
-        let significant: Vec<usize> = (0..tokens.len())
-            .filter(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
-            .collect();
-        let mut drop = vec![false; tokens.len()];
-        for (n, &i) in significant.iter().enumerate() {
-            if is_word(&tokens[i].token, "INCLUDING") || is_word(&tokens[i].token, "EXCLUDING") {
-                if let Some(&next) = significant.get(n + 1) {
-                    if matches!(tokens[next].token, Token::Word(_)) {
-                        drop[i] = true;
-                        drop[next] = true;
-                    }
-                }
-            }
-        }
-        // Trailing WITH [NO] DATA
-        let tail: Vec<usize> = significant
-            .iter()
-            .rev()
-            .skip_while(|&&i| tokens[i].token == Token::SemiColon)
-            .take(3)
-            .copied()
-            .collect();
-        if tail
-            .first()
-            .is_some_and(|&i| is_word(&tokens[i].token, "DATA"))
-        {
-            let with_at = if tail
-                .get(1)
-                .is_some_and(|&i| is_word(&tokens[i].token, "NO"))
-            {
-                2
-            } else {
-                1
-            };
-            if tail
-                .get(with_at)
-                .is_some_and(|&i| is_word(&tokens[i].token, "WITH"))
-            {
-                for &i in &tail[..=with_at] {
-                    drop[i] = true;
-                }
-            }
-        }
-        // PostgreSQL `INHERITS (parent [, ...])`: parsed separately, applied below
-        let mut parents = Vec::new();
-        if let Some(n) = significant
-            .iter()
-            .position(|&i| is_word(&tokens[i].token, "INHERITS"))
-        {
-            let close = significant[n..]
-                .iter()
-                .position(|&i| tokens[i].token == Token::RParen)
-                .map(|p| n + p);
-            if let Some(close) = close {
-                if significant
-                    .get(n + 1)
-                    .is_some_and(|&i| tokens[i].token == Token::LParen)
-                {
-                    let inner: Vec<&Token> = significant[n + 2..close]
-                        .iter()
-                        .map(|&i| &tokens[i].token)
-                        .collect();
-                    parents = split_object_names(&inner);
-                    for &i in &significant[n..=close] {
-                        drop[i] = true;
-                    }
-                }
-            }
-        }
-        if !drop.contains(&true) {
+    /// Re-parse a CREATE TABLE / CREATE VIEW statement without the clauses
+    /// [`mask_unsupported_clauses`] removes, applying `INHERITS` itself. Returns true
+    /// if something was removed and the statement then parsed and was applied.
+    fn retry_without_unsupported_clauses(&mut self, stmt: &str) -> bool {
+        let Some((masked, parents)) = mask_unsupported_clauses(self.dialect, stmt, true) else {
             return false;
-        }
-
-        let rewritten: String = tokens
-            .iter()
-            .zip(&drop)
-            .filter(|(_, &dropped)| !dropped)
-            .map(|(t, _)| t.token.to_string())
-            .collect();
+        };
         let dialect = self.dialect.parser_dialect();
-        let Ok(stmts) = Parser::parse_sql(dialect.as_ref(), &rewritten) else {
+        let Ok(stmts) = Parser::parse_sql(dialect.as_ref(), &masked) else {
             return false;
         };
         for stmt in stmts {
@@ -512,7 +447,7 @@ impl SchemaBuilder {
         let Some(name) = split_object_names(&tokens[..name_len]).into_iter().next() else {
             return;
         };
-        let enum_name = self.catalog.qualified_name(&name).name;
+        let enum_name = self.catalog.qualified_name(&name).to_string();
         let rest = &tokens[name_len..];
         let kw = |i: usize| match rest.get(i) {
             Some(Token::Word(w)) if w.quote_style.is_none() => w.value.to_uppercase(),
@@ -607,6 +542,15 @@ impl SchemaBuilder {
             } => {
                 self.process_alter_table(name, operations);
             }
+            // `SELECT ... INTO [TEMP] t` creates `t`
+            Statement::Query(query) => {
+                if let Some(into) = select_into(query) {
+                    self.process_select_into(into, query);
+                }
+            }
+            Statement::SetVariable {
+                variables, value, ..
+            } if is_search_path(variables) => self.process_search_path(value),
             Statement::Drop {
                 object_type, names, ..
             } => {
@@ -619,7 +563,7 @@ impl SchemaBuilder {
                         }
                         ObjectType::Type => {
                             let name = self.catalog.qualified_name(name);
-                            self.catalog.drop_enum(&name.name);
+                            self.catalog.drop_enum(&name.to_string());
                         }
                         _ => {}
                     }
@@ -681,34 +625,10 @@ impl SchemaBuilder {
 
         // CREATE TABLE ... AS SELECT: infer column names from the query
         if let Some(query) = &create.query {
-            if create.columns.is_empty() {
-                match analyzer::query_output_columns(&self.catalog, self.dialect, query) {
-                    Some(columns) => {
-                        for (col_name, data_type) in columns {
-                            table
-                                .columns
-                                .entry(col_name.clone())
-                                .or_insert_with(|| ColumnDef::new(col_name, data_type));
-                        }
-                    }
-                    None if self.query_file => {
-                        // A view without columns is one whose columns are unknown
-                        self.catalog.drop_table(&name);
-                        self.catalog.add_view(ViewDef {
-                            name,
-                            columns: Vec::new(),
-                            column_types: Vec::new(),
-                            materialized: false,
-                        });
-                        return;
-                    }
-                    None => self.diagnostics.push(Diagnostic::warning(
-                        DiagnosticKind::ParseError,
-                        format!(
-                            "Could not determine the columns of table '{name}' created by CREATE TABLE ... AS"
-                        ),
-                    ).with_help("Queries that reference its columns may report missing columns")),
-                }
+            if create.columns.is_empty()
+                && !self.add_query_columns(&mut table, query, "CREATE TABLE ... AS")
+            {
+                return;
             }
         }
 
@@ -718,6 +638,87 @@ impl SchemaBuilder {
         }
 
         self.catalog.add_table(table);
+    }
+
+    /// Add the output columns of `query` to the table it creates (`statement`, for
+    /// the warning when they can't be inferred). Returns false if, in a query file,
+    /// the table was instead defined as a relation with unknown columns.
+    fn add_query_columns(&mut self, table: &mut TableDef, query: &Query, statement: &str) -> bool {
+        let name = &table.name;
+        match analyzer::query_output_columns(&self.catalog, self.dialect, query) {
+            Some(columns) => {
+                for (col_name, data_type) in columns {
+                    table
+                        .columns
+                        .entry(col_name.clone())
+                        .or_insert_with(|| ColumnDef::new(col_name, data_type));
+                }
+            }
+            None if self.query_file => {
+                // A view without columns is one whose columns are unknown
+                self.catalog.drop_table(name);
+                self.catalog.add_view(ViewDef {
+                    name: name.clone(),
+                    columns: Vec::new(),
+                    column_types: Vec::new(),
+                    materialized: false,
+                });
+                return false;
+            }
+            None => self.diagnostics.push(
+                Diagnostic::warning(
+                    DiagnosticKind::ParseError,
+                    format!(
+                        "Could not determine the columns of table '{name}' created by {statement}"
+                    ),
+                )
+                .with_help("Queries that reference its columns may report missing columns"),
+            ),
+        }
+        true
+    }
+
+    /// `SELECT ... INTO [TEMP | UNLOGGED] [TABLE] t`: create `t` with the query's
+    /// output columns
+    fn process_select_into(&mut self, into: &SelectInto, query: &Query) {
+        let name = self.catalog.qualified_name(&into.name);
+        let mut table = TableDef::new(name);
+        if self.add_query_columns(&mut table, query, "SELECT ... INTO") {
+            self.catalog.add_table(table);
+        }
+    }
+
+    /// `SET [LOCAL] search_path TO a, b` / `= 'a, b'` / `TO DEFAULT`: unqualified
+    /// names are looked up in these schemas, in order
+    fn process_search_path(&mut self, values: &[Expr]) {
+        let mut path = Vec::new();
+        for value in values {
+            match value {
+                Expr::Identifier(ident) => path.push(self.catalog.ident_name(ident)),
+                Expr::Value(Value::SingleQuotedString(list)) => {
+                    for part in list.split(',').map(str::trim) {
+                        match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+                            Some(quoted) => path.push(quoted.to_string()),
+                            None if self.catalog.case_sensitive_names => {
+                                path.push(part.to_lowercase());
+                            }
+                            None => path.push(part.to_string()),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `$user` (a schema named after the role) and the system schemas hold no
+        // tables of the schema input; `DEFAULT` restores the default
+        path.retain(|s| {
+            !s.is_empty()
+                && s != "$user"
+                && !s.eq_ignore_ascii_case("pg_catalog")
+                && !s.eq_ignore_ascii_case("pg_temp")
+                && !s.eq_ignore_ascii_case("default")
+        });
+        self.catalog.search_path = path;
     }
 
     /// Copy the columns of `source` into `table` (`CREATE TABLE c (LIKE p)`)
@@ -919,16 +920,7 @@ impl SchemaBuilder {
                     table_name: new_name,
                 } => {
                     let new_qualified = self.catalog.qualified_name(new_name);
-                    let schema_name = table_name
-                        .schema
-                        .as_ref()
-                        .unwrap_or(&self.catalog.default_schema);
-                    if let Some(schema) = self.catalog.schemas.get_mut(schema_name) {
-                        if let Some(mut table) = schema.tables.shift_remove(&table_name.name) {
-                            table.name = new_qualified.clone();
-                            schema.tables.insert(new_qualified.name, table);
-                        }
-                    }
+                    self.catalog.rename_table(&table_name, new_qualified.name);
                 }
                 AlterTableOperation::AddConstraint(constraint) => {
                     let mut constraints = TableDef::new(table_name.clone());
@@ -971,9 +963,15 @@ impl SchemaBuilder {
     ) {
         let qualified = self.catalog.qualified_name(name);
         if let UserDefinedTypeRepresentation::Enum { labels } = representation {
+            // An unqualified type is created in the first schema of a search path
+            let schema = qualified.schema.or_else(|| {
+                (!self.catalog.search_path.is_empty())
+                    .then(|| self.catalog.creation_schema().to_string())
+            });
             let enum_def = EnumTypeDef {
                 name: qualified.name,
                 values: labels.iter().map(|l| l.value.clone()).collect(),
+                schema,
             };
             self.catalog.add_enum(enum_def);
         } else {
@@ -1142,6 +1140,19 @@ fn build_column(
     (col, constraints)
 }
 
+/// The `INTO` target of a `SELECT ... INTO t` query
+fn select_into(query: &Query) -> Option<&SelectInto> {
+    match query.body.as_ref() {
+        SetExpr::Select(select) => select.into.as_ref(),
+        _ => None,
+    }
+}
+
+/// Whether a SET statement sets `search_path`
+fn is_search_path(variables: &[ObjectName]) -> bool {
+    matches!(variables, [name] if name.0.last().is_some_and(|i| i.value.eq_ignore_ascii_case("search_path")))
+}
+
 /// Whether a data type is one of PostgreSQL's serial pseudo-types
 fn is_serial_type(data_type: &DataType) -> bool {
     match data_type {
@@ -1242,6 +1253,176 @@ fn like_pseudo_column(column: &sqlparser::ast::ColumnDef) -> Option<&ObjectName>
         DataType::Custom(name, modifiers) if modifiers.is_empty() => Some(name),
         _ => None,
     }
+}
+
+/// Blank out, keeping every other character in place, the clauses of a CREATE
+/// TABLE / CREATE VIEW statement that sqlparser can't parse and that don't change
+/// its columns: `UNLOGGED`, `LIKE` options (`INCLUDING x` / `EXCLUDING x`) and a
+/// trailing `WITH [NO] DATA`; with `inherits`, also PostgreSQL's
+/// `INHERITS (parent [, ...])`, whose parents are returned.
+///
+/// Returns `None` if `stmt` isn't a CREATE statement or has none of these clauses.
+pub(crate) fn mask_unsupported_clauses(
+    dialect: SqlDialect,
+    stmt: &str,
+    inherits: bool,
+) -> Option<(String, Vec<ObjectName>)> {
+    let parser_dialect = dialect.parser_dialect();
+    let tokens = Tokenizer::new(parser_dialect.as_ref(), stmt)
+        .with_unescape(false)
+        .tokenize_with_location()
+        .ok()?;
+    let is_word = |t: &Token, kw: &str| matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(kw));
+    // Indexes (into `tokens`) of significant tokens, and which ones to drop
+    let significant: Vec<usize> = (0..tokens.len())
+        .filter(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
+        .collect();
+    let word = |n: usize, kw: &str| {
+        significant
+            .get(n)
+            .is_some_and(|&i| is_word(&tokens[i].token, kw))
+    };
+    if !word(0, "CREATE") {
+        return None;
+    }
+    let mut drop = vec![false; tokens.len()];
+    // CREATE UNLOGGED TABLE
+    if word(1, "UNLOGGED") && word(2, "TABLE") {
+        drop[significant[1]] = true;
+    }
+    for (n, &i) in significant.iter().enumerate() {
+        if is_word(&tokens[i].token, "INCLUDING") || is_word(&tokens[i].token, "EXCLUDING") {
+            if let Some(&next) = significant.get(n + 1) {
+                if matches!(tokens[next].token, Token::Word(_)) {
+                    drop[i] = true;
+                    drop[next] = true;
+                }
+            }
+        }
+    }
+    // Trailing WITH [NO] DATA
+    let tail: Vec<usize> = significant
+        .iter()
+        .rev()
+        .skip_while(|&&i| tokens[i].token == Token::SemiColon)
+        .take(3)
+        .copied()
+        .collect();
+    if tail
+        .first()
+        .is_some_and(|&i| is_word(&tokens[i].token, "DATA"))
+    {
+        let with_at = if tail
+            .get(1)
+            .is_some_and(|&i| is_word(&tokens[i].token, "NO"))
+        {
+            2
+        } else {
+            1
+        };
+        if tail
+            .get(with_at)
+            .is_some_and(|&i| is_word(&tokens[i].token, "WITH"))
+        {
+            for &i in &tail[..=with_at] {
+                drop[i] = true;
+            }
+        }
+    }
+    // PostgreSQL `INHERITS (parent [, ...])`
+    let mut parents = Vec::new();
+    if let Some(n) = significant
+        .iter()
+        .position(|&i| inherits && is_word(&tokens[i].token, "INHERITS"))
+    {
+        let close = significant[n..]
+            .iter()
+            .position(|&i| tokens[i].token == Token::RParen)
+            .map(|p| n + p);
+        if let Some(close) = close {
+            if significant
+                .get(n + 1)
+                .is_some_and(|&i| tokens[i].token == Token::LParen)
+            {
+                let inner: Vec<&Token> = significant[n + 2..close]
+                    .iter()
+                    .map(|&i| &tokens[i].token)
+                    .collect();
+                parents = split_object_names(&inner);
+                for &i in &significant[n..=close] {
+                    drop[i] = true;
+                }
+            }
+        }
+    }
+    if !drop.contains(&true) {
+        return None;
+    }
+
+    // Blank the dropped tokens' characters
+    let mut blank = vec![false; stmt.len()];
+    for (token, _) in tokens.iter().zip(&drop).filter(|(_, &dropped)| dropped) {
+        let (start, end) = (token.span.start, token.span.end);
+        let start = byte_offset_of(stmt, start.line as usize, start.column as usize)?;
+        let end =
+            byte_offset_of(stmt, end.line as usize, end.column as usize).unwrap_or(stmt.len());
+        blank[start..end].fill(true);
+    }
+    let masked = stmt
+        .char_indices()
+        .map(|(i, c)| if blank[i] && c != '\n' { ' ' } else { c })
+        .collect();
+    Some((masked, parents))
+}
+
+/// Kind (`CREATE TABLE` / `CREATE VIEW`) and name of the table or view a statement
+/// that could not be parsed defines, if it is such a definition
+pub(crate) fn unparsed_definition(dialect: SqlDialect, stmt: &str) -> Option<(String, String)> {
+    let parser_dialect = dialect.parser_dialect();
+    let tokens = Tokenizer::new(parser_dialect.as_ref(), stmt)
+        .with_unescape(false)
+        .tokenize()
+        .ok()?;
+    let significant: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let word = |i: usize| match significant.get(i) {
+        Some(Token::Word(w)) if w.quote_style.is_none() => w.value.to_uppercase(),
+        _ => String::new(),
+    };
+    if word(0) != "CREATE" {
+        return None;
+    }
+    // Skip modifiers such as OR REPLACE, TEMP, UNLOGGED or MATERIALIZED
+    let mut i = 1;
+    while matches!(
+        word(i).as_str(),
+        "OR" | "REPLACE"
+            | "TEMP"
+            | "TEMPORARY"
+            | "UNLOGGED"
+            | "GLOBAL"
+            | "LOCAL"
+            | "MATERIALIZED"
+            | "RECURSIVE"
+    ) {
+        i += 1;
+    }
+    let kind = match word(i).as_str() {
+        "TABLE" => "CREATE TABLE",
+        "VIEW" => "CREATE VIEW",
+        _ => return None,
+    };
+    i += 1;
+    if word(i) == "IF" && word(i + 1) == "NOT" && word(i + 2) == "EXISTS" {
+        i += 3;
+    }
+    let name_tokens = significant.get(i..)?;
+    let name = split_object_names(&name_tokens[..object_name_len(name_tokens)])
+        .into_iter()
+        .next()?;
+    Some((kind.to_string(), name.to_string()))
 }
 
 /// Number of tokens forming the (possibly qualified) object name `a.b.c` at the

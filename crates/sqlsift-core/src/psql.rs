@@ -13,6 +13,10 @@
 //!   (after FROM, JOIN, INTO, UPDATE, TABLE) become an identifier; name diagnostics
 //!   reported on it are dropped with [`Preprocessed::is_substituted`].
 //!
+//! - The data of a `COPY ... FROM STDIN;` (the lines after it, up to the `\.` line)
+//!   is blanked out, and `STDIN` becomes the file name `'std'`, so the parser
+//!   doesn't read the following statements as data.
+//!
 //! The rewrite keeps the input's length and line structure byte for byte, so parser
 //! and diagnostic locations still point at the original text. `::` casts, `:=`,
 //! array slices (`a[i:j]`) and anything inside literals, quoted identifiers and
@@ -66,7 +70,7 @@ pub(crate) const TABLE_KEYWORDS: &[&str] = &["from", "join", "into", "update", "
 
 /// Rewrite psql meta-commands and variable interpolations (see the module docs)
 pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {
-    if !sql.contains(['\\', ':']) {
+    if !sql.contains(['\\', ':']) && !contains_ignore_case(sql, "stdin") {
         return Preprocessed::unchanged(sql);
     }
 
@@ -90,6 +94,10 @@ pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {
     let mut brackets = 0usize;
     // The last word outside literals and comments (for `FROM :tbl`)
     let mut last_word: Option<(usize, usize)> = None;
+    // Whether the current statement starts with COPY, and where its `STDIN` (after
+    // FROM) is
+    let mut copy_statement = false;
+    let mut copy_stdin: Option<usize> = None;
 
     let mut i = 0;
     while i < len {
@@ -269,11 +277,51 @@ pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {
                 while i < len && is_ident_byte(bytes[i]) {
                     i += 1;
                 }
+                let word = &sql[word_start..i];
+                if !was_in_query {
+                    copy_statement = word.eq_ignore_ascii_case("copy");
+                    copy_stdin = None;
+                } else if copy_statement
+                    && word.eq_ignore_ascii_case("stdin")
+                    && last_word.is_some_and(|(s, e)| sql[s..e].eq_ignore_ascii_case("from"))
+                {
+                    copy_stdin = Some(word_start);
+                }
                 last_word = Some((word_start, i));
             }
             _ => {
                 match b {
-                    b';' => in_query = false,
+                    b';' => {
+                        in_query = false;
+                        copy_statement = false;
+                        if let Some(stdin) = copy_stdin.take() {
+                            // `COPY ... FROM STDIN;`: read from a file instead, and
+                            // blank the data lines that follow, through `\.`
+                            out[stdin..stdin + 5].copy_from_slice(b"'std'");
+                            let data = sql[i..].find('\n').map_or(len, |p| i + p + 1);
+                            let mut end = data;
+                            while end < len {
+                                let line_end = sql[end..].find('\n').map_or(len, |p| end + p);
+                                let terminator = sql[end..line_end].trim_end() == "\\.";
+                                end = (line_end + 1).min(len);
+                                if terminator {
+                                    break;
+                                }
+                            }
+                            for k in data..end {
+                                if bytes[k] == b'\n' {
+                                    line += 1;
+                                    line_start = k + 1;
+                                } else {
+                                    out[k] = b' ';
+                                }
+                            }
+                            changed = true;
+                            i = end;
+                            last_word = None;
+                            continue;
+                        }
+                    }
                     b'[' => brackets += 1,
                     b']' => brackets = brackets.saturating_sub(1),
                     _ => {}
@@ -293,6 +341,14 @@ pub(crate) fn preprocess(sql: &str) -> Preprocessed<'_> {
         text: Cow::Owned(text),
         identifiers,
     }
+}
+
+/// Whether `haystack` contains `needle` (ASCII), ignoring case
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]
@@ -326,6 +382,23 @@ mod tests {
             "SELECT ':a', E'\\':a', \":a\", $$ :a \\g $$, $t$ :a $t$",
             "SELECT 1 -- :a \\g\n/* :a /* \\g */ */",
         ] {
+            assert_eq!(rewrite(sql), sql);
+        }
+    }
+
+    #[test]
+    fn blanks_copy_data() {
+        assert_eq!(
+            rewrite("COPY t (a) FROM stdin;\n1\tx'\n\\.\nSELECT 1;"),
+            "COPY t (a) FROM 'std';\n    \n  \nSELECT 1;"
+        );
+        // Without a terminator the data runs to the end
+        assert_eq!(
+            rewrite("COPY t FROM STDIN;\n1\n2"),
+            "COPY t FROM 'std';\n \n "
+        );
+        // Other COPY forms and STDIN elsewhere are left alone
+        for sql in ["COPY t TO stdout;\n1", "SELECT stdin FROM t;\n1"] {
             assert_eq!(rewrite(sql), sql);
         }
     }

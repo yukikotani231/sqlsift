@@ -8,7 +8,7 @@
 
 use sqlsift_core::analyzer::Analyzer;
 use sqlsift_core::error::{Diagnostic, DiagnosticKind};
-use sqlsift_core::schema::{Catalog, SchemaBuilder};
+use sqlsift_core::schema::{Catalog, QualifiedName, SchemaBuilder};
 
 const SCHEMA: &str = r#"
 CREATE TYPE order_status AS ENUM ('pending', 'paid', 'shipped', 'cancelled');
@@ -1418,5 +1418,173 @@ fn invalid_join_type_mismatch_more() {
                 J,
             ),
         ],
+    );
+}
+
+// Issue #117: pg_dump output and scripts
+
+fn analyze_with(schema: &str, sql: &str) -> Vec<Diagnostic> {
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema).unwrap();
+    let (catalog, _) = builder.build();
+    Analyzer::new(&catalog).analyze(sql)
+}
+
+fn kinds_of(diagnostics: &[Diagnostic]) -> Vec<DiagnosticKind> {
+    diagnostics.iter().map(|d| d.kind).collect()
+}
+
+fn has_table(catalog: &Catalog, name: &str) -> bool {
+    catalog.table_exists(&QualifiedName::parse(name))
+}
+
+#[test]
+fn copy_from_stdin_data_is_skipped_in_query_files() {
+    let schema = "CREATE TABLE users (id INTEGER, country TEXT);";
+    let diagnostics = analyze_with(
+        schema,
+        "COPY users (id, country) FROM stdin;\n1\tJP\n2\tO'Brien \"x\"\n\\.\nSELECT bogus FROM users;\n",
+    );
+    assert_eq!(kinds_of(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+    assert_eq!(diagnostics[0].span.unwrap().line, 5);
+    // Several blocks, CSV options, and a block running to the end of the file
+    let diagnostics = analyze_with(
+        schema,
+        "COPY users FROM STDIN WITH (FORMAT csv);\n1,JP\n\\.\n\
+         SELECT nope FROM users;\n\
+         COPY public.users (id) FROM stdin;\n3\n",
+    );
+    assert_eq!(kinds_of(&diagnostics), vec![DiagnosticKind::ColumnNotFound]);
+}
+
+#[test]
+fn copy_from_stdin_data_is_skipped_in_schema_files() {
+    let schema = "
+CREATE TABLE users (id INTEGER, country TEXT);
+COPY public.users (id, country) FROM stdin;
+1\tJP
+2\tit's ; CREATE TABLE fake (x int);
+\\.
+CREATE TABLE orders (id INTEGER, user_id INTEGER);
+";
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema).unwrap();
+    let (catalog, diagnostics) = builder.build();
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    assert!(has_table(&catalog, "orders"));
+    assert!(!has_table(&catalog, "fake"));
+}
+
+#[test]
+fn schema_qualified_enum_types_are_checked() {
+    let schema = "
+CREATE TYPE public.st AS ENUM ('a', 'b');
+CREATE SCHEMA billing;
+CREATE TYPE billing.charge_state AS ENUM ('open', 'paid');
+CREATE TABLE c (id int, s public.st, cs billing.charge_state);
+CREATE TABLE d (id int, s st);
+";
+    let diagnostics = analyze_with(
+        schema,
+        "UPDATE c SET s = 'z';
+         SELECT * FROM c WHERE s = 'z';
+         SELECT * FROM c WHERE cs = 'void';
+         SELECT * FROM d WHERE s = 'z';
+         SELECT * FROM c WHERE s = 'a' AND cs = 'paid';",
+    );
+    assert_eq!(
+        kinds_of(&diagnostics),
+        vec![DiagnosticKind::TypeMismatch; 4],
+        "{diagnostics:#?}"
+    );
+    assert_eq!(
+        diagnostics[0].message,
+        "Invalid value 'z' for enum type 'st'"
+    );
+    assert_eq!(
+        diagnostics[2].message,
+        "Invalid value 'void' for enum type 'charge_state'"
+    );
+
+    // An unqualified type is the one in the default schema; one in another schema
+    // with the same name is a different type
+    let schema = "
+CREATE SCHEMA other;
+CREATE TYPE other.st AS ENUM ('x');
+CREATE TYPE st AS ENUM ('a');
+CREATE TABLE c (s public.st, o other.st);
+";
+    let diagnostics = analyze_with(schema, "SELECT * FROM c WHERE s = 'a' AND o = 'x'");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let diagnostics = analyze_with(schema, "SELECT * FROM c WHERE s = 'x' OR o = 'a'");
+    assert_eq!(
+        kinds_of(&diagnostics),
+        vec![DiagnosticKind::TypeMismatch; 2]
+    );
+}
+
+#[test]
+fn schema_qualified_enum_types_can_be_altered_and_dropped() {
+    let mut builder = SchemaBuilder::new();
+    builder
+        .parse(
+            "CREATE TYPE public.st AS ENUM ('a');
+             ALTER TYPE public.st ADD VALUE 'b';
+             CREATE SCHEMA billing;
+             CREATE TYPE billing.cs AS ENUM ('open');
+             ALTER TYPE billing.cs RENAME TO charge_state;
+             CREATE TYPE billing.gone AS ENUM ('x');
+             DROP TYPE billing.gone;",
+        )
+        .unwrap();
+    let (catalog, _) = builder.build();
+    assert_eq!(catalog.get_enum("st").unwrap().values, ["a", "b"]);
+    assert_eq!(catalog.get_enum("public.st").unwrap().values, ["a", "b"]);
+    let renamed = catalog.get_enum("billing.charge_state").unwrap();
+    assert_eq!(renamed.qualified_name(), "billing.charge_state");
+    assert!(catalog.get_enum("billing.cs").is_none());
+    assert!(catalog.get_enum("billing.gone").is_none());
+    assert!(catalog.get_enum("public.charge_state").is_none());
+}
+
+#[test]
+fn unlogged_tables_and_with_no_data_in_schema_files() {
+    let mut builder = SchemaBuilder::new();
+    builder
+        .parse(
+            "CREATE TABLE events (id INTEGER, kind TEXT);
+             CREATE UNLOGGED TABLE stage_ev (LIKE events INCLUDING ALL);
+             CREATE UNLOGGED TABLE log (id INTEGER, msg TEXT);
+             CREATE TABLE snapshot AS SELECT * FROM events WITH NO DATA;",
+        )
+        .unwrap();
+    let (catalog, diagnostics) = builder.build();
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    for table in ["stage_ev", "log", "snapshot"] {
+        assert!(has_table(&catalog, table), "{table}");
+    }
+}
+
+#[test]
+fn search_path_in_schema_files_applies_to_that_file() {
+    let mut builder = SchemaBuilder::new();
+    builder
+        .parse(
+            "CREATE SCHEMA billing;
+             SET search_path TO billing, public;
+             CREATE TABLE invoices (id INTEGER);
+             CREATE TYPE state AS ENUM ('open', 'paid');
+             ALTER TABLE invoices ADD COLUMN s state;",
+        )
+        .unwrap();
+    builder.parse("CREATE TABLE users (id INTEGER);").unwrap();
+    let (catalog, _) = builder.build();
+    assert!(has_table(&catalog, "billing.invoices"));
+    assert!(has_table(&catalog, "public.users"));
+    assert!(!has_table(&catalog, "invoices"));
+    assert!(catalog.search_path.is_empty());
+    assert_eq!(
+        catalog.get_enum("billing.state").unwrap().values,
+        ["open", "paid"]
     );
 }
