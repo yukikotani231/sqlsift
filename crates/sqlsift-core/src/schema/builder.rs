@@ -68,6 +68,12 @@ impl SchemaBuilder {
         self.catalog.skipped_definitions.push(definition);
     }
 
+    /// Record a table or view dropped in the query file (for diagnostics on later
+    /// statements that reference it)
+    pub(crate) fn record_dropped_relation(&mut self, name: QualifiedName, line: usize) {
+        self.catalog.record_dropped_relation(name, line);
+    }
+
     /// Whether `stmt` is a statement [`SchemaBuilder`] applies to the catalog
     pub(crate) fn changes_schema(stmt: &Statement) -> bool {
         match stmt {
@@ -610,6 +616,7 @@ impl SchemaBuilder {
     /// Process CREATE TABLE statement
     fn process_create_table(&mut self, create: &sqlparser::ast::CreateTable) {
         let name = self.catalog.qualified_name(&create.name);
+        self.catalog.restore_relation(&name);
         if create.if_not_exists && self.relation_exists(&name) {
             return;
         }
@@ -809,6 +816,7 @@ impl SchemaBuilder {
                 .unzip()
         };
 
+        self.catalog.restore_relation(&qualified);
         let view = ViewDef {
             name: qualified,
             columns: column_names,

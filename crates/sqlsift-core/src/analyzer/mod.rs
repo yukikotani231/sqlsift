@@ -7,7 +7,7 @@ mod type_check;
 
 use std::ops::Range;
 
-use sqlparser::ast::Statement;
+use sqlparser::ast::{ObjectType, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -281,6 +281,47 @@ impl<'a> Analyzer<'a> {
                     origin.shift(span);
                 }
                 self.diagnostics.push(diagnostic);
+            }
+
+            let to_record: Vec<(QualifiedName, usize)> = if let Statement::Drop {
+                object_type: ObjectType::Table | ObjectType::View,
+                names,
+                ..
+            } = stmt
+            {
+                names
+                    .iter()
+                    .filter_map(|name| {
+                        let qualified = catalog.qualified_name(name);
+                        if catalog.table_exists(&qualified) || catalog.view_exists(&qualified) {
+                            let drop_line = if let Some(id) = name.0.first() {
+                                let mut span = Span::from_sqlparser(&id.span);
+                                origin.shift(&mut span);
+                                if span.line > 0 {
+                                    span.line
+                                } else {
+                                    origin.line
+                                }
+                            } else {
+                                origin.line
+                            };
+                            Some((qualified, drop_line))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if !to_record.is_empty() {
+                let schema = file_schema.get_or_insert_with(|| {
+                    SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
+                });
+                for (qualified, drop_line) in to_record {
+                    schema.record_dropped_relation(qualified, drop_line);
+                }
             }
 
             if SchemaBuilder::changes_schema(stmt) {

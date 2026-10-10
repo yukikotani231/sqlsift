@@ -28,6 +28,10 @@ pub struct Catalog {
     /// and were skipped (for diagnostics on queries that use them)
     #[serde(default)]
     pub skipped_definitions: Vec<SkippedDefinition>,
+    /// Tables and views dropped earlier in the query file being analyzed (for
+    /// diagnostics on queries that reference them)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_relations: Vec<DroppedRelation>,
 }
 
 /// A schema statement that could not be parsed and was skipped
@@ -43,6 +47,13 @@ pub struct SkippedDefinition {
     pub line: Option<usize>,
 }
 
+/// A table or view dropped earlier in the query file being analyzed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedRelation {
+    pub name: QualifiedName,
+    pub line: usize,
+}
+
 impl Catalog {
     pub fn new() -> Self {
         let mut catalog = Self {
@@ -52,6 +63,7 @@ impl Catalog {
             search_path: Vec::new(),
             case_sensitive_names: false,
             skipped_definitions: Vec::new(),
+            dropped_relations: Vec::new(),
         };
         // Create default schema
         catalog.schemas.insert(
@@ -166,6 +178,35 @@ impl Catalog {
             a == b
         } else {
             a.eq_ignore_ascii_case(b)
+        }
+    }
+
+    /// Whether two qualified names refer to the same relation
+    pub fn relation_names_match(&self, a: &QualifiedName, b: &QualifiedName) -> bool {
+        if !self.names_match(&a.name, &b.name) {
+            return false;
+        }
+        match (&a.schema, &b.schema) {
+            (Some(sa), Some(sb)) => self.names_match(sa, sb),
+            (Some(s), None) | (None, Some(s)) => {
+                self.names_match(s, &self.default_schema)
+                    || self.search_path.iter().any(|sp| self.names_match(s, sp))
+            }
+            (None, None) => true,
+        }
+    }
+
+    /// Record a table or view dropped earlier in the file being analyzed
+    pub fn record_dropped_relation(&mut self, name: QualifiedName, line: usize) {
+        self.dropped_relations.push(DroppedRelation { name, line });
+    }
+
+    /// Remove any recorded drops that match `name`
+    pub fn restore_relation(&mut self, name: &QualifiedName) {
+        for i in (0..self.dropped_relations.len()).rev() {
+            if self.relation_names_match(&self.dropped_relations[i].name, name) {
+                self.dropped_relations.swap_remove(i);
+            }
         }
     }
 

@@ -1423,12 +1423,14 @@ impl<'a> Resolver<'a> {
     /// CTE, or else a likely reason why the table is missing
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
         let help = match (
+            self.dropped_table_hint(table_name),
             self.skipped_definition_hint(table_name),
             self.similar_table(table_name),
         ) {
-            (Some(hint), _) => hint,
-            (None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
-            (None, None) => self.missing_table_hint(table_name),
+            (Some(hint), _, _) => hint,
+            (None, Some(hint), _) => hint,
+            (None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
+            (None, None, None) => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
@@ -1477,6 +1479,20 @@ impl<'a> Resolver<'a> {
             .filter(|(shown, _)| !catalog.names_match(shown, &typed));
         find_most_similar(candidates, |(_, name)| name.as_str(), &table_name.name)
             .map(|(shown, _)| shown)
+    }
+
+    /// Why a table is missing when an earlier statement of the query file dropped it
+    fn dropped_table_hint(&self, table_name: &QualifiedName) -> Option<String> {
+        let dropped = self
+            .catalog
+            .dropped_relations
+            .iter()
+            .rev()
+            .find(|d| self.catalog.relation_names_match(&d.name, table_name))?;
+        Some(format!(
+            "'{table_name}' was dropped at line {} of this file",
+            dropped.line
+        ))
     }
 
     /// Why a table is missing when an earlier statement of the query file that
