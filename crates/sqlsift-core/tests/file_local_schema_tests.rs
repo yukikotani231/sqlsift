@@ -4,6 +4,7 @@ use sqlsift_core::analyzer::Analyzer;
 use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::error::{Diagnostic, DiagnosticKind};
 use sqlsift_core::schema::{Catalog, SchemaBuilder};
+use sqlsift_core::Templating;
 
 const SCHEMA: &str = r"
     CREATE TABLE customer (
@@ -420,7 +421,7 @@ SELECT id FROM tmp_ev;";
     let d = &diagnostics[0];
     assert_eq!(
         d.help.as_deref(),
-        Some("'tmp_ev' was dropped at line 3 of this file")
+        Some("'tmp_ev' was dropped at line 4 of this file")
     );
 }
 
@@ -485,5 +486,84 @@ SELECT id FROM tmp_ev;";
     assert!(
         diagnostics.is_empty(),
         "Expected no diagnostics, got: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn dropped_table_help_jinja_multibyte_no_panic() {
+    let sql = "CREATE TEMP TABLE t (id INTEGER);
+SELECT {{ var('日本語日本語日本語日本語') }} AS y; DROP TABLE t;
+SELECT id FROM t;";
+    let catalog = catalog(SCHEMA, SqlDialect::PostgreSQL);
+    let diagnostics = Analyzer::new(&catalog)
+        .with_templating(Templating::Jinja)
+        .analyze(sql);
+    let table_not_found: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TableNotFound)
+        .collect();
+    assert_eq!(table_not_found.len(), 1);
+    assert_eq!(
+        table_not_found[0].help.as_deref(),
+        Some("'t' was dropped at line 2 of this file")
+    );
+}
+
+#[test]
+fn dropped_table_help_with_earlier_parse_error() {
+    let catalog = catalog("CREATE TABLE t (id INTEGER);", SqlDialect::PostgreSQL);
+
+    let sql = "SELECT FROM WHERE;
+
+DROP TABLE t;
+
+SELECT id FROM t;";
+    let diagnostics = Analyzer::new(&catalog).analyze(sql);
+    let table_not_found: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TableNotFound)
+        .collect();
+    assert_eq!(table_not_found.len(), 1);
+    assert_eq!(
+        table_not_found[0].help.as_deref(),
+        Some("'t' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn table_or_alias_in_from_clause_not_marked_as_dropped() {
+    let sql = "CREATE TEMP TABLE customer (id INTEGER);
+CREATE TEMP TABLE t (id INTEGER);
+DROP TABLE t;
+SELECT t.* FROM customer;";
+    let diagnostics = analyze(sql);
+    let table_not_found: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TableNotFound)
+        .collect();
+    assert_eq!(table_not_found.len(), 1);
+    assert!(table_not_found[0]
+        .message
+        .contains("Table or alias 't' not found in FROM clause"));
+    assert_ne!(
+        table_not_found[0].help.as_deref(),
+        Some("'t' was dropped at line 3 of this file")
+    );
+}
+
+#[test]
+fn drop_nonexistent_table_does_not_mention_drop() {
+    let sql = "DROP TABLE IF EXISTS nope;
+SELECT id FROM nope;";
+    let diagnostics = analyze(sql);
+    let table_not_found: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagnosticKind::TableNotFound)
+        .collect();
+    assert_eq!(table_not_found.len(), 1);
+    let help = table_not_found[0].help.as_deref().unwrap_or_default();
+    assert!(
+        !help.contains("was dropped at line"),
+        "Expected standard help without drop mention, got: {help}"
     );
 }
