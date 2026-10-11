@@ -427,3 +427,14 @@ fn escaped_quotes_keep_identifiers_whole() {
         vec![(DiagnosticKind::ColumnNotFound, 1, 16)]
     );
 }
+
+#[test]
+fn directives_work_with_crlf_line_endings() {
+    let rs = QUERIES_RS.replace("\r\n", "\n").replace('\n', "\r\n");
+    assert_eq!(
+        locations(&analyze_rs(&rs, sqlsift_core::sqlx::DEFAULT_MACROS)),
+        locations(&analyze_rs(QUERIES_RS, sqlsift_core::sqlx::DEFAULT_MACROS))
+    );
+    let ts = "// sqlsift:disable E0002\r\nconst q = sql`SELECT nme FROM authors`;\r\n";
+    assert!(analyze_ts(ts, &["sql"]).is_empty());
+}

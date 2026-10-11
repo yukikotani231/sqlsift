@@ -507,7 +507,9 @@ pub(crate) fn finish(
             .find(|&k| matches!(chars[k], '\n' | '\r'))
             .unwrap_or(n);
         if d.end
-            .is_some_and(|end| out[end..line_end].iter().any(|c| !c.is_whitespace()))
+            // (a `//` comment ends before `\n`, after the `\r` of a CRLF line end)
+            .and_then(|end| out.get(end..line_end))
+            .is_some_and(|after| after.iter().any(|c| !c.is_whitespace()))
         {
             continue;
         }
