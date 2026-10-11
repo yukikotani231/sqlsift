@@ -480,9 +480,8 @@ fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
         };
 
         if let Ok(paths) = glob::glob(&abs_pattern) {
-            for path in paths.flatten() {
-                files.push(path);
-            }
+            // Directories matched by the pattern (`schema/**/*`) are skipped
+            files.extend(paths.flatten().filter(|path| !path.is_dir()));
         } else {
             // If glob fails, try as literal path
             let path = base_dir.join(pattern);
@@ -501,7 +500,11 @@ fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
         let pattern = format!("{abs_dir}/**/*.sql");
         if let Ok(paths) = glob::glob(&pattern) {
             // Rollback migrations (`*.down.sql`, Flyway `U*__*.sql`) are not schema
-            files.extend(paths.flatten().filter(|p| !is_rollback_migration(p)));
+            files.extend(
+                paths
+                    .flatten()
+                    .filter(|p| !p.is_dir() && !is_rollback_migration(p)),
+            );
         }
     }
 

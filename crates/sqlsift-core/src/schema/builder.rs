@@ -716,7 +716,7 @@ impl SchemaBuilder {
                 continue;
             }
 
-            let (col_def, constraints) = build_column(
+            let (mut col_def, constraints) = build_column(
                 &self.catalog,
                 self.dialect,
                 &name.name,
@@ -724,6 +724,7 @@ impl SchemaBuilder {
                 &column.data_type,
                 &column.options,
             );
+            col_def.case_sensitive = self.catalog.is_case_sensitive_column(&column.name);
             merge_constraints(&mut table, constraints);
             table.columns.insert(col_def.name.clone(), col_def);
         }
@@ -937,7 +938,7 @@ impl SchemaBuilder {
         for operation in operations {
             match operation {
                 AlterTableOperation::AddColumn { column_def, .. } => {
-                    let (col, constraints) = build_column(
+                    let (mut col, constraints) = build_column(
                         &self.catalog,
                         self.dialect,
                         &table_name.name,
@@ -945,6 +946,7 @@ impl SchemaBuilder {
                         &column_def.data_type,
                         &column_def.options,
                     );
+                    col.case_sensitive = self.catalog.is_case_sensitive_column(&column_def.name);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         merge_constraints(table, constraints);
                         table.forget_former_column(&col.name);
@@ -964,10 +966,12 @@ impl SchemaBuilder {
                     old_column_name,
                     new_column_name,
                 } => {
+                    let case_sensitive = self.catalog.is_case_sensitive_column(new_column_name);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(index) = column_index(table, &old_column_name.value) {
                             let mut col = table.columns[index].clone();
                             col.name.clone_from(&new_column_name.value);
+                            col.case_sensitive = case_sensitive;
                             let old_name = table.columns[index].name.clone();
                             table.record_column_rename(&old_name, &col.name);
                             replace_column(table, index, col);

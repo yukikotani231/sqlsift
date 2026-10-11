@@ -14,7 +14,7 @@ use sqlparser::ast::Ident;
 use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
-use crate::schema::{Catalog, FormerColumn, QualifiedName};
+use crate::schema::{case_mismatched_column, Catalog, FormerColumn, QualifiedName};
 use crate::types::SqlType;
 
 /// Type of an expression or column, as far as it can be inferred
@@ -59,6 +59,10 @@ pub(super) struct Column {
     /// which dialects name differently: it is good enough to resolve references,
     /// but not to say two columns have the same name
     pub(super) guessed_name: bool,
+    /// A catalog table column created with a quoted, not all lowercase name
+    /// (PostgreSQL `"authorId"`): only a quoted reference with the same case
+    /// matches it (see [`ColumnDef::case_sensitive`](crate::schema::ColumnDef))
+    pub(super) case_sensitive: bool,
 }
 
 impl Column {
@@ -67,6 +71,7 @@ impl Column {
             name: name.into(),
             ty,
             guessed_name: false,
+            case_sensitive: false,
         }
     }
 
@@ -146,7 +151,10 @@ impl Relation {
         let columns = table
             .columns
             .values()
-            .map(|c| Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type)))
+            .map(|c| Column {
+                case_sensitive: c.case_sensitive,
+                ..Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type))
+            })
             .collect();
         let mut relation = Self::new(RelationKind::Table, name.to_string(), Some(columns));
         relation.former_columns.clone_from(&table.former_columns);
@@ -238,6 +246,18 @@ impl Relation {
             return ColumnMatch::Maybe;
         }
         ColumnMatch::No
+    }
+
+    /// The case-sensitive column that a reference matches only ignoring case
+    /// (see [`case_mismatched_column`])
+    pub(super) fn case_mismatched_column(&self, ident: &Ident) -> Option<&str> {
+        case_mismatched_column(
+            self.columns
+                .iter()
+                .flatten()
+                .map(|c| (c.name.as_str(), c.case_sensitive)),
+            ident,
+        )
     }
 
     /// Column names, for "did you mean" suggestions

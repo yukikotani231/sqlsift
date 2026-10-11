@@ -216,3 +216,49 @@ fn test_schema_dir_skips_rollback_migrations() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_glob_skips_matched_directories() {
+    let dir = make_temp_dir("glob-dirs");
+    let queries = dir.join("queries");
+    // `queries/**/*` matches the directory `queries/sql` as well as the files
+    fs::create_dir_all(queries.join("sql")).expect("failed to create query dirs");
+    let schema_dir = dir.join("schema");
+    fs::create_dir_all(schema_dir.join("nested")).expect("failed to create schema dirs");
+    write_file(
+        &schema_dir.join("nested/users.sql"),
+        "CREATE TABLE users (id INT, name TEXT);",
+    );
+    write_file(&queries.join("sql/a.sql"), "SELECT id FROM users;");
+    write_file(&queries.join("b.sql"), "SELECT name FROM users;");
+
+    let schema_glob = format!("{}/**/*", schema_dir.to_string_lossy());
+    let query_glob = format!("{}/**/*", queries.to_string_lossy());
+    let output = run_sqlsift(&["check", "--schema", &schema_glob, &query_glob]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected directories matched by globs to be skipped, stderr:\n{stderr}"
+    );
+
+    // The same globs in sqlsift.toml
+    let config = dir.join("sqlsift.toml");
+    write_file(
+        &config,
+        "schema = [\"schema/**/*\"]\nfiles = [\"queries/**/*\"]\n",
+    );
+    let config_s = config.to_string_lossy().to_string();
+    let output = run_sqlsift(&["check", "--config", &config_s]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected directories matched by config globs to be skipped, stderr:\n{stderr}"
+    );
+
+    // A directory named explicitly is still an error (it is not a query file)
+    let queries_s = queries.to_string_lossy().to_string();
+    let output = run_sqlsift(&["check", "--schema", &schema_glob, &queries_s]);
+    assert_eq!(output.status.code(), Some(2));
+
+    let _ = fs::remove_dir_all(&dir);
+}

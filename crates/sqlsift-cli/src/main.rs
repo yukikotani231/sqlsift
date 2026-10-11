@@ -256,11 +256,12 @@ fn glob_base(pattern: &str) -> PathBuf {
         .collect()
 }
 
-/// Expand a glob pattern into matching paths (sorted, as returned by `glob`)
+/// Expand a glob pattern into the files it matches (sorted, as returned by
+/// `glob`). Directories are skipped: `dir/**/*` names the files under `dir`.
 fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>> {
     let paths = glob::glob(pattern)
         .map_err(|e| miette::miette!("Invalid glob pattern '{}': {}", pattern, e))?;
-    Ok(paths.flatten().collect())
+    Ok(paths.flatten().filter(|path| !path.is_dir()).collect())
 }
 
 /// Load the configuration file given with `--config`, or discover `sqlsift.toml`

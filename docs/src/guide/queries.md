@@ -4,7 +4,7 @@
 
 ## Choosing files
 
-Query files come from the command line or from `files` in `sqlsift.toml`. Both accept glob patterns; `**` matches any number of directories.
+Query files come from the command line or from `files` in `sqlsift.toml`. Both accept glob patterns; `**` matches any number of directories. Directories a pattern matches are skipped (`'queries/**/*'` checks the files under `queries/`); a directory named on its own is an error.
 
 ```bash
 sqlsift check 'queries/**/*.sql'
