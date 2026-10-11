@@ -226,6 +226,7 @@ fn mysql_change_column_records_the_rename() {
         vec![FormerColumn {
             name: "body".to_string(),
             renamed_to: Some("content".to_string()),
+            location: None,
         }]
     );
     let d = single(&c, SqlDialect::MySQL, "SELECT body FROM posts");

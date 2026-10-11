@@ -23,7 +23,7 @@ error[E0002]: Column 'name' not found in table 'customers'
     |
   4 | SELECT c.id, c.name, sum(o.total) AS lifetime_value
     |                ^^^^
-    = help: 'name' was renamed to 'full_name' by ALTER TABLE in the schema
+    = help: 'name' was renamed to 'full_name' in migrations/0003_rename_customer_name.sql:2
 ```
 
 The query still parses and nothing else in the pull request touches it; without sqlsift it fails only once it runs against the migrated database. To get this in pull requests, check every query file in CI (see [Re-check everything when the schema changes](ci.md#re-check-everything-when-the-schema-changes)).

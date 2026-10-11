@@ -50,7 +50,7 @@ error[E0002]: Column 'done' not found in table 'todos'
     |
   7 |   AND NOT done
     |           ^^^^
-    = help: 'done' was dropped by ALTER TABLE in the schema
+    = help: 'done' was dropped in migrations/20260320110000_replace_done_with_completed_at.sql:4
 
 error[E0003]: Invalid value 'urgent' for enum type 'todo_priority'
   --> broken/set_priority.sql:2:5

@@ -181,7 +181,16 @@ impl ServerState {
         for schema_file in &self.schema_files {
             match std::fs::read_to_string(schema_file) {
                 Ok(content) => {
-                    if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
+                    // Named relative to the workspace in hints and schema warnings
+                    let shown = self
+                        .workspace_root
+                        .as_deref()
+                        .and_then(|root| schema_file.strip_prefix(root).ok())
+                        .unwrap_or(schema_file)
+                        .display()
+                        .to_string();
+                    if let Err(diags) = with_analysis_stack(|| builder.parse_file(&content, &shown))
+                    {
                         for d in diags {
                             errors.push(format!("{}: {}", schema_file.display(), d.message));
                         }
@@ -583,6 +592,49 @@ mod tests {
             "SELECT u.id, o.id, i.id FROM users u CROSS JOIN orders o CROSS JOIN items i",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_rename_hint_names_migration_relative_to_workspace() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sqlsift-lsp-rename-hint-{}-{nanos}",
+            std::process::id()
+        ));
+        let migrations = root.join("migrations");
+        std::fs::create_dir_all(&migrations).unwrap();
+        std::fs::write(root.join("sqlsift.toml"), "schema_dir = \"migrations\"\n").unwrap();
+        std::fs::write(
+            migrations.join("0001_posts.sql"),
+            "CREATE TABLE posts (id INT, body TEXT);",
+        )
+        .unwrap();
+        std::fs::write(
+            migrations.join("0002_rename.sql"),
+            "\nALTER TABLE posts RENAME COLUMN body TO content;",
+        )
+        .unwrap();
+
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        let diagnostics = state.analyze_document("SELECT body FROM posts");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let help = diagnostics[0]
+            .help
+            .as_deref()
+            .unwrap_or_default()
+            .replace('\\', "/");
+        assert_eq!(
+            help,
+            "'body' was renamed to 'content' in migrations/0002_rename.sql:2"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
