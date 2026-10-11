@@ -312,7 +312,6 @@ impl<'a> Analyzer<'a> {
                 .with_templated_names(&templated_name);
             resolver.templated_statement = templated;
             resolver.statement(stmt);
-            resolver.check_subquery_shapes(stmt);
             if let Statement::Declare { stmts } = stmt {
                 variables.extend(
                     stmts

@@ -50,6 +50,9 @@ pub(super) struct Resolver<'a> {
     pub(super) duplicate_names: Vec<String>,
     /// The statement has template tags, which may expand to columns or clauses
     pub(super) templated_statement: bool,
+    /// Subqueries compared with or assigned to a row, by address (they may return
+    /// several columns)
+    pub(super) row_subqueries: Vec<usize>,
 }
 
 impl<'a> Resolver<'a> {
@@ -65,6 +68,7 @@ impl<'a> Resolver<'a> {
             templated_name: None,
             duplicate_names: Vec::new(),
             templated_statement: false,
+            row_subqueries: Vec::new(),
         }
     }
 
@@ -548,6 +552,7 @@ impl<'a> Resolver<'a> {
                 }
                 AssignmentTarget::Tuple(_) => {
                     // Tuple assignment (col1, col2) = (val1, val2) - not commonly used
+                    self.allow_row_subquery(&assignment.value);
                 }
             }
             self.expr(&assignment.value);
@@ -1519,6 +1524,7 @@ impl<'a> Resolver<'a> {
                 let mut leftmost = expr;
                 while let Expr::BinaryOp { left, op, right } = leftmost {
                     chain.push((&**left, op, &**right));
+                    self.note_row_comparison(left, right);
                     leftmost = left;
                 }
                 self.expr(leftmost);
@@ -1526,6 +1532,7 @@ impl<'a> Resolver<'a> {
                 let mut left_type = None;
                 for (left, op, right) in chain.into_iter().rev() {
                     self.expr(right);
+                    self.check_row_comparison(left, right);
                     left_type = self.check_binary_op(left, op, right, left_type);
                 }
             }
@@ -1593,10 +1600,12 @@ impl<'a> Resolver<'a> {
             Expr::InSubquery { expr, subquery, .. } => {
                 self.expr(expr);
                 let columns = self.subquery(subquery);
+                self.check_in_subquery_shape(expr, columns.as_ref().map(Vec::len));
                 self.check_in_subquery(expr, columns.as_deref());
             }
             Expr::Subquery(query) => {
                 self.subquery(query);
+                self.check_scalar_subquery(expr, query);
             }
             Expr::Exists { subquery, .. } => {
                 self.subquery(subquery);

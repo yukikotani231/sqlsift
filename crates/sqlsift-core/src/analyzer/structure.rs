@@ -345,7 +345,7 @@ impl Resolver<'_> {
     /// Report aggregate or window functions in a clause that doesn't allow them
     pub(super) fn check_aggregates_in(&mut self, expr: &Expr, clause: Clause) {
         let mut finder = FunctionFinder::new(self.dialect);
-        let _ = expr.visit(&mut finder);
+        let _ = visit_flat(expr, &mut finder);
         for found in finder.found {
             let (message, help) = match found.kind {
                 Found::Window => (
@@ -385,7 +385,7 @@ impl Resolver<'_> {
     /// Report aggregates nested in aggregates (in clauses that allow aggregates)
     pub(super) fn check_nested_aggregates(&mut self, expr: &Expr) {
         let mut finder = FunctionFinder::new(self.dialect);
-        let _ = expr.visit(&mut finder);
+        let _ = visit_flat(expr, &mut finder);
         for found in finder.found {
             if let Found::Nested = found.kind {
                 self.diagnostics.push(
@@ -642,138 +642,155 @@ impl Resolver<'_> {
         );
     }
 
-    /// Report subqueries that return the wrong number of columns for where they are
-    /// (`x IN (SELECT a, b ...)`, `x = (SELECT a, b ...)`) and row comparisons of
-    /// different lengths. Runs after the statement is resolved, using the output
-    /// columns of its subqueries.
-    pub(super) fn check_subquery_shapes(&mut self, stmt: &sqlparser::ast::Statement) {
-        if !matches!(
+    /// Whether subquery and row shapes are checked (E0005)
+    fn checks_subquery_shapes(&self) -> bool {
+        matches!(
             self.dialect,
             SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL | SqlDialect::SQLite
-        ) {
-            return;
-        }
-        let mut checker = ShapeChecker {
-            columns: &self.subquery_columns,
-            row_subqueries: Vec::new(),
-            found: Vec::new(),
-        };
-        let _ = stmt.visit(&mut checker);
-        self.diagnostics.extend(checker.found);
+        )
     }
-}
 
-/// Finds subqueries and row comparisons with the wrong number of columns
-struct ShapeChecker<'c> {
-    /// Output columns of the subqueries of the statement, by address
-    columns: &'c std::collections::HashMap<usize, Option<Vec<super::scope::Column>>>,
-    /// Subqueries compared with a row (`(a, b) = (SELECT ...)`), by address
-    row_subqueries: Vec<usize>,
-    found: Vec<Diagnostic>,
-}
+    /// Note a subquery compared with or assigned to a row (`(a, b) = (SELECT ...)`,
+    /// `SET (a, b) = (SELECT ...)`), which may return several columns
+    pub(super) fn allow_row_subquery(&mut self, expr: &Expr) {
+        if let Expr::Subquery(query) = expr {
+            self.row_subqueries
+                .push(query.as_ref() as *const Query as usize);
+        }
+    }
 
-impl ShapeChecker<'_> {
-    fn column_count(&self, query: &Query) -> Option<usize> {
-        let columns = self.columns.get(&(query as *const Query as usize))?;
+    /// Note the subqueries of `left op right` that are compared with a row
+    pub(super) fn note_row_comparison(&mut self, left: &Expr, right: &Expr) {
+        if matches!(left, Expr::Tuple(_)) {
+            self.allow_row_subquery(right);
+        }
+        if matches!(right, Expr::Tuple(_)) {
+            self.allow_row_subquery(left);
+        }
+    }
+
+    fn subquery_column_count(&self, query: &Query) -> Option<usize> {
+        let columns = self
+            .subquery_columns
+            .get(&(query as *const Query as usize))?;
         columns.as_ref().map(Vec::len)
     }
 
-    fn report(&mut self, message: String, help: &str, at: &Expr) {
-        let mut diag = Diagnostic::error(DiagnosticKind::ColumnCountMismatch, message)
-            .with_help(help.to_string());
+    fn report_shape(&mut self, message: String, help: &str, at: &Expr) {
+        let mut diag =
+            Diagnostic::error(DiagnosticKind::ColumnCountMismatch, message).with_help(help);
         diag.span = Some(Span::from_sqlparser(&at.span())).filter(|s| s.line > 0);
-        self.found.push(diag);
+        self.diagnostics.push(diag);
     }
-}
 
-impl Visitor for ShapeChecker<'_> {
-    type Break = ();
-
-    fn pre_visit_statement(&mut self, stmt: &sqlparser::ast::Statement) -> ControlFlow<()> {
-        // `UPDATE t SET (a, b) = (SELECT x, y ...)` assigns a row
-        if let sqlparser::ast::Statement::Update { assignments, .. } = stmt {
-            for assignment in assignments {
-                if let (AssignmentTarget::Tuple(_), Expr::Subquery(query)) =
-                    (&assignment.target, &assignment.value)
-                {
-                    self.row_subqueries
-                        .push(query.as_ref() as *const Query as usize);
-                }
-            }
+    /// Report a row compared with a row or subquery of another length (after both
+    /// operands are resolved)
+    pub(super) fn check_row_comparison(&mut self, left: &Expr, right: &Expr) {
+        if !self.checks_subquery_shapes() {
+            return;
         }
-        ControlFlow::Continue(())
-    }
-
-    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-        match expr {
-            Expr::BinaryOp { left, right, .. } => match (left.as_ref(), right.as_ref()) {
-                (Expr::Tuple(a), Expr::Tuple(b)) if a.len() != b.len() => {
-                    self.report(
-                        format!(
-                            "Row comparison of {} values with {} values",
-                            a.len(),
-                            b.len()
-                        ),
-                        "Compare rows with the same number of values",
-                        left,
-                    );
-                }
-                (Expr::Tuple(row), Expr::Subquery(query))
-                | (Expr::Subquery(query), Expr::Tuple(row)) => {
-                    self.row_subqueries
-                        .push(query.as_ref() as *const Query as usize);
-                    if let Some(n) = self.column_count(query) {
-                        if n != row.len() {
-                            self.report(
-                                format!(
-                                    "Row of {} values compared with a subquery of {n} columns",
-                                    row.len()
-                                ),
-                                "Select as many columns as the row has values",
-                                left,
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            },
-            Expr::InSubquery { expr, subquery, .. } => {
-                let expected = match expr.as_ref() {
-                    Expr::Tuple(row) => row.len(),
-                    _ => 1,
-                };
-                self.row_subqueries
-                    .push(subquery.as_ref() as *const Query as usize);
-                if let Some(n) = self.column_count(subquery) {
-                    if n != expected {
-                        self.report(
-                            format!(
-                                "IN subquery returns {n} columns but {expected} {} expected",
-                                if expected == 1 { "is" } else { "are" }
-                            ),
-                            "Select only the column to compare with",
-                            expr,
-                        );
-                    }
-                }
+        match (left, right) {
+            (Expr::Tuple(a), Expr::Tuple(b)) if a.len() != b.len() => {
+                self.report_shape(
+                    format!(
+                        "Row comparison of {} values with {} values",
+                        a.len(),
+                        b.len()
+                    ),
+                    "Compare rows with the same number of values",
+                    left,
+                );
             }
-            Expr::Subquery(query) => {
-                let address = query.as_ref() as *const Query as usize;
-                if !self.row_subqueries.contains(&address) {
-                    if let Some(n) = self.column_count(query) {
-                        if n > 1 {
-                            self.report(
-                                format!("Subquery used as a value returns {n} columns"),
-                                "A scalar subquery must select exactly one column",
-                                expr,
-                            );
-                        }
+            (Expr::Tuple(row), Expr::Subquery(query))
+            | (Expr::Subquery(query), Expr::Tuple(row)) => {
+                if let Some(n) = self.subquery_column_count(query) {
+                    if n != row.len() {
+                        self.report_shape(
+                            format!(
+                                "Row of {} values compared with a subquery of {n} columns",
+                                row.len()
+                            ),
+                            "Select as many columns as the row has values",
+                            left,
+                        );
                     }
                 }
             }
             _ => {}
         }
-        ControlFlow::Continue(())
+    }
+
+    /// Report `x IN (SELECT ...)` whose subquery returns a different number of
+    /// columns than `x` has values
+    pub(super) fn check_in_subquery_shape(&mut self, expr: &Expr, columns: Option<usize>) {
+        if !self.checks_subquery_shapes() {
+            return;
+        }
+        let expected = match expr {
+            Expr::Tuple(row) => row.len(),
+            _ => 1,
+        };
+        if let Some(n) = columns.filter(|&n| n != expected) {
+            self.report_shape(
+                format!(
+                    "IN subquery returns {n} columns but {expected} {} expected",
+                    if expected == 1 { "is" } else { "are" }
+                ),
+                "Select only the column to compare with",
+                expr,
+            );
+        }
+    }
+
+    /// Report a subquery used as a value that returns several columns
+    pub(super) fn check_scalar_subquery(&mut self, expr: &Expr, query: &Query) {
+        if !self.checks_subquery_shapes()
+            || self
+                .row_subqueries
+                .contains(&(query as *const Query as usize))
+        {
+            return;
+        }
+        if let Some(n) = self.subquery_column_count(query).filter(|&n| n > 1) {
+            self.report_shape(
+                format!("Subquery used as a value returns {n} columns"),
+                "A scalar subquery must select exactly one column",
+                expr,
+            );
+        }
+    }
+}
+
+/// Visit an expression like [`Visit::visit`], walking chains of binary operators
+/// (`a OR b OR ...`, which nest as deep as they are long) in a loop, so that a long
+/// chain doesn't overflow the stack
+pub(super) fn visit_flat<V: Visitor>(expr: &Expr, visitor: &mut V) -> ControlFlow<V::Break> {
+    match expr {
+        Expr::BinaryOp { .. } => {
+            let mut spine = Vec::new();
+            let mut leftmost = expr;
+            while let Expr::BinaryOp { left, .. } = leftmost {
+                spine.push(leftmost);
+                leftmost = left;
+            }
+            for node in &spine {
+                visitor.pre_visit_expr(node)?;
+            }
+            visit_flat(leftmost, visitor)?;
+            for node in spine.iter().rev() {
+                if let Expr::BinaryOp { right, .. } = node {
+                    visit_flat(right, visitor)?;
+                }
+                visitor.post_visit_expr(node)?;
+            }
+            ControlFlow::Continue(())
+        }
+        Expr::Nested(inner) => {
+            visitor.pre_visit_expr(expr)?;
+            visit_flat(inner, visitor)?;
+            visitor.post_visit_expr(expr)
+        }
+        _ => expr.visit(visitor),
     }
 }
 

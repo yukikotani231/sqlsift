@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, GroupByExpr, Ident, Query, Select, SelectItem, TableFactor, Value, Visit, Visitor,
+    Expr, GroupByExpr, Ident, Query, Select, SelectItem, TableFactor, Value, Visitor,
 };
 
 use crate::dialect::SqlDialect;
@@ -21,7 +21,7 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 
 use super::resolver::Resolver;
 use super::scope::{ColumnMatch, Frame};
-use super::structure::is_aggregate;
+use super::structure::{is_aggregate, visit_flat};
 
 /// A column of a relation of the query block: (relation key, column), lowercase
 type ColumnKey = (String, String);
@@ -121,7 +121,7 @@ impl Resolver<'_> {
                 grouped.insert(column);
             } else {
                 grouped_exprs.push(normalize(expr));
-                let _ = expr.visit(&mut ColumnNames(&mut touched));
+                let _ = visit_flat(expr, &mut ColumnNames(&mut touched));
             }
         }
 
@@ -169,17 +169,17 @@ impl Resolver<'_> {
             refs: Vec::new(),
         };
         for expr in &projection {
-            let _ = expr.visit(&mut finder);
+            let _ = visit_flat(expr, &mut finder);
         }
         if let Some(having) = &select.having {
-            let _ = having.visit(&mut finder);
+            let _ = visit_flat(having, &mut finder);
         }
         for expr in order_by {
             // Positions and output column names
             let output = matches!(expr, Expr::Value(_))
                 || matches!(expr, Expr::Identifier(i) if output_names.contains(&i.value.to_lowercase()));
             if !output {
-                let _ = expr.visit(&mut finder);
+                let _ = visit_flat(expr, &mut finder);
             }
         }
 
@@ -352,7 +352,7 @@ fn has_aggregate(expr: &Expr, dialect: SqlDialect) -> bool {
             }
         }
     }
-    expr.visit(&mut Finder { dialect, depth: 0 }).is_break()
+    visit_flat(expr, &mut Finder { dialect, depth: 0 }).is_break()
 }
 
 /// Collects the (lowercase) column names an expression uses
