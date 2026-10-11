@@ -775,15 +775,29 @@ impl<'a> Resolver<'a> {
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
-                    columns.push(Column::new(name, self.infer_expr_type(expr)));
+                    let mut column = Column::new(name, self.infer_expr_type(expr));
+                    // Only a column reference is named the same in every dialect
+                    column.guessed_name =
+                        !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_));
+                    columns.push(column);
                 }
                 SelectItem::Wildcard(options) => {
                     if frame.relations.is_empty() {
                         return None;
                     }
-                    let mut star = Vec::new();
+                    let mut star: Vec<Column> = Vec::new();
                     for relation in frame.relations.values() {
-                        star.extend(relation.star_columns()?.cloned());
+                        for column in relation.star_columns()? {
+                            // A column merged by USING / NATURAL JOIN appears once
+                            // (also when the merge couldn't be tied to a relation)
+                            let merged = frame.using_columns.contains(&column.name.to_lowercase())
+                                && star
+                                    .iter()
+                                    .any(|c| c.name.eq_ignore_ascii_case(&column.name));
+                            if !merged {
+                                star.push(column.clone());
+                            }
+                        }
                     }
                     columns.extend(self.apply_wildcard_options(star, options)?);
                 }
@@ -834,7 +848,7 @@ impl<'a> Resolver<'a> {
                 .iter_mut()
                 .find(|c| c.name.eq_ignore_ascii_case(&rename.ident.value))
             {
-                col.name.clone_from(&rename.alias.value);
+                col.rename(&rename.alias.value);
             }
         }
         Some(columns)
@@ -1576,8 +1590,14 @@ impl<'a> Resolver<'a> {
                     .push(relation_not_in_from(schema_id, table_id));
                 return;
             };
-            if !matches!(relation.column(column_name, self.dialect), ColumnMatch::No) {
-                return;
+            match relation.column(column_name, self.dialect) {
+                ColumnMatch::No => {}
+                ColumnMatch::Duplicate => {
+                    self.diagnostics
+                        .push(duplicate_column(relation, column_name, column_span));
+                    return;
+                }
+                ColumnMatch::Yes(_) | ColumnMatch::Maybe => return,
             }
             let mut diag = Diagnostic::error(
                 DiagnosticKind::ColumnNotFound,
@@ -1619,6 +1639,12 @@ impl<'a> Resolver<'a> {
                         tables[0], column_name
                     )),
                 );
+            }
+            ColumnLookup::Duplicate(key) => {
+                if let Some(relation) = self.scope.relation(&key) {
+                    let diag = duplicate_column(relation, column_name, column_span);
+                    self.diagnostics.push(diag);
+                }
             }
             ColumnLookup::NotFound => {
                 // An output column alias (valid in ORDER BY / GROUP BY)
@@ -2106,6 +2132,26 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
         Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }
+}
+
+/// E0006 for a reference to a column name that a CTE or subquery outputs more than
+/// once (`SELECT *` over a join of two relations that both have it)
+fn duplicate_column(relation: &Relation, column: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticKind::AmbiguousColumn,
+        format!(
+            "Column '{}' is ambiguous ({} '{}' has more than one column named '{}')",
+            column,
+            relation.kind_name(),
+            relation.name,
+            column
+        ),
+    )
+    .with_span(span)
+    .with_help(format!(
+        "Select the columns of {} by name and alias the duplicates instead of using '*'",
+        relation.name
+    ))
 }
 
 /// Help for a column of a catalog table that doesn't exist

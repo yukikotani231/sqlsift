@@ -171,7 +171,6 @@ from final
 /// type, reported as non-numeric in arithmetic (fivetran stripe, hubspot, shopify,
 /// fivetran_log, jira, zendesk)
 #[test]
-#[ignore = "known false positive (corpus report: dbt-type-macro-arith)"]
 fn dbt_type_macro_in_arithmetic() {
     assert_clean(&dbt(
         SqlDialect::PostgreSQL,
@@ -322,7 +321,6 @@ fn databricks_complex_types_and_lateral_view() {
 /// Class custom-type-arith: a type sqlsift doesn't know (PostgreSQL MONEY) is reported
 /// as non-numeric in arithmetic instead of being unknown
 #[test]
-#[ignore = "known false positive (corpus report: custom-type-arith)"]
 fn unknown_type_in_arithmetic() {
     assert_clean(&check(
         SqlDialect::PostgreSQL,
@@ -346,7 +344,6 @@ fn bigquery_script_variables() {
 /// Class bq-using-unaliased-subquery: `SELECT *` over `JOIN (subquery) USING (c)` with
 /// an unaliased subquery counts `c` twice (bigquery-etl adm_forecasting_v1)
 #[test]
-#[ignore = "known false positive (corpus report: bq-using-unaliased-subquery)"]
 fn bigquery_star_over_using_with_unaliased_subquery() {
     assert_clean(&check(
         SqlDialect::BigQuery,
@@ -361,7 +358,6 @@ fn bigquery_star_over_using_with_unaliased_subquery() {
 /// has two columns with the same name; referencing that name is ambiguous in
 /// PostgreSQL. Mutation testing: most missed "ambiguous" mutants
 #[test]
-#[ignore = "known false negative (corpus report: fn-star-duplicate-columns)"]
 fn duplicate_columns_of_a_star_cte_are_ambiguous() {
     let found = check(
         SqlDialect::PostgreSQL,

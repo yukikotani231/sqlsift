@@ -331,3 +331,90 @@ fn set_operation_order_by_sees_output_columns() {
         "'nope'",
     );
 }
+
+fn analyze_in(dialect: SqlDialect, schema: &str, sql: &str) -> Vec<Diagnostic> {
+    let mut builder = SchemaBuilder::with_dialect(dialect);
+    builder.parse(schema).unwrap();
+    let catalog = builder.build().0;
+    Analyzer::with_dialect(&catalog, dialect).analyze(sql)
+}
+
+#[test]
+fn duplicate_columns_of_a_star_over_a_join_are_ambiguous() {
+    // Both `users` and `orders` have `id`: `SELECT *` outputs it twice
+    for sql in [
+        "WITH j AS (SELECT * FROM users JOIN orders ON orders.user_id = users.id) SELECT id FROM j",
+        "SELECT id FROM (SELECT * FROM users CROSS JOIN orders) AS j",
+        "WITH j AS (SELECT * FROM users CROSS JOIN orders) SELECT j.id FROM j",
+        "WITH j AS (SELECT * FROM users CROSS JOIN orders) SELECT 1 FROM j WHERE id = 1",
+        "WITH j AS (SELECT u.id, o.id FROM users u, orders o) SELECT id FROM j",
+        "WITH j AS (SELECT * FROM users CROSS JOIN users AS u2) SELECT name FROM j",
+    ] {
+        assert_single(
+            sql,
+            DiagnosticKind::AmbiguousColumn,
+            "has more than one column named",
+        );
+    }
+}
+
+#[test]
+fn star_columns_that_are_not_duplicated_resolve() {
+    // Columns of one side only, USING / NATURAL merges, an explicit column list,
+    // qualified stars of one side and the star itself are fine
+    assert_valid(
+        "WITH j AS (SELECT * FROM users JOIN orders ON orders.user_id = users.id)
+         SELECT name, total, user_id FROM j",
+    );
+    assert_valid("WITH j AS (SELECT * FROM users JOIN users AS u2 USING (id)) SELECT id FROM j");
+    assert_valid(
+        "WITH j AS (SELECT * FROM users NATURAL JOIN user_copy) SELECT id, name, email FROM j",
+    );
+    assert_valid("WITH j(a, b) AS (SELECT u.id, o.id FROM users u, orders o) SELECT a, b FROM j");
+    assert_valid("WITH j AS (SELECT users.*, orders.total FROM users, orders) SELECT id FROM j");
+    assert_valid("SELECT * FROM (SELECT * FROM users CROSS JOIN orders) AS j");
+    // Names guessed from expressions differ between dialects: not compared
+    assert_valid("WITH j AS (SELECT max(id), max(name) FROM users) SELECT max FROM j");
+}
+
+#[test]
+fn duplicate_star_columns_by_dialect() {
+    let schema = "CREATE TABLE t (id INT, v INT);";
+    let sql = "WITH x AS (SELECT * FROM t CROSS JOIN t AS t2) SELECT id FROM x;";
+    for dialect in SqlDialect::ALL {
+        let kinds: Vec<_> = analyze_in(dialect, schema, sql)
+            .into_iter()
+            .map(|d| d.kind)
+            .collect();
+        if dialect == SqlDialect::SQLite {
+            // SQLite resolves the name to the first such column
+            assert!(kinds.is_empty(), "{dialect:?}: {kinds:?}");
+        } else {
+            assert_eq!(kinds, vec![DiagnosticKind::AmbiguousColumn], "{dialect:?}");
+        }
+    }
+}
+
+#[test]
+fn arithmetic_on_types_sqlsift_does_not_model_is_not_reported() {
+    let schema = "CREATE DOMAIN amount AS NUMERIC;
+        CREATE TABLE t (m MONEY, a amount, c citext, j JSONB, arr INT[], n INT, s TEXT,
+                        d INTERVAL);";
+    for sql in [
+        "SELECT m * 2, m / 2, m + m, -m FROM t",
+        "SELECT a + 1, n - a FROM t",
+        "SELECT c + 1 FROM t",
+        "SELECT j - 'key', j - 1 FROM t",
+        "SELECT arr - 1 FROM t",
+        "SELECT CAST(n AS money) + m FROM t",
+        "SELECT avg(m) + 1, avg(d) + now() FROM t",
+        "SELECT 1 FROM t WHERE m > 1 AND a = 1",
+    ] {
+        let diagnostics = analyze_in(SqlDialect::PostgreSQL, schema, sql);
+        assert!(diagnostics.is_empty(), "for `{sql}`: {diagnostics:#?}");
+    }
+    // Types sqlsift knows are still checked
+    let diagnostics = analyze_in(SqlDialect::PostgreSQL, schema, "SELECT s * 2 FROM t");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+}
