@@ -1,0 +1,6 @@
+# Migrations are applied in file name order; SQL passed to cursor.execute(),
+# text() and the other default calls (`embedded_sql_functions`) in app/ is
+# checked. f-strings and concatenation are skipped.
+schema_dir = "migrations"
+files = ["app/**/*.py"]
+dialect = "postgresql"

@@ -420,9 +420,11 @@ impl BaselineFilter {
 /// [`Baseline`] and [`BaselineFilter`]: the file's text, or for TypeScript /
 /// JavaScript files (by `name`, see
 /// [`is_embedded_sql_file`](crate::embedded::is_embedded_sql_file)) the SQL of
-/// its templates tagged with one of `tags`, and for Rust files (see
+/// its templates tagged with one of `tags`, for Rust files (see
 /// [`is_rust_file`](crate::sqlx::is_rust_file)) the SQL passed to one of
-/// `macros`, so that the code around a query is not part of its statement.
+/// `macros`, and for Python files (see
+/// [`is_python_file`](crate::python::is_python_file)) the SQL passed to one of
+/// `functions`, so that the code around a query is not part of its statement.
 ///
 /// ```
 /// use std::path::Path;
@@ -430,14 +432,15 @@ impl BaselineFilter {
 /// use sqlsift_core::SqlDialect;
 ///
 /// let ts = "const rows = await sql`SELECT 1`;";
-/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], &["query"], SqlDialect::PostgreSQL);
+/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], &["query"], &["execute"], SqlDialect::PostgreSQL);
 /// assert_eq!(sql.trim(), ";SELECT 1;");
 /// ```
-pub fn sql_text<S: AsRef<str>, M: AsRef<str>>(
+pub fn sql_text<S: AsRef<str>, M: AsRef<str>, F: AsRef<str>>(
     name: &Path,
     source: &str,
     tags: &[S],
     macros: &[M],
+    functions: &[F],
     dialect: SqlDialect,
 ) -> String {
     // As `Analyzer::analyze_embedded` / `analyze_rust`: the BOM is not part of the
@@ -453,6 +456,9 @@ pub fn sql_text<S: AsRef<str>, M: AsRef<str>>(
         format!("{}{text}", &source[..bom])
     } else if crate::sqlx::is_rust_file(name) {
         let text = crate::sqlx::extract(script, macros).text;
+        format!("{}{text}", &source[..bom])
+    } else if crate::python::is_python_file(name) {
+        let text = crate::python::extract(script, functions, dialect).text;
         format!("{}{text}", &source[..bom])
     } else {
         source.to_string()
@@ -1346,6 +1352,7 @@ mod tests {
                 source,
                 &["sql"],
                 &["query"],
+                &["execute"],
                 SqlDialect::PostgreSQL,
             );
             let mut baseline = Baseline::default();

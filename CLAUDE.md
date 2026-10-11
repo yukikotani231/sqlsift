@@ -43,7 +43,7 @@ sqlsift/
 │
 ├── docs/                  # User guide (mdBook), published to GitHub Pages at https://sqlsift.dev/docs/
 ├── site/                  # Browser playground (GitHub Pages root, https://sqlsift.dev/)
-├── examples/              # Example projects per stack (sqlc, Prisma, aiosql, postgres.js, sqlx, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
+├── examples/              # Example projects per stack (sqlc, Prisma, aiosql, psycopg, postgres.js, sqlx, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Pagila schema (used by tests)
 ├── scripts/
@@ -223,7 +223,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ Configuration file (sqlsift.toml), written for an existing project by `sqlsift init` (`sqlsift-cli/src/init/`: detects sqlc, Prisma, Supabase, Drizzle, Flyway, golang-migrate, goose, dbmate, schema dumps, dbt, `.sql` queries and SQL tagged templates, and the dialect; runs a first check as a subprocess with `--format json`)
 - ✅ goose `-- +goose Down` and dbmate `-- migrate:down` sections are skipped when loading the schema (`schema/migrations.rs`)
 - ✅ dbt / Jinja templates in query files (`templating.rs`: tags are masked keeping locations; `--templating`, `templating = "jinja"`, auto-detected from `dbt_project.yml`)
-- ✅ SQL in application code: sqlc `-- name:` query names on diagnostics (`sqlc.rs`), aiosql / HugSQL query names and `:param` placeholders (`named_queries.rs`), SQL in TypeScript/JavaScript tagged templates (`embedded.rs`, `Analyzer::analyze_embedded`, `embedded_sql_tags`), SQL in Rust sqlx macros and `sqlx::` functions (`sqlx.rs`, `Analyzer::analyze_rust`, `embedded_sql_macros`)
+- ✅ SQL in application code: sqlc `-- name:` query names on diagnostics (`sqlc.rs`), aiosql / HugSQL query names and `:param` placeholders (`named_queries.rs`), SQL in TypeScript/JavaScript tagged templates (`embedded.rs`, `Analyzer::analyze_embedded`, `embedded_sql_tags`), SQL in Rust sqlx macros and `sqlx::` functions (`sqlx.rs`, `Analyzer::analyze_rust`, `embedded_sql_macros`), SQL in Python string literals passed to database calls (`python.rs`, `Analyzer::analyze_python`, `embedded_sql_functions`)
 - ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
 - ✅ Ignoring query files (`ignore` in sqlsift.toml, `--ignore`; `sqlsift_core::ignore`), honored by the CLI and LSP
 - ✅ Baseline of known diagnostics (`sqlsift check --write-baseline`, `--baseline`, `baseline` in sqlsift.toml; `sqlsift_core::baseline`), honored by the CLI and LSP

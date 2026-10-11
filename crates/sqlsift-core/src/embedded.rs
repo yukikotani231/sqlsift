@@ -58,8 +58,9 @@ pub const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs",
 /// [`EXTENSIONS`] files
 pub const COMPONENT_EXTENSIONS: &[&str] = &["vue", "svelte"];
 
-/// Directories skipped when a glob pattern matches TypeScript, JavaScript or Rust
-/// files in them: installed packages and build output
+/// Directories skipped when a glob pattern matches TypeScript, JavaScript, Rust
+/// or Python files in them: installed packages, virtual environments and build
+/// output
 pub const SKIPPED_DIRECTORIES: &[&str] = &[
     "node_modules",
     "dist",
@@ -69,6 +70,10 @@ pub const SKIPPED_DIRECTORIES: &[&str] = &[
     ".svelte-kit",
     "out",
     "target",
+    ".venv",
+    "venv",
+    "site-packages",
+    "__pycache__",
 ];
 
 /// Template tags extracted by default

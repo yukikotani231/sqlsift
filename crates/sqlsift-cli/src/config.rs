@@ -27,6 +27,7 @@ const KNOWN_KEYS: &[&str] = &[
     "baseline",
     "embedded_sql_tags",
     "embedded_sql_macros",
+    "embedded_sql_functions",
 ];
 
 /// Configuration for sqlsift
@@ -84,6 +85,11 @@ pub struct Config {
     /// and their `_unchecked` variants)
     #[serde(default)]
     pub embedded_sql_macros: Option<Vec<String>>,
+
+    /// Function names whose first argument (a string literal) is checked as SQL
+    /// in Python files (default: `execute`, `executemany`, `fetch`, `text`, ...)
+    #[serde(default)]
+    pub embedded_sql_functions: Option<Vec<String>>,
 
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
@@ -282,6 +288,16 @@ impl Config {
     pub fn embedded_sql_macros(&self) -> Vec<String> {
         self.embedded_sql_macros.clone().unwrap_or_else(|| {
             sqlsift_core::sqlx::DEFAULT_MACROS
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+    }
+
+    /// Function names whose SQL is checked in Python files
+    pub fn embedded_sql_functions(&self) -> Vec<String> {
+        self.embedded_sql_functions.clone().unwrap_or_else(|| {
+            sqlsift_core::python::DEFAULT_FUNCTIONS
                 .iter()
                 .map(ToString::to_string)
                 .collect()

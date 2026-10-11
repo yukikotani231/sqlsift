@@ -350,6 +350,29 @@ fn sqlx_migrations_and_query_macros() {
 }
 
 #[test]
+fn python_migrations_and_cursor_queries() {
+    let p = Project::new("python");
+    p.write("requirements.txt", "psycopg[binary]==3.2.3\n")
+        .write("migrations/0001_create_users.sql", USERS)
+        .write(
+            "app/db.py",
+            "def email(cur, user_id):\n    cur.execute(\"SELECT email FROM users WHERE id = %s\", (user_id,))\n    return cur.fetchone()\n",
+        )
+        .write("app/main.py", "print('hello')\n");
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("postgresql"));
+    assert_eq!(strings(&table, "files"), ["app/**/*.py"]);
+    assert!(run.stdout.contains("cursor.execute"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("All 2 file(s) passed"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn rails_structure_sql_without_queries() {
     let p = Project::new("rails");
     p.write("db/structure.sql", USERS)

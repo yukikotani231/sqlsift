@@ -438,3 +438,69 @@ fn directives_work_with_crlf_line_endings() {
     let ts = "// sqlsift:disable E0002\r\nconst q = sql`SELECT nme FROM authors`;\r\n";
     assert!(analyze_ts(ts, &["sql"]).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Python: string literals passed to database calls
+// ---------------------------------------------------------------------------
+
+const QUERIES_PY: &str = include_str!("../../../tests/fixtures/embedded/queries.py");
+
+fn analyze_py(source: &str, functions: &[&str]) -> Vec<Diagnostic> {
+    Analyzer::new(&catalog()).analyze_python(source, functions)
+}
+
+#[test]
+fn python_queries_are_checked_at_their_location() {
+    assert_eq!(
+        locations(&analyze_py(
+            QUERIES_PY,
+            sqlsift_core::python::DEFAULT_FUNCTIONS
+        )),
+        vec![
+            (DiagnosticKind::ColumnNotFound, 14, 27),
+            (DiagnosticKind::TableNotFound, 31, 49),
+        ]
+    );
+}
+
+#[test]
+fn configured_functions_select_the_python_queries() {
+    assert_eq!(
+        locations(&analyze_py(QUERIES_PY, &["text"])),
+        vec![(DiagnosticKind::TableNotFound, 31, 49)]
+    );
+    assert!(analyze_py(QUERIES_PY, &["query"]).is_empty());
+}
+
+#[test]
+fn python_placeholders_are_parameters() {
+    let source = r#"
+cur.execute("INSERT INTO posts (author_id, title) VALUES (%s, %s)", (a, t))
+cur.execute("UPDATE posts SET title = %(title)s WHERE id IN %(ids)s", p)
+cur.execute("SELECT id FROM posts WHERE id IN %s LIMIT %s", (ids, n))
+conn.execute(text("DELETE FROM posts WHERE id = :id AND title = :title"))
+cur.execute("SELECT id FROM posts WHERE title LIKE 'a%%'")
+"#;
+    let diagnostics = analyze_py(source, sqlsift_core::python::DEFAULT_FUNCTIONS);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let sqlite = "con.execute(\"SELECT id FROM posts WHERE id = ? AND title = :t\", (a,))";
+    let diagnostics =
+        Analyzer::with_dialect(&catalog(), SqlDialect::SQLite).analyze_python(sqlite, &["execute"]);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn python_directives_suppress_diagnostics() {
+    let source = "# sqlsift:disable E0002\ncur.execute(\"SELECT nme FROM authors\")\n";
+    assert!(analyze_py(source, &["execute"]).is_empty());
+}
+
+#[test]
+fn python_byte_offsets_point_into_the_original_source() {
+    let source = "s = \"Ünïcode\"\ncur.execute(\"SELECT nme FROM authors\")\n";
+    let diagnostics = analyze_py(source, &["execute"]);
+    assert_eq!(diagnostics.len(), 1);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!((span.line, span.column), (2, 21));
+    assert_eq!(&source[span.offset..span.offset + 3], "nme");
+}

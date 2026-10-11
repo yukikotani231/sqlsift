@@ -313,6 +313,36 @@ Diagnostics point at the query's line and column in the Rust file. Escapes in pl
 
 `--stdin-filename` with an `.rs` extension checks stdin the same way.
 
+## SQL in Python
+
+Python files (`.py`) are checked for the SQL passed as a string literal to database calls: DB-API cursors (psycopg, sqlite3, MySQLdb, PyMySQL), asyncpg connections, SQLAlchemy's `text()` and Django's `raw()`:
+
+```python
+cur.execute(
+    """
+    SELECT id, titel
+    FROM books
+    WHERE author_id = %s
+    """,
+    (author_id,),
+)
+rows = await conn.fetch("SELECT id FROM books WHERE author_id = $1", author_id)
+result = session.execute(text("SELECT id FROM books WHERE title = :title"), {"title": t})
+```
+
+```toml
+schema_dir = "migrations"
+files = ["app/**/*.py"]
+```
+
+Guessing which strings are SQL would report on strings that aren't, so a string is checked only when it is the first argument of a call whose name (the last part of the callee: `execute` matches `cur.execute(...)` and `self.db.execute(...)`) is in `embedded_sql_functions`: by default `execute`, `executemany`, `executescript`, `exec_driver_sql`, `fetch`, `fetchrow`, `fetchval`, `raw` and `text`. It must also start with a statement keyword (`SELECT`, `WITH`, `INSERT`, `UPDATE`, `DELETE`, ...), so `execute("not sql")` in some other library is left alone.
+
+- Plain, raw (`r"..."`) and triple-quoted strings are checked, and literals written side by side (`"SELECT a " "FROM t"`) are one query. Escapes are read as Python does.
+- f-strings, byte strings and SQL built with `+`, `%` or `.format()` are skipped: their SQL is only known at run time.
+- Driver placeholders are untyped parameters: `%s` and `%(name)s` (psycopg, MySQLdb, PyMySQL, Django), `:name` (SQLAlchemy `text()`, sqlite3), `?` (sqlite3) and `$1` (asyncpg). After `IN`, a placeholder is a list (`IN %s` with a tuple), and `%%` is a `%`.
+
+Diagnostics point at the query's line and column in the Python file. A glob pattern skips Python files in virtual environments (`.venv`, `venv`, `site-packages`) and `__pycache__`. [Suppression comments](suppression.md) work as Python comments (`# sqlsift:disable E0002` on the line before a query, `# sqlsift:disable-file`). `--stdin-filename` with a `.py` extension checks stdin the same way. See the [psycopg example project](../integrations/examples.md).
+
 ## Exit codes
 
 | Code | Meaning |

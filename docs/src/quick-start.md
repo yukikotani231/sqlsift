@@ -26,7 +26,7 @@ Next steps:
   ...
 ```
 
-`init` recognizes sqlc configurations, Prisma, Supabase, Drizzle, Flyway, golang-migrate, sqlx, goose and dbmate migrations, Rails `structure.sql` and other schema dumps, dbt projects, plain `.sql` query files, SQL in TypeScript / JavaScript tagged templates and sqlx queries in Rust. It writes a commented `sqlsift.toml` (never over an existing one unless you pass `--force`; `--dry-run` only prints it) and runs a first check. Review the file, then use `sqlsift check` from now on. See [`sqlsift init`](reference/cli.md#sqlsift-init) for what is detected and how.
+`init` recognizes sqlc configurations, Prisma, Supabase, Drizzle, Flyway, golang-migrate, sqlx, goose and dbmate migrations, Rails `structure.sql` and other schema dumps, dbt projects, plain `.sql` query files, SQL in TypeScript / JavaScript tagged templates, sqlx queries in Rust and SQL passed to database calls in Python. It writes a commented `sqlsift.toml` (never over an existing one unless you pass `--force`; `--dry-run` only prints it) and runs a first check. Review the file, then use `sqlsift check` from now on. See [`sqlsift init`](reference/cli.md#sqlsift-init) for what is detected and how.
 
 The rest of this page does the same by hand.
 

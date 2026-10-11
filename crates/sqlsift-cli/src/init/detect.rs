@@ -19,6 +19,7 @@ const SKIPPED_DIRS: &[&str] = &[
     "out",
     "dbt_packages",
     "venv",
+    "site-packages",
     "__pycache__",
     "coverage",
     "tmp",
@@ -721,6 +722,28 @@ pub fn detect(root: &Path) -> Detection {
         });
     }
 
+    // SQL in Python: string literals passed to database calls
+    let python: BTreeSet<String> = tree
+        .files
+        .iter()
+        .filter(|file| sqlsift_core::python::is_python_file(Path::new(file)))
+        .filter(|file| {
+            tree.read(file)
+                .is_some_and(|text| uses_python_queries(&text))
+        })
+        .cloned()
+        .collect();
+    if !python.is_empty() {
+        queries.push(QueryGroup {
+            label: "cursor.execute(\"...\") in .py".to_string(),
+            patterns: group_by_top_dir(&python, "py")
+                .into_iter()
+                .map(|(pattern, _)| pattern)
+                .collect(),
+            count: python.len(),
+        });
+    }
+
     if prisma_raw {
         detection.embedded_sql_tags = Some(
             ["sql", "$queryRaw", "$executeRaw"]
@@ -963,6 +986,12 @@ fn uses_sqlx_queries(text: &str) -> bool {
         }) || text.contains(&format!("sqlx::{name}("))
             || text.contains(&format!("sqlx::{name}::<"))
     })
+}
+
+/// Whether Python code passes SQL to a database call that `sqlsift check`
+/// extracts (`cur.execute("SELECT ...")`, `text("SELECT ...")`)
+fn uses_python_queries(text: &str) -> bool {
+    sqlsift_core::python::has_sql(text, sqlsift_core::python::DEFAULT_FUNCTIONS)
 }
 
 /// The dialect of a sqlc `engine`
@@ -1432,6 +1461,16 @@ mod tests {
         assert!(!uses_sqlx_queries(
             "let q = query(\"SELECT 1\"); my_query!(x)"
         ));
+    }
+
+    #[test]
+    fn finds_python_queries() {
+        assert!(uses_python_queries("cur.execute(\"SELECT 1\")"));
+        assert!(uses_python_queries(
+            "await conn.fetch('''\n  SELECT 1\n''', x)"
+        ));
+        assert!(!uses_python_queries("cur.execute(query)"));
+        assert!(!uses_python_queries("subprocess.run(\"SELECT\")"));
     }
 
     #[test]

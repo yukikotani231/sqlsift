@@ -18,6 +18,7 @@ pub mod impact;
 mod mysql;
 mod named_queries;
 mod psql;
+pub mod python;
 pub mod rules;
 pub mod schema;
 mod sqlc;

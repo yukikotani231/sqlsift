@@ -1,0 +1,5 @@
+# Diagnostics `sqlsift check broken/*` must report (checked in CI by
+# scripts/check-examples.sh): <file>:<line>:<column> <code>
+broken/catalog.py:5:29 E0002
+broken/catalog.py:9:35 E0003
+broken/catalog.py:13:30 E0008

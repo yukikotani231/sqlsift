@@ -24,6 +24,12 @@ schema = [
 # Default: query, query_as, query_scalar and their _unchecked variants.
 # embedded_sql_macros = ["query", "query_as", "query_scalar", "my_query"]
 
+# Calls whose first argument (a string literal) is checked as SQL in Python
+# query files (.py): cur.execute("..."), conn.fetch("..."), text("...").
+# Default: execute, executemany, executescript, exec_driver_sql, fetch,
+# fetchrow, fetchval, raw, text.
+# embedded_sql_functions = ["execute", "fetch", "text", "run_sql"]
+
 # Query files to skip, whether they come from `files` or the command line
 # (glob patterns; `**` matches any number of directories, and a directory
 # pattern skips everything below it). `--ignore <PATTERN>` adds to this list.

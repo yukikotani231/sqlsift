@@ -8,6 +8,7 @@ SQL static analysis extension powered by [sqlsift](https://github.com/yukikotani
 - dbt models: `jinja-sql` documents (set by the "dbt Power User" extension) and `.sql` files in the `jinja` language. Jinja is also masked in any SQL file inside a dbt project (a `dbt_project.yml` in one of its parent directories).
 - TypeScript and JavaScript files: the SQL in tagged template literals whose tag is in `embedded_sql_tags` in `sqlsift.toml` (default `["sql"]`). Files without such a template get no diagnostics. Turn this off with `sqlsift.embeddedSql.enable`.
 - Rust files: the SQL passed to sqlx's `query!`, `query_as!`, `query_scalar!` macros and `sqlx::query(...)` functions (`embedded_sql_macros` in `sqlsift.toml`). Also turned off by `sqlsift.embeddedSql.enable`.
+- Python files: the SQL passed as a string literal to database calls such as `cursor.execute("...")`, asyncpg's `fetch("...")` or SQLAlchemy's `text("...")` (`embedded_sql_functions` in `sqlsift.toml`). Also turned off by `sqlsift.embeddedSql.enable`.
 
 ## Prerequisites
 

@@ -4048,6 +4048,62 @@ fn rust_sqlx_queries_are_checked() {
 }
 
 #[test]
+fn python_queries_are_checked() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.py"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.py:14:27")
+        .assert_stderr_contains("queries.py:31:49")
+        .assert_stderr_contains("Found 2 error(s)");
+}
+
+#[test]
+fn embedded_sql_functions_config_selects_the_calls() {
+    let t = TempDir::new("embedded-functions");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nembedded_sql_functions = [\"run_sql\"]\n",
+    );
+    t.write(
+        "app/db.py",
+        "cur.execute(\"SELECT nme FROM users\")\ndb.run_sql(\"SELECT nme FROM users WHERE id = %s\", (i,))\n",
+    );
+    let run = t.run(&["check", "-f", "json", "app/db.py"]);
+    run.assert_code(1).assert_stderr_lacks("unknown key");
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["line"], 2);
+    assert_eq!(diagnostics[0]["column"], 20);
+}
+
+#[test]
+fn globs_skip_virtual_environments_for_python() {
+    let t = with_users_schema("embedded-venv");
+    t.write("app/db.py", "cur.execute(\"SELECT name FROM users\")\n");
+    t.write(
+        ".venv/lib/python3.12/site-packages/x/db.py",
+        "cur.execute(\"SELECT nme FROM users\")\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "**/*.py"])
+        .assert_code(0);
+}
+
+#[test]
+fn describe_reports_python_queries() {
+    let t = with_users_schema("embedded-describe-py");
+    t.write(
+        "app/db.py",
+        "cur.execute(\"SELECT id, name FROM users WHERE id = %s\", (i,))\n",
+    );
+    t.run(&["describe", "-s", "schema.sql", "app/db.py"])
+        .assert_code(0)
+        .assert_stdout_contains("name");
+}
+
+#[test]
 fn embedded_sql_macros_config_selects_the_macros() {
     let t = TempDir::new("embedded-macros");
     t.write("schema.sql", USERS_SCHEMA);

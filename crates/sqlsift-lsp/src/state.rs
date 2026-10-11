@@ -7,12 +7,15 @@ use tower_lsp::lsp_types::{self, Url};
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::ignore::IgnorePatterns;
+use sqlsift_core::python::is_python_file;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
 use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
-use crate::config::{default_embedded_sql_macros, default_embedded_sql_tags, Config};
+use crate::config::{
+    default_embedded_sql_functions, default_embedded_sql_macros, default_embedded_sql_tags, Config,
+};
 
 /// Language ids of documents whose SQL is in tagged template literals
 const EMBEDDED_SQL_LANGUAGES: &[&str] = &[
@@ -25,6 +28,9 @@ const EMBEDDED_SQL_LANGUAGES: &[&str] = &[
 /// Language id of Rust documents, whose SQL is in sqlx macros
 const RUST_LANGUAGE: &str = "rust";
 
+/// Language id of Python documents, whose SQL is passed to database calls
+const PYTHON_LANGUAGE: &str = "python";
+
 /// The code a document's SQL is embedded in
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingCode {
@@ -32,6 +38,8 @@ pub enum EmbeddingCode {
     Script,
     /// Rust: sqlx macros
     Rust,
+    /// Python: string literals passed to database calls
+    Python,
 }
 
 /// Language ids of Jinja-templated SQL documents (`jinja-sql` is set by the
@@ -53,6 +61,9 @@ pub struct ServerState {
     /// `embedded_sql_macros` from sqlsift.toml: sqlx macros whose SQL is checked
     /// in Rust documents
     pub embedded_sql_macros: Vec<String>,
+    /// `embedded_sql_functions` from sqlsift.toml: function names whose SQL is
+    /// checked in Python documents
+    pub embedded_sql_functions: Vec<String>,
     /// Rule levels from sqlsift.toml
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
@@ -82,6 +93,7 @@ impl ServerState {
             templating_configured: false,
             embedded_sql_tags: default_embedded_sql_tags(),
             embedded_sql_macros: default_embedded_sql_macros(),
+            embedded_sql_functions: default_embedded_sql_functions(),
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             document_languages: HashMap::new(),
@@ -153,6 +165,7 @@ impl ServerState {
 
         self.embedded_sql_tags = config.embedded_sql_tags();
         self.embedded_sql_macros = config.embedded_sql_macros();
+        self.embedded_sql_functions = config.embedded_sql_functions();
 
         // Rule levels (`disable`, `[rules]`, `[categories]`)
         let (rules, problems) = config.rule_config();
@@ -282,6 +295,9 @@ impl ServerState {
                     analyzer.analyze_embedded(text, &self.embedded_sql_tags)
                 }
                 Some(EmbeddingCode::Rust) => analyzer.analyze_rust(text, &self.embedded_sql_macros),
+                Some(EmbeddingCode::Python) => {
+                    analyzer.analyze_python(text, &self.embedded_sql_functions)
+                }
                 None => analyzer.analyze(text),
             }
         })
@@ -294,7 +310,7 @@ impl ServerState {
     }
 
     /// The code the SQL of the document at `uri` is embedded in: TypeScript or
-    /// JavaScript (tagged template literals) or Rust (sqlx macros), by its
+    /// JavaScript (tagged template literals) , Rust (sqlx macros) or Python (database calls), by its
     /// language id, or else its file extension; `None` for a SQL document
     pub fn embedding_code(&self, uri: &Url) -> Option<EmbeddingCode> {
         match self.document_languages.get(uri) {
@@ -302,6 +318,7 @@ impl ServerState {
                 Some(EmbeddingCode::Script)
             }
             Some(language) if language == RUST_LANGUAGE => Some(EmbeddingCode::Rust),
+            Some(language) if language == PYTHON_LANGUAGE => Some(EmbeddingCode::Python),
             Some(language) if language == "sql" || JINJA_LANGUAGES.contains(&language.as_str()) => {
                 None
             }
@@ -311,6 +328,8 @@ impl ServerState {
                     Some(EmbeddingCode::Script)
                 } else if is_rust_file(path) {
                     Some(EmbeddingCode::Rust)
+                } else if is_python_file(path) {
+                    Some(EmbeddingCode::Python)
                 } else {
                     None
                 }
@@ -363,6 +382,7 @@ impl ServerState {
                         text,
                         &self.embedded_sql_tags,
                         &self.embedded_sql_macros,
+                        &self.embedded_sql_functions,
                         self.dialect,
                     )
                 } else {

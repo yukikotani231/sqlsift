@@ -72,7 +72,7 @@ sqlsift complements these tools: keep your formatter and migration linter, and a
 
 ## Getting started
 
-Run `sqlsift init` in your project: it finds the schema, the queries and the dialect, and writes a `sqlsift.toml` (see [Quick start](quick-start.md)). Or start from one of the [example projects](integrations/examples.md) for sqlc, Prisma, postgres.js, sqlx, plain SQL with migrations, MySQL and dbt.
+Run `sqlsift init` in your project: it finds the schema, the queries and the dialect, and writes a `sqlsift.toml` (see [Quick start](quick-start.md)). Or start from one of the [example projects](integrations/examples.md) for sqlc, Prisma, postgres.js, sqlx, psycopg, plain SQL with migrations, MySQL and dbt.
 
 ## Status
 

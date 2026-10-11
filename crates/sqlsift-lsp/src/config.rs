@@ -60,6 +60,11 @@ pub struct Config {
     /// documents (default [`sqlsift_core::sqlx::DEFAULT_MACROS`])
     #[serde(default)]
     pub embedded_sql_macros: Option<Vec<String>>,
+
+    /// Function names whose string literal argument is checked as SQL in Python
+    /// documents (default [`sqlsift_core::python::DEFAULT_FUNCTIONS`])
+    #[serde(default)]
+    pub embedded_sql_functions: Option<Vec<String>>,
 }
 
 impl Config {
@@ -76,6 +81,13 @@ impl Config {
         self.embedded_sql_macros
             .clone()
             .unwrap_or_else(default_embedded_sql_macros)
+    }
+
+    /// Function names whose SQL is checked in Python documents
+    pub fn embedded_sql_functions(&self) -> Vec<String> {
+        self.embedded_sql_functions
+            .clone()
+            .unwrap_or_else(default_embedded_sql_functions)
     }
 
     /// Rule levels from `[categories]`, `[rules]` and `disable`, with a message for
@@ -131,6 +143,14 @@ impl Config {
         }
         None
     }
+}
+
+/// The default `embedded_sql_functions`
+pub fn default_embedded_sql_functions() -> Vec<String> {
+    sqlsift_core::python::DEFAULT_FUNCTIONS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The default `embedded_sql_macros`
