@@ -122,9 +122,9 @@ impl SchemaBuilder {
 
         // psql meta-commands in dumps and scripts (`\connect`, `\restrict`, `\i`, ...)
         let source = match self.dialect {
-            SqlDialect::PostgreSQL => psql::preprocess(sql),
+            dialect if dialect.is_psql() => psql::preprocess(sql),
             SqlDialect::MySQL => crate::mysql::preprocess(sql),
-            SqlDialect::SQLite => psql::Preprocessed::unchanged(sql),
+            _ => psql::Preprocessed::unchanged(sql),
         };
         let sql: &str = &source.text;
 
@@ -1615,7 +1615,7 @@ fn expr_to_default(expr: &sqlparser::ast::Expr) -> DefaultValue {
 fn split_sql_statements(sql: &str, dialect: SqlDialect) -> Vec<&str> {
     let mysql = dialect == SqlDialect::MySQL;
     let postgres = dialect == SqlDialect::PostgreSQL;
-    let backticks = matches!(dialect, SqlDialect::MySQL | SqlDialect::SQLite);
+    let backticks = dialect.backtick_identifiers();
 
     let mut statements = Vec::new();
     let mut start = 0;

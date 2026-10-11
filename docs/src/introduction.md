@@ -56,7 +56,7 @@ Raw SQL is usually only checked when it runs. Rename a column in a migration and
 - **Helpful diagnostics.** Source spans plus "did you mean" suggestions for typos.
 - **Runs everywhere.** CLI, GitHub Actions and SARIF code scanning, and a language server with a VS Code extension.
 - **Fast.** Written in Rust; checks a typical project in milliseconds.
-- **PostgreSQL, MySQL and SQLite** dialects.
+- **PostgreSQL, MySQL and SQLite** dialects, plus Snowflake, BigQuery, Redshift and Databricks in alpha.
 
 ## How it compares
 

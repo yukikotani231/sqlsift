@@ -11,7 +11,7 @@ schema_dir = "db/migrations"      # all .sql files under this directory, in file
 files = ["queries/**/*.sql"]      # query files to check when none are given on the command line
 ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
 
-dialect = "postgresql"            # postgresql, mysql or sqlite
+dialect = "postgresql"            # postgresql, mysql, sqlite; alpha: snowflake, bigquery, redshift, databricks
 templating = "jinja"              # jinja (dbt models) or none
 format = "human"                  # human, json, sarif or github
 max_warnings = 0                  # fail when more than this many warnings are reported

@@ -487,7 +487,23 @@ pub(super) fn is_system_column(dialect: SqlDialect, column: &str) -> bool {
             column.as_str(),
             "ctid" | "xmin" | "xmax" | "cmin" | "cmax" | "tableoid"
         ),
+        SqlDialect::Redshift => matches!(
+            column.as_str(),
+            "oid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax" | "tableoid"
+        ),
         SqlDialect::SQLite => matches!(column.as_str(), "rowid" | "oid" | "_rowid_"),
+        // BigQuery ingestion-time partitioned tables
+        SqlDialect::BigQuery => matches!(
+            column.as_str(),
+            "_partitiontime" | "_partitiondate" | "_table_suffix" | "_file_name"
+        ),
+        // Databricks file metadata and Delta change data feed columns
+        SqlDialect::Databricks => matches!(
+            column.as_str(),
+            "_metadata" | "_change_type" | "_commit_version" | "_commit_timestamp"
+        ),
+        // Snowflake stage metadata columns (`metadata$filename`, ...)
+        SqlDialect::Snowflake => column.starts_with("metadata$"),
         SqlDialect::MySQL => false,
     }
 }

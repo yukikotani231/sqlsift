@@ -694,6 +694,15 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        // Output column aliases. Snowflake, Redshift and Databricks also resolve
+        // them in WHERE and in later items of the SELECT list (lateral column
+        // aliases); an alias is only used for a name no table in scope has.
+        let mut aliases = projection_aliases(&select.projection);
+        let lateral = self.dialect.lateral_column_aliases();
+        if lateral {
+            self.scope.current().select_aliases = std::mem::take(&mut aliases);
+        }
+
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
             self.select_item(item, &select_span);
@@ -702,9 +711,11 @@ impl<'a> Resolver<'a> {
         if let Some(selection) = &select.selection {
             self.expr(selection);
         }
+        if lateral {
+            aliases = std::mem::take(&mut self.scope.current().select_aliases);
+        }
 
         // GROUP BY can reference output column aliases, like ORDER BY
-        let mut aliases = projection_aliases(&select.projection);
         if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
             self.scope.current().select_aliases = aliases;
             for expr in exprs {
@@ -714,15 +725,22 @@ impl<'a> Resolver<'a> {
         }
 
         if let Some(having) = &select.having {
-            // MySQL and SQLite also resolve output column aliases in HAVING
-            // (PostgreSQL doesn't)
-            if matches!(self.dialect, SqlDialect::MySQL | SqlDialect::SQLite) {
+            // Every dialect but PostgreSQL also resolves output column aliases in HAVING
+            if self.dialect.aliases_in_having() {
                 self.scope.current().select_aliases = aliases;
                 self.expr(having);
                 aliases = std::mem::take(&mut self.scope.current().select_aliases);
             } else {
                 self.expr(having);
             }
+        }
+
+        // QUALIFY (Snowflake, BigQuery, Databricks) filters on window functions and
+        // can reference output column aliases
+        if let Some(qualify) = &select.qualify {
+            self.scope.current().select_aliases = aliases;
+            self.expr(qualify);
+            aliases = std::mem::take(&mut self.scope.current().select_aliases);
         }
 
         let columns = self.projection_columns(&select.projection);
@@ -1649,6 +1667,30 @@ fn is_system_table(dialect: SqlDialect, name: &QualifiedName) -> bool {
             Some("information_schema" | "mysql" | "performance_schema" | "sys")
         ),
         SqlDialect::SQLite => table.starts_with("sqlite_"),
+        SqlDialect::Redshift => {
+            matches!(schema.as_deref(), Some("pg_catalog" | "information_schema"))
+                || table.starts_with("pg_")
+                || table.starts_with("stl_")
+                || table.starts_with("stv_")
+                || table.starts_with("svl_")
+                || table.starts_with("svv_")
+                || table.starts_with("sys_")
+        }
+        SqlDialect::Snowflake => {
+            matches!(
+                schema.as_deref(),
+                Some("information_schema" | "account_usage")
+            )
+        }
+        // `INFORMATION_SCHEMA` views and `__TABLES__` metadata of a dataset
+        SqlDialect::BigQuery => {
+            schema
+                .as_deref()
+                .is_some_and(|s| s.contains("information_schema"))
+                || table.contains("information_schema")
+                || table == "__tables__"
+        }
+        SqlDialect::Databricks => matches!(schema.as_deref(), Some("information_schema")),
     }
 }
 

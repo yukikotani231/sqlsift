@@ -29,13 +29,14 @@ Picked by demand after v0.2, roughly in this order:
 | Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
 | SQL in Rust code (sqlx `query!` / `query_as!`) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
 | dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
+| Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
 | SQL in Python code (configurable call names) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
 
 ## v1.0 and later
 
 v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SARIF output stay compatible. It comes once sqlsift is used by real teams. Ideas beyond that, started when there is demand:
 
-- Snowflake and BigQuery dialects (most dbt projects run on them)
+- Data warehouse dialects out of alpha (most dbt projects run on them)
 - Analysing function bodies (PL/pgSQL, `LANGUAGE sql`), e.g. Supabase RPC functions
 - More `suspicious` and `pedantic` rules (`= NULL`, `NOT IN` over a nullable column, `UPDATE` / `DELETE` without `WHERE`)
 - Editor features in the LSP: completion, hover with column types, go to definition
