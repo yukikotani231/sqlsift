@@ -12,6 +12,11 @@ Think of it as a type checker for your SQL: sqlsift replays your migrations into
 
 **▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://yukikotani231.github.io/sqlsift/docs/)** for everything else.
 
+<p align="center"><img src="https://raw.githubusercontent.com/yukikotani231/sqlsift/main/.github/assets/demo.gif" alt="A migration renames page_views.site_id to website_id; sqlsift init detects the project and sqlsift check reports the query that still uses site_id, an ON CONFLICT target with no unique key, and a WHERE clause that turns a LEFT JOIN into an inner join" width="900"></p>
+
+<details>
+<summary>The same output as text</summary>
+
 ```console
 $ npx sqlsift-cli init     # finds your migrations, dialect and queries, writes sqlsift.toml
 $ npx sqlsift-cli check
@@ -39,6 +44,8 @@ warning[E0023]: WHERE condition on 'p.published_at' removes the rows the outer j
 
 Found 2 error(s), 1 warning(s) in 1 file(s)
 ```
+
+</details>
 
 [27 rules](#diagnostic-rules) cover what the schema alone can tell you: missing tables and columns, type mismatches, NOT NULL columns left out, `ON CONFLICT` targets with no unique key, `GROUP BY` errors, values out of range, and warnings for queries that are valid but probably not what you meant. Anything sqlsift can't work out is left unreported: on 16 open-source apps (687 files) it reports zero false positives.
 
