@@ -57,4 +57,5 @@ CREATE TABLE coupons (
 | [E0027](E0027.md) | `wrong-argument-type` | Function or operator given an argument type it doesn't take |
 | [E0028](E0028.md) | `limit-without-order-by` | LIMIT or OFFSET without ORDER BY |
 | [E0029](E0029.md) | `implicit-conversion` | Type mismatch MySQL or SQLite converts implicitly |
+| [E0030](E0030.md) | `foreign-key-join-mismatch` | JOIN condition doesn't follow the foreign key between the tables |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

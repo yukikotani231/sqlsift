@@ -208,6 +208,9 @@ pub enum DiagnosticKind {
     LimitWithoutOrderBy,
     /// E0029: Type mismatch the database converts implicitly (MySQL, SQLite)
     ImplicitConversion,
+    /// E0030: JOIN condition that swaps a column of the foreign key between the
+    /// tables for another key column
+    ForeignKeyJoinMismatch,
     /// Parse error
     ParseError,
 }

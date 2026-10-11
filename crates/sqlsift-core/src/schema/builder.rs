@@ -436,6 +436,12 @@ impl SchemaBuilder {
             {
                 self.catalog.unknown_unique_keys = true;
             }
+            if words
+                .iter()
+                .any(|w| matches!(w.as_str(), "FOREIGN" | "REFERENCES" | "CONSTRAINT"))
+            {
+                self.catalog.unknown_foreign_keys = true;
+            }
             ("ALTER TABLE", 2)
         } else {
             return;

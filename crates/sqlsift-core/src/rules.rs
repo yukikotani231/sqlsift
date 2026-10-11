@@ -352,6 +352,13 @@ pub const RULES: &[Rule] = &[
         summary: "Type mismatch MySQL or SQLite converts implicitly",
     },
     Rule {
+        kind: DiagnosticKind::ForeignKeyJoinMismatch,
+        code: "E0030",
+        name: "foreign-key-join-mismatch",
+        category: RuleCategory::Suspicious,
+        summary: "JOIN condition doesn't follow the foreign key between the tables",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

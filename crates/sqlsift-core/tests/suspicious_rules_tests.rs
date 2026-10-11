@@ -300,3 +300,95 @@ fn e0023_conditions_that_keep_unmatched_rows() {
         "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE o.title IS DISTINCT FROM 'x'",
     );
 }
+
+// ---------------------------------------------------------------------
+// E0030 foreign-key-join-mismatch
+// ---------------------------------------------------------------------
+
+const FK_SCHEMA: &str = "
+CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE, account_no INT UNIQUE, org_id INT);
+CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id), created_by INT, total INT);
+CREATE TABLE profiles (id INT PRIMARY KEY REFERENCES users(id), bio TEXT);
+CREATE TABLE notes (id INT PRIMARY KEY, author_id INT REFERENCES users, editor_id INT REFERENCES users);
+CREATE TABLE lines (order_id INT, n INT, PRIMARY KEY (order_id, n));
+";
+
+fn fk_diagnostics(schema: &str, sql: &str) -> Vec<sqlsift_core::Diagnostic> {
+    let mut builder = SchemaBuilder::new();
+    builder.parse(schema).expect("schema parses");
+    let catalog = builder.build().0;
+    Analyzer::new(&catalog).analyze(sql)
+}
+
+fn fk_codes(sql: &str) -> Vec<&'static str> {
+    fk_diagnostics(FK_SCHEMA, sql)
+        .iter()
+        .map(sqlsift_core::Diagnostic::code)
+        .collect()
+}
+
+#[test]
+fn e0030_join_on_the_wrong_key_column() {
+    let diagnostics = fk_diagnostics(
+        FK_SCHEMA,
+        "SELECT o.total FROM orders o JOIN users u ON u.id = o.id",
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code(), "E0030");
+    assert_eq!(
+        diagnostics[0].message,
+        "Join condition compares o.id with u.id, but orders references users through \
+         orders.user_id = users.id"
+    );
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("Did you mean `u.id = o.user_id`?")
+    );
+    for sql in [
+        "SELECT 1 FROM users u LEFT JOIN orders o ON (o.id = u.id)",
+        "SELECT 1 FROM orders JOIN users ON users.id = orders.id",
+        // The referenced side swapped for another key of users
+        "SELECT 1 FROM orders o JOIN users u ON o.user_id = u.account_no",
+    ] {
+        assert_eq!(fk_codes(sql), ["E0030"], "{sql}");
+    }
+}
+
+#[test]
+fn e0030_joins_the_foreign_key_does_not_decide() {
+    for sql in [
+        "SELECT 1 FROM orders o JOIN users u ON o.user_id = u.id",
+        "SELECT 1 FROM orders o JOIN users u ON u.id = o.user_id",
+        // Not a key: may follow a relation the schema doesn't declare
+        "SELECT 1 FROM orders o JOIN users u ON u.id = o.created_by",
+        "SELECT 1 FROM orders o JOIN users u ON u.org_id = o.user_id",
+        // Shared primary key: the foreign key itself
+        "SELECT 1 FROM users u JOIN profiles p ON p.id = u.id",
+        // Several foreign keys between the tables
+        "SELECT 1 FROM notes n JOIN users u ON u.id = n.id",
+        // More than one predicate, self-joins, no foreign key
+        "SELECT 1 FROM orders o JOIN users u ON u.id = o.id AND o.total > 0",
+        "SELECT 1 FROM users a JOIN users b ON a.id = b.account_no",
+        "SELECT 1 FROM orders o JOIN lines l ON l.order_id = o.id",
+    ] {
+        assert_eq!(fk_codes(sql), Vec::<&str>::new(), "{sql}");
+    }
+    // Incompatible types are reported by E0007 alone
+    assert_eq!(
+        fk_codes("SELECT 1 FROM orders o JOIN users u ON o.user_id = u.email"),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn e0030_silent_when_constraints_may_be_missing() {
+    let schema = format!("{FK_SCHEMA}\nALTER TABLE orders ADD CONSTRAINT x FOO BAR;");
+    let codes: Vec<&str> = fk_diagnostics(
+        &schema,
+        "SELECT 1 FROM orders o JOIN users u ON u.id = o.id",
+    )
+    .iter()
+    .map(sqlsift_core::Diagnostic::code)
+    .collect();
+    assert!(codes.is_empty(), "{codes:?}");
+}

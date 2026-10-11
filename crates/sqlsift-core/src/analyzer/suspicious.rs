@@ -7,6 +7,8 @@
 //! - E0021 missing-join-condition: `FROM a, b` with nothing that links `a` and `b`
 //! - E0022 constant-condition: `id IS NULL` on a NOT NULL column, `a.x = a.x`
 //! - E0023 outer-join-filtered: `a LEFT JOIN b ... WHERE b.x = 1`, an inner join
+//! - E0030 foreign-key-join-mismatch: `orders o JOIN users u ON u.id = o.id` when
+//!   `orders.user_id` references `users.id`
 //!
 //! These are reported as warnings by default (category `suspicious`).
 
@@ -339,6 +341,138 @@ impl Resolver<'_> {
             diag.span = span;
             self.diagnostics.push(diag);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // E0030 foreign-key-join-mismatch
+    // ---------------------------------------------------------------------
+
+    /// Report a JOIN ... ON between two tables linked by a single foreign key
+    /// whose condition swaps a column of the foreign key for another key column
+    /// (`u.id = o.id` for `orders.user_id REFERENCES users(id)`). Run while the
+    /// SELECT's scope is current.
+    pub(super) fn check_foreign_key_joins(&mut self, select: &Select) {
+        // Foreign keys added by a skipped ALTER TABLE may be missing
+        if self.templated_statement || self.catalog.unknown_foreign_keys {
+            return;
+        }
+        let mut found = Vec::new();
+        for item in &select.from {
+            for join in &item.joins {
+                let Some(on) = join_condition(&join.join_operator) else {
+                    continue;
+                };
+                if let Some(diag) = self.foreign_key_mismatch(on) {
+                    found.push(diag);
+                }
+            }
+        }
+        self.diagnostics.extend(found);
+    }
+
+    fn foreign_key_mismatch(&self, on: &Expr) -> Option<Diagnostic> {
+        let mut condition = on;
+        while let Expr::Nested(inner) = condition {
+            condition = inner;
+        }
+        let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = condition
+        else {
+            return None;
+        };
+        let (a, b) = (self.join_column(left)?, self.join_column(right)?);
+        if a.table == b.table {
+            return None;
+        }
+        // Columns of incompatible types are E0007's
+        let (a_type, b_type) = (
+            &a.def.get_column(&a.column)?.data_type,
+            &b.def.get_column(&b.column)?.data_type,
+        );
+        if matches!(
+            a_type.is_compatible_with(b_type),
+            crate::types::TypeCompatibility::ExplicitCast
+        ) {
+            return None;
+        }
+        // The foreign keys between the two tables, in either direction
+        let mut keys = Vec::new();
+        for (child, parent) in [(&a, &b), (&b, &a)] {
+            for fk in &child.def.foreign_keys {
+                if self.catalog.resolve_relation(&fk.references_table).as_ref()
+                    == Some(&parent.table)
+                {
+                    keys.push((child, parent, fk));
+                }
+            }
+        }
+        let [(child, parent, fk)] = keys.as_slice() else {
+            return None;
+        };
+        let [fk_column] = fk.columns.as_slice() else {
+            return None;
+        };
+        let referenced = match fk.references_columns.as_slice() {
+            [column] => column.clone(),
+            [] => match parent
+                .def
+                .primary_key
+                .as_ref()
+                .map(|pk| pk.columns.as_slice())
+            {
+                Some([column]) => column.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let child_matches = child.column.eq_ignore_ascii_case(fk_column);
+        let parent_matches = parent.column.eq_ignore_ascii_case(&referenced);
+        // Only the swap of one key column for another: a join on columns the
+        // foreign key doesn't involve may follow a relation the schema doesn't declare
+        let (wrong, right_column) = match (child_matches, parent_matches) {
+            (false, true) if is_key(child.def, &child.column) => (*child, fk_column.as_str()),
+            (true, false) if is_key(parent.def, &parent.column) => (*parent, referenced.as_str()),
+            _ => return None,
+        };
+        let child_name = child.def.name.name.as_str();
+        let parent_name = parent.def.name.name.as_str();
+        let message = format!(
+            "Join condition compares {}.{} with {}.{}, but {child_name} references \
+             {parent_name} through {child_name}.{fk_column} = {parent_name}.{referenced}",
+            child.qualifier, child.column, parent.qualifier, parent.column
+        );
+        let fixed = |side: &JoinColumn<'_>, column: &str| format!("{}.{column}", side.qualifier);
+        let (left_fixed, right_fixed) = if std::ptr::eq(wrong, &a) {
+            (fixed(&a, right_column), fixed(&b, &b.column))
+        } else {
+            (fixed(&a, &a.column), fixed(&b, right_column))
+        };
+        let mut diag = Diagnostic::warning(DiagnosticKind::ForeignKeyJoinMismatch, message)
+            .with_help(format!("Did you mean `{left_fixed} = {right_fixed}`?"));
+        diag.span = expr_span(condition);
+        Some(diag)
+    }
+
+    /// A qualified column reference (`alias.column`) to a catalog table of the
+    /// current query block
+    fn join_column(&self, expr: &Expr) -> Option<JoinColumn<'_>> {
+        let parts = column_parts(expr)?;
+        let [qualifier, column] = parts.as_slice() else {
+            return None;
+        };
+        let frame = self.scope.current_ref()?;
+        let relation = lookup_ignore_case(&frame.relations, &qualifier.value)?;
+        let table = relation.source.clone()?;
+        let def = self.catalog.get_table(&table)?;
+        def.column_exists(&column.value).then(|| JoinColumn {
+            qualifier: qualifier.value.clone(),
+            column: column.value.clone(),
+            table,
+            def,
+        })
     }
 
     // ---------------------------------------------------------------------
@@ -746,6 +880,33 @@ impl UnionFind {
         let (a, b) = (self.find(a), self.find(b));
         self.0[a] = b;
     }
+}
+
+/// A side of a join condition: `qualifier.column` of a catalog table
+struct JoinColumn<'c> {
+    qualifier: String,
+    column: String,
+    table: crate::schema::QualifiedName,
+    def: &'c crate::schema::TableDef,
+}
+
+/// Whether a column is a single-column primary or unique key of a table
+fn is_key(table: &crate::schema::TableDef, column: &str) -> bool {
+    let single = |columns: &[String]| matches!(columns, [c] if c.eq_ignore_ascii_case(column));
+    table
+        .primary_key
+        .as_ref()
+        .is_some_and(|pk| single(&pk.columns))
+        || table
+            .columns
+            .values()
+            .any(|c| c.is_primary_key && c.name.eq_ignore_ascii_case(column))
+        || table.unique_constraints.iter().any(|u| single(&u.columns))
+}
+
+fn expr_span(expr: &Expr) -> Option<Span> {
+    let span = expr.span();
+    (span.start.line > 0).then(|| Span::from_sqlparser(&span))
 }
 
 /// The name parts of a column reference

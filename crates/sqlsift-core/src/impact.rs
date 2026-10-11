@@ -220,6 +220,7 @@ fn globals_differ(before: &Catalog, after: &Catalog) -> bool {
         dropped_relations: _,
         databases,
         unknown_unique_keys,
+        unknown_foreign_keys,
         user_functions,
         user_operators,
     } = before;
@@ -234,6 +235,7 @@ fn globals_differ(before: &Catalog, after: &Catalog) -> bool {
         || *skipped_definitions != after.skipped_definitions
         || *databases != after.databases
         || *unknown_unique_keys != after.unknown_unique_keys
+        || *unknown_foreign_keys != after.unknown_foreign_keys
         || *user_functions != after.user_functions
         || *user_operators != after.user_operators
 }

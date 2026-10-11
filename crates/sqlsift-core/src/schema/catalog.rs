@@ -54,6 +54,10 @@ pub struct Catalog {
     /// known
     #[serde(default)]
     pub unknown_unique_keys: bool,
+    /// A statement of the schema input that may add a foreign key could not be
+    /// parsed, so the foreign keys between tables are not fully known
+    #[serde(default)]
+    pub unknown_foreign_keys: bool,
     /// Names (lowercase, without schema) of the functions and aggregates the
     /// schema input defines: they may overload built-in functions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +129,7 @@ impl Catalog {
             dropped_relations: Vec::new(),
             databases: Vec::new(),
             unknown_unique_keys: false,
+            unknown_foreign_keys: false,
             user_functions: Vec::new(),
             user_operators: false,
         };
