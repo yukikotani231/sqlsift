@@ -224,29 +224,61 @@ impl<'a> Resolver<'a> {
             _ => None,
         };
 
+        // PostgreSQL: without a column list, VALUES may give the first N columns
+        // only; the rest get their defaults
+        let fills_trailing =
+            insert.columns.is_empty() && self.dialect.insert_fills_trailing_columns();
+        // Without a column list, the columns a PostgreSQL VALUES list gives
+        let positional: Option<Vec<String>> = match (fills_trailing, values) {
+            (true, Some(rows)) => rows
+                .iter()
+                .map(Vec::len)
+                .max()
+                .filter(|&n| n <= expected_count)
+                .map(|n| table_def.columns.keys().take(n).cloned().collect()),
+            _ => None,
+        };
+
         // NOT NULL columns without a default must be given a value. Only checked
-        // with an explicit column list (or DEFAULT VALUES); without one, every
-        // column is positional and E0005 covers missing values.
+        // with an explicit column list (or DEFAULT VALUES, or a PostgreSQL VALUES
+        // list without one); otherwise every column is positional and E0005 covers
+        // missing values.
         // Skipped when the column list or VALUES arity is already wrong: the missing
         // column is then usually the one that was misspelled or miscounted.
         // (VALUES literals carry no source location, so point at the table name.)
         let default_values = insert.source.is_none() && insert.columns.is_empty();
-        let columns_valid = insert
-            .columns
-            .iter()
-            .all(|c| table_def.column_exists(&c.value));
+        let given: Vec<String> = positional
+            .clone()
+            .unwrap_or_else(|| insert.columns.iter().map(|c| c.value.clone()).collect());
+        let columns_valid = given.iter().all(|c| table_def.column_exists(c));
         let arity_valid = match (values, &selected) {
-            (Some(rows), _) => rows.iter().all(|row| row.len() == insert.columns.len()),
-            (None, Some(selected)) => selected.len() == insert.columns.len(),
+            (Some(rows), _) => rows.iter().all(|row| row.len() == given.len()),
+            (None, Some(selected)) => selected.len() == given.len(),
             (None, None) => true,
         };
-        if (!insert.columns.is_empty() || default_values) && columns_valid && arity_valid {
-            self.check_required_columns(insert, table_def, &table_name, table_span);
+        if (!given.is_empty() || default_values) && columns_valid && arity_valid {
+            self.check_required_columns(&given, table_def, &table_name, table_span);
         }
 
         if let Some(rows) = values {
             for row in rows {
-                if row.len() != expected_count {
+                if let Some(given) = &positional {
+                    // Shorter rows than the longest one (PostgreSQL rejects lists of
+                    // different lengths); fewer values than columns are fine
+                    if row.len() != given.len() {
+                        let mut diag = Diagnostic::error(
+                            DiagnosticKind::ColumnCountMismatch,
+                            format!(
+                                "VALUES row has {} value(s) but another row has {}",
+                                row.len(),
+                                given.len()
+                            ),
+                        )
+                        .with_help("All VALUES rows must have the same number of values");
+                        diag.span = table_span;
+                        self.diagnostics.push(diag);
+                    }
+                } else if row.len() != expected_count {
                     let mut diag = Diagnostic::error(
                         DiagnosticKind::ColumnCountMismatch,
                         format!(
@@ -324,10 +356,11 @@ impl<'a> Resolver<'a> {
         self.query(source, true)
     }
 
-    /// Report NOT NULL columns without a default that an INSERT omits (E0008)
+    /// Report NOT NULL columns without a default that an INSERT omits (E0008);
+    /// `given` are the columns the INSERT gives values for
     fn check_required_columns(
         &mut self,
-        insert: &Insert,
+        given: &[String],
         table_def: &TableDef,
         table_name: &QualifiedName,
         span: Option<Span>,
@@ -336,10 +369,7 @@ impl<'a> Resolver<'a> {
             .columns
             .values()
             .filter(|col| {
-                !insert
-                    .columns
-                    .iter()
-                    .any(|c| c.value.eq_ignore_ascii_case(&col.name))
+                !given.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
                     && !self.column_has_implicit_value(table_def, col)
             })
             .map(|col| col.name.as_str())

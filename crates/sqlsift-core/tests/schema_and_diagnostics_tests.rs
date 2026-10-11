@@ -9,6 +9,7 @@
 //! inline suppression directives and deterministic ordering.
 
 use sqlsift_core::analyzer::Analyzer;
+use sqlsift_core::dialect::SqlDialect;
 use sqlsift_core::error::{Diagnostic, DiagnosticKind, Severity};
 use sqlsift_core::schema::{
     Catalog, DefaultValue, IdentityKind, QualifiedName, SchemaBuilder, TableDef,
@@ -1972,15 +1973,40 @@ fn e0005_message_and_help_with_column_list() {
 #[test]
 fn e0005_message_and_help_without_column_list() {
     let c = diag_catalog();
-    let d = single(&c, "INSERT INTO users VALUES (1, 'a')");
+    let d = single(&c, "INSERT INTO users VALUES (1, 'a', 'b', 'c')");
     assert_eq!(
         d.message,
-        "INSERT has 2 value(s) but 3 column(s) were specified"
+        "INSERT has 4 value(s) but 3 column(s) were specified"
     );
     assert_eq!(
         d.help.as_deref(),
         Some("Table 'users' has 3 columns. Specify columns explicitly or provide 3 values")
     );
+}
+
+#[test]
+fn e0005_postgres_fills_trailing_columns_without_column_list() {
+    // PostgreSQL gives the first N columns and fills the rest with their defaults
+    let c = catalog("CREATE TABLE t (a int NOT NULL, b int, c int DEFAULT 0);");
+    assert_clean(&c, "INSERT INTO t VALUES (1)");
+    assert_clean(&c, "INSERT INTO t VALUES (1, 2), (3, 4)");
+    // ... but every VALUES row must have the same length
+    let d = single(&c, "INSERT INTO t VALUES (1, 2), (3)");
+    assert_eq!(d.code(), "E0005");
+    assert_eq!(d.message, "VALUES row has 1 value(s) but another row has 2");
+    // A required column left out is still reported
+    let c = catalog("CREATE TABLE t (a int, b int NOT NULL);");
+    let d = single(&c, "INSERT INTO t VALUES (1)");
+    assert_eq!(d.code(), "E0008");
+}
+
+#[test]
+fn e0005_mysql_and_sqlite_need_every_column_without_column_list() {
+    let c = catalog("CREATE TABLE t (a int, b int);");
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        let diags = Analyzer::with_dialect(&c, dialect).analyze("INSERT INTO t VALUES (1)");
+        assert_eq!(codes(&diags), vec!["E0005"], "{dialect:?}");
+    }
 }
 
 #[test]
@@ -2004,7 +2030,7 @@ fn e0005_reported_per_bad_row() {
 fn e0005_counts_columns_added_by_migration() {
     let c = catalog("CREATE TABLE t (a int); ALTER TABLE t ADD COLUMN b int;");
     assert_clean(&c, "INSERT INTO t VALUES (1, 2)");
-    let d = single(&c, "INSERT INTO t VALUES (1)");
+    let d = single(&c, "INSERT INTO t VALUES (1, 2, 3)");
     assert!(d.help.as_deref().unwrap().contains("has 2 columns"));
 }
 

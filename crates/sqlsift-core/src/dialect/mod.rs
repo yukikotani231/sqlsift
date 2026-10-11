@@ -107,6 +107,13 @@ impl SqlDialect {
         matches!(self, SqlDialect::MySQL | SqlDialect::SQLite)
     }
 
+    /// Whether `INSERT INTO t VALUES (...)` without a column list may give fewer
+    /// values than the table has columns, filling the rest with their defaults
+    /// (PostgreSQL; Redshift is PostgreSQL-based and isn't reported either)
+    pub fn insert_fills_trailing_columns(self) -> bool {
+        matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
+    }
+
     /// Whether HAVING can reference output column aliases (PostgreSQL's can't)
     pub fn aliases_in_having(self) -> bool {
         !matches!(self, SqlDialect::PostgreSQL)
