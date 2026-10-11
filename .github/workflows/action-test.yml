@@ -122,7 +122,10 @@ jobs:
           import json
           diff = json.load(open('diff.sarif'))['runs'][0]['results']
           full = json.load(open('full.sarif'))['runs'][0]['results']
-          assert len(diff) == 1 and "'email'" in diff[0]['message']['text'], diff
+          # The base's diagnostics are there too, as suppressed results
+          new = [r for r in diff if 'suppressions' not in r]
+          assert len(new) == 1 and "'email'" in new[0]['message']['text'], diff
+          assert len(diff) == 2, diff
           assert len(full) == 2, full
           impact = json.load(open('impact.sarif'))['runs'][0]['results']
           assert len(impact) == 1 and "'email'" in impact[0]['message']['text'], impact

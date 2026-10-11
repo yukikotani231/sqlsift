@@ -8,6 +8,9 @@ use sqlsift_core::baseline::Baseline;
 
 use crate::args::BaselineFormat;
 
+/// (name, entries) pairs
+type Counts<'a> = Vec<(&'a str, usize)>;
+
 /// Entry counts of a baseline file
 pub struct BaselineStats<'a> {
     /// Path of the baseline file, as given
@@ -18,7 +21,7 @@ pub struct BaselineStats<'a> {
 impl BaselineStats<'_> {
     /// (code, entries) by code, and (file, entries) by number of entries and
     /// then file name
-    fn counts(&self) -> (Vec<(&str, usize)>, Vec<(&str, usize)>) {
+    fn counts(&self) -> (Counts<'_>, Counts<'_>) {
         let mut rules: BTreeMap<&str, usize> = BTreeMap::new();
         let mut files: BTreeMap<&str, usize> = BTreeMap::new();
         for entry in &self.baseline.entries {
