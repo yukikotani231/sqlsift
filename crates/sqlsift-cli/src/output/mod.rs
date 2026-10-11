@@ -1,5 +1,6 @@
 //! Output formatting
 
+pub mod describe;
 pub mod schema;
 
 use std::io::{IsTerminal, Write};

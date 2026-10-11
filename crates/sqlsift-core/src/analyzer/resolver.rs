@@ -1009,7 +1009,7 @@ impl<'a> Resolver<'a> {
                     let name = if templated {
                         UNNAMED_COLUMN.to_string()
                     } else {
-                        alias.value.clone()
+                        self.catalog.ident_name(alias)
                     };
                     columns.push(Column::new(name, self.infer_expr_type(expr)));
                 }
@@ -1021,7 +1021,8 @@ impl<'a> Resolver<'a> {
                     return None;
                 }
                 SelectItem::UnnamedExpr(expr) => {
-                    let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
+                    let name = implicit_column_name(self.catalog, expr)
+                        .unwrap_or_else(|| UNNAMED_COLUMN.into());
                     let mut column = Column::new(name, self.infer_expr_type(expr));
                     // Only a column reference is named the same in every dialect
                     column.guessed_name =
@@ -2752,14 +2753,14 @@ fn is_snowflake_date_part(name: &str) -> bool {
 
 /// Name PostgreSQL gives an unaliased SELECT expression (`count(*)` -> `count`,
 /// `t.col` -> `col`, `col::int` -> `col`), or `None` for `?column?`
-fn implicit_column_name(expr: &Expr) -> Option<String> {
+fn implicit_column_name(catalog: &Catalog, expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Identifier(ident) => Some(ident.value.clone()),
-        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
+        Expr::Identifier(ident) => Some(catalog.ident_name(ident)),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|i| catalog.ident_name(i)),
         Expr::Function(func) => func.name.0.last().map(|i| i.ident().value.to_lowercase()),
-        Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(catalog, expr),
         Expr::CompoundFieldAccess { access_chain, .. } => {
-            last_field(access_chain).map(|key| key.value.clone())
+            last_field(access_chain).map(|key| catalog.ident_name(key))
         }
         Expr::Case { .. } => Some("case".to_string()),
         _ => None,

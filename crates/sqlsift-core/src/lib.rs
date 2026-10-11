@@ -25,7 +25,7 @@ mod suggest;
 pub mod templating;
 pub mod types;
 
-pub use analyzer::Analyzer;
+pub use analyzer::{Analyzer, Description, OutputColumn, QueryDescription, QueryKind};
 pub use dialect::SqlDialect;
 pub use error::{Diagnostic, DiagnosticKind, Severity, Span};
 pub use rules::{RuleCategory, RuleConfig, RuleLevel};

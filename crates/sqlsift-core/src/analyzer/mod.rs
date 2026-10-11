@@ -2,6 +2,7 @@
 
 pub(crate) mod bigquery;
 mod comment_directives;
+mod describe;
 mod grouping;
 mod ranges;
 mod resolver;
@@ -15,7 +16,7 @@ mod type_check;
 
 use std::ops::Range;
 
-use sqlparser::ast::Statement;
+use sqlparser::ast::{Spanned, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -32,6 +33,7 @@ use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Template, Templating};
 
 use comment_directives::InlineDirectives;
+pub use describe::{Description, OutputColumn, QueryDescription, QueryKind};
 use resolver::Resolver;
 
 /// SQL Analyzer - validates SQL against a schema catalog
@@ -41,6 +43,8 @@ pub struct Analyzer<'a> {
     dialect: SqlDialect,
     rules: RuleConfig,
     templating: Templating,
+    /// Statements described while analyzing (only collected by `describe*`)
+    descriptions: Option<Vec<QueryDescription>>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -62,6 +66,7 @@ impl<'a> Analyzer<'a> {
             dialect: SqlDialect::default(),
             rules: RuleConfig::default(),
             templating: Templating::None,
+            descriptions: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl<'a> Analyzer<'a> {
             dialect,
             rules: RuleConfig::default(),
             templating: Templating::None,
+            descriptions: None,
         }
     }
 
@@ -222,6 +228,55 @@ impl<'a> Analyzer<'a> {
         diagnostics
     }
 
+    /// Describe what each statement of `sql` returns: its output columns and their
+    /// types, as far as the schema tells (see [`QueryDescription`]). The file is
+    /// analyzed as [`Analyzer::analyze`] does, and its diagnostics are returned too.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id BIGINT, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let description = Analyzer::new(&catalog).describe("SELECT id, name AS n FROM users");
+    /// let columns = description.queries[0].columns.as_ref().unwrap();
+    /// assert_eq!(columns[1].name.as_deref(), Some("n"));
+    /// assert_eq!(columns[0].ty.as_ref().unwrap().display_name(), "bigint");
+    /// ```
+    pub fn describe(&mut self, sql: &str) -> Description {
+        self.describing(|analyzer| analyzer.analyze(sql))
+    }
+
+    /// [`Analyzer::describe`] for the SQL in a TypeScript or JavaScript file (see
+    /// [`Analyzer::analyze_embedded`])
+    pub fn describe_embedded<S: AsRef<str>>(&mut self, source: &str, tags: &[S]) -> Description {
+        self.describing(|analyzer| analyzer.analyze_embedded(source, tags))
+    }
+
+    /// [`Analyzer::describe`] for the SQL in a Vue or Svelte component (see
+    /// [`Analyzer::analyze_embedded_component`])
+    pub fn describe_embedded_component<S: AsRef<str>>(
+        &mut self,
+        source: &str,
+        tags: &[S],
+    ) -> Description {
+        self.describing(|analyzer| analyzer.analyze_embedded_component(source, tags))
+    }
+
+    /// Run `analyze`, collecting the statements it describes
+    fn describing(&mut self, analyze: impl FnOnce(&mut Self) -> Vec<Diagnostic>) -> Description {
+        self.descriptions = Some(Vec::new());
+        let diagnostics = analyze(self);
+        Description {
+            queries: self.descriptions.take().unwrap_or_default(),
+            diagnostics,
+        }
+    }
+
     /// Analyze `sql`, which has the same lines and character columns as `original`
     /// (where byte offsets point). Name diagnostics on the `substituted` identifiers
     /// ((line, first column, end column)) are dropped. A statement with one of the
@@ -235,6 +290,9 @@ impl<'a> Analyzer<'a> {
         fragments: &[(usize, usize, bool)],
     ) -> Vec<Diagnostic> {
         self.diagnostics.clear();
+        if let Some(descriptions) = &mut self.descriptions {
+            descriptions.clear();
+        }
 
         // Template tags, then psql meta-commands and variables (the rewrites keep
         // every line and character column)
@@ -357,7 +415,39 @@ impl<'a> Analyzer<'a> {
             resolver.templated_statement = templated || !statement_fragments.is_empty();
             resolver.hidden_relations = statement_fragments.contains(&true);
             resolver.restrictions = restrictions;
-            resolver.statement(stmt);
+            let output = resolver.statement(stmt);
+            if let Some(descriptions) = &mut self.descriptions {
+                if let Some(kind) = QueryKind::of(stmt) {
+                    // Where the statement starts (its first token), relative to the input
+                    let start = stmt.span().start;
+                    let mut span = if start.line > 0 {
+                        Span::with_location(start.line as usize, start.column as usize, 1)
+                    } else {
+                        Span::with_location(1, 1, 1)
+                    };
+                    origin.shift(&mut span);
+                    // A template may add columns (`{{ dbt_utils.star(...) }}`, a loop)
+                    let columns = if resolver.templated_statement {
+                        None
+                    } else if describe::has_returning(stmt) {
+                        output.map(|columns| {
+                            columns
+                                .into_iter()
+                                .map(|c| OutputColumn::new(c, self.dialect))
+                                .collect()
+                        })
+                    } else {
+                        Some(Vec::new())
+                    };
+                    descriptions.push(QueryDescription {
+                        line: span.line,
+                        column: span.column,
+                        name: None,
+                        kind,
+                        columns,
+                    });
+                }
+            }
             if let Statement::Declare { stmts } = stmt {
                 variables.extend(
                     stmts
@@ -380,6 +470,18 @@ impl<'a> Analyzer<'a> {
                         SchemaBuilder::from_catalog(self.catalog.clone(), self.dialect)
                     })
                     .apply_statement(stmt, origin.line);
+            }
+        }
+
+        if let Some(descriptions) = &mut self.descriptions {
+            for description in descriptions.iter_mut() {
+                if let Some(rewritten) = &rewritten {
+                    let mut span = Span::with_location(description.line, description.column, 1);
+                    rewritten.map_span(&mut span);
+                    description.line = span.line;
+                    description.column = span.column;
+                }
+                description.name = query_names.at(description.line).map(str::to_string);
             }
         }
 

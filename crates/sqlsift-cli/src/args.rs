@@ -167,6 +167,48 @@ pub enum Command {
         format: SchemaFormat,
     },
 
+    /// Describe what each query returns: its output columns and their types
+    ///
+    /// Queries are found as `check` finds them (.sql files, sqlc / aiosql / HugSQL
+    /// names, SQL in TypeScript / JavaScript tagged templates, dbt models). A name
+    /// or type sqlsift can't tell is null, never guessed.
+    Describe {
+        /// SQL, TypeScript or JavaScript files to describe (supports glob patterns)
+        files: Vec<PathBuf>,
+
+        /// Schema definition files
+        #[arg(short, long = "schema", value_name = "FILE")]
+        schema: Vec<PathBuf>,
+
+        /// Directory containing schema files
+        #[arg(long = "schema-dir", value_name = "DIR")]
+        schema_dir: Option<PathBuf>,
+
+        /// Skip query files matching a glob pattern (repeatable)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
+
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
+        #[arg(short, long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+
+        /// SQL dialect: postgresql, mysql, sqlite, snowflake, bigquery, redshift, databricks [default: postgresql]
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Query file templating: jinja (dbt models), none [default: as for `check`]
+        #[arg(long, value_name = "ENGINE")]
+        templating: Option<String>,
+
+        /// dbt catalog.json with the columns of the models and sources (alpha)
+        #[arg(long = "dbt-catalog", value_name = "PATH")]
+        dbt_catalog: Option<PathBuf>,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = DescribeFormat::Human)]
+        format: DescribeFormat,
+    },
+
     /// Parse SQL and display AST (for debugging)
     Parse {
         /// SQL file to parse
@@ -190,6 +232,16 @@ pub enum OutputFormat {
 /// Output format of `sqlsift schema`
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
 pub enum SchemaFormat {
+    /// Human-readable listing
+    #[default]
+    Human,
+    /// JSON output
+    Json,
+}
+
+/// Output format of `sqlsift describe`
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
+pub enum DescribeFormat {
     /// Human-readable listing
     #[default]
     Human,
