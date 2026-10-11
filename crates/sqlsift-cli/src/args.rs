@@ -210,6 +210,61 @@ pub enum Command {
         format: Option<OutputFormat>,
     },
 
+    /// List the tables and columns that no query uses
+    ///
+    /// Checks every query file (and the schema's views) and lists the tables they
+    /// never reference, then the columns of used tables they never read: never
+    /// referenced, or only written (INSERT, UPDATE SET). `SELECT *` reads every
+    /// column; columns of keys, foreign keys and CHECK constraints count as used.
+    /// Columns may be used outside the checked queries, so this is a list of
+    /// candidates to look at, not of columns to drop. Exits 0 unless
+    /// --fail-on-unused.
+    Unused {
+        /// Query files to check (supports glob patterns) [default: `files` in sqlsift.toml]
+        files: Vec<PathBuf>,
+
+        /// Schema definition files
+        #[arg(short, long = "schema", value_name = "FILE")]
+        schema: Vec<PathBuf>,
+
+        /// Directory containing schema files
+        #[arg(long = "schema-dir", value_name = "DIR")]
+        schema_dir: Option<PathBuf>,
+
+        /// Skip query files matching a glob pattern (repeatable)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
+
+        /// Never report tables or columns matching a glob pattern of `table`,
+        /// `schema.table`, `table.column` or `schema.table.column` (repeatable)
+        #[arg(long = "exclude", value_name = "PATTERN")]
+        exclude: Vec<String>,
+
+        /// Exit 1 when anything is unused
+        #[arg(long)]
+        fail_on_unused: bool,
+
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
+        #[arg(short, long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+
+        /// SQL dialect [default: postgresql]
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Query file templating: jinja, none
+        #[arg(long, value_name = "ENGINE")]
+        templating: Option<String>,
+
+        /// dbt catalog.json with the columns of models and sources (alpha)
+        #[arg(long = "dbt-catalog", value_name = "PATH")]
+        dbt_catalog: Option<PathBuf>,
+
+        /// Output format: human or json
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
+    },
+
     /// Detect the project layout and write sqlsift.toml
     ///
     /// Finds the schema (sqlc configuration, Prisma / Supabase / Drizzle / Flyway /

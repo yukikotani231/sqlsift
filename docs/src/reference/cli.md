@@ -8,6 +8,7 @@ Commands:
   check     Check SQL files against schema definitions
   impact    Show the queries a schema change breaks or fixes
   describe  Describe what each query returns: its output columns and their types
+  unused    List the tables and columns that no query uses
   rules     List all rules with their category and default level
   schema    Display the schema sqlsift loaded (tables, views, enum types)
   parse     Parse SQL and display AST (for debugging)
@@ -181,6 +182,34 @@ With `--format json` the output is `{"migrations": [...], "changes": [{"name", "
 With `--references`, the JSON output also has `references`: `[{"file", "lines": [{"line", "uses": ["public.users", "public.users.email", ...]}]}]`.
 
 Exit codes: `0` the change introduces no errors, `1` it does, `2` usage or configuration error.
+
+## `sqlsift unused`
+
+Lists the tables and columns that no query uses, as candidates for cleanup:
+
+```
+$ sqlsift unused
+audit_log       never referenced
+users.token     never referenced
+users.seen_at   written (2 statement(s)), never read
+```
+
+It checks every query file (`files` in `sqlsift.toml`, or the files given on the command line) and the schema's own views, then lists the tables they never reference, followed by the columns of the other tables they never read. A column is "written, never read" when only INSERT column lists, INSERT without a column list or UPDATE SET use it. `SELECT *` (also through a view) reads every column, and the columns of primary keys, unique constraints, foreign keys (either side) and CHECK constraints count as used.
+
+The queries sqlsift sees are not always all the queries of a database: an ORM, another service or a BI tool may use what is listed. Exclude those with `--exclude <PATTERN>` or `unused_exclude` in `sqlsift.toml`, glob patterns of `table`, `schema.table`, `table.column` or `schema.table.column` (`--exclude 'audit_*' --exclude 'users.legacy_*'`). The report says when it is incomplete: query files with statements that could not be parsed, views in the schema that could not be parsed, and functions or procedures, whose bodies are not analyzed.
+
+| Option | Description |
+|--------|-------------|
+| `[FILES]...` | Query files (glob patterns supported); default `files` in `sqlsift.toml` |
+| `-s, --schema <FILE>` / `--schema-dir <DIR>` | Schema, as for `check` |
+| `--exclude <PATTERN>` | Never report tables or columns matching the pattern (repeatable) |
+| `--fail-on-unused` | Exit `1` when anything is listed |
+| `--ignore`, `-d, --dialect`, `--templating`, `--dbt-catalog`, `-c, --config` | As for `check` |
+| `-f, --format <FORMAT>` | `human` (default) or `json` |
+
+The JSON output is `{"unused": [{"table", "column", "status", "writes"}], "files", "incomplete": [...]}`, where `status` is `unreferenced` or `written` and a whole table has no `column`.
+
+Exit codes: `0` (also when something is listed, unless `--fail-on-unused`), `1` something is listed with `--fail-on-unused`, `2` usage or configuration error.
 
 ## `sqlsift describe`
 

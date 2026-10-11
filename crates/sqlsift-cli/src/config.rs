@@ -28,6 +28,7 @@ const KNOWN_KEYS: &[&str] = &[
     "embedded_sql_tags",
     "embedded_sql_macros",
     "embedded_sql_functions",
+    "unused_exclude",
 ];
 
 /// Configuration for sqlsift
@@ -90,6 +91,12 @@ pub struct Config {
     /// in Python files (default: `execute`, `executemany`, `fetch`, `text`, ...)
     #[serde(default)]
     pub embedded_sql_functions: Option<Vec<String>>,
+
+    /// Tables and columns `sqlsift unused` never reports, as glob patterns of
+    /// `table`, `schema.table`, `table.column` or `schema.table.column` (used
+    /// outside the checked queries: by an ORM, another service, a BI tool)
+    #[serde(default)]
+    pub unused_exclude: Vec<String>,
 
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]

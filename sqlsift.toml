@@ -38,6 +38,11 @@ schema = [
 #     "**/*.generated.sql",
 # ]
 
+# Tables and columns `sqlsift unused` never reports (used outside the checked
+# queries: by an ORM, another service, a BI tool), as glob patterns of
+# `table`, `schema.table`, `table.column` or `schema.table.column`
+# unused_exclude = ["audit_*", "users.legacy_*"]
+
 # Or use schema directory to automatically include all .sql files
 # schema_dir = "db/schema"
 

@@ -27,6 +27,7 @@ pub mod stack;
 mod suggest;
 pub mod templating;
 pub mod types;
+pub mod unused;
 
 pub use analyzer::{Analyzer, Description, OutputColumn, Parameter, QueryDescription, QueryKind};
 pub use dialect::SqlDialect;

@@ -4490,3 +4490,57 @@ fn baseline_stats_counts_entries_by_rule_and_file() {
         .assert_code(2)
         .assert_stderr_contains("Baseline file not found");
 }
+
+#[test]
+fn unused_lists_tables_and_columns_no_query_uses() {
+    let t = TempDir::new("unused");
+    t.write(
+        "schema.sql",
+        "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, token TEXT, seen_at TIMESTAMP);
+         CREATE TABLE audit_log (id INT, message TEXT);
+         CREATE TABLE sessions (id INT, user_id INT, data TEXT);
+         CREATE VIEW session_users AS SELECT user_id FROM sessions;",
+    );
+    t.write(
+        "queries.sql",
+        "SELECT name FROM users WHERE id = $1;\nUPDATE users SET seen_at = now() WHERE id = $1;\nSELECT * FROM session_users;\n",
+    );
+    t.run(&["unused", "-s", "schema.sql", "queries.sql"])
+        .assert_code(0)
+        .assert_stdout_contains("audit_log  ")
+        .assert_stdout_contains("users.token")
+        .assert_stdout_contains("users.seen_at  written (1 statement(s)), never read")
+        .assert_stdout_contains("sessions.id")
+        .assert_stdout_contains("sessions.data")
+        .assert_stderr_contains("1 table(s) and 4 column(s) unused by the 1 query file(s)");
+
+    let run = t.run(&[
+        "unused",
+        "-s",
+        "schema.sql",
+        "--exclude",
+        "audit_*",
+        "--exclude",
+        "sessions.*",
+        "--fail-on-unused",
+        "--format",
+        "json",
+        "queries.sql",
+    ]);
+    run.assert_code(1);
+    let json: Value = serde_json::from_str(&run.stdout).expect("JSON output");
+    let names: Vec<String> = json["unused"]
+        .as_array()
+        .expect("unused array")
+        .iter()
+        .map(|u| {
+            format!(
+                "{}.{} {}",
+                u["table"].as_str().unwrap(),
+                u["column"].as_str().unwrap(),
+                u["status"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(names, ["users.token unreferenced", "users.seen_at written"]);
+}

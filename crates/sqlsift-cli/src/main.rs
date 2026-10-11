@@ -6,6 +6,7 @@ mod dbt;
 mod impact;
 mod init;
 mod output;
+mod unused;
 
 use std::collections::HashSet;
 use std::fs;
@@ -1247,6 +1248,35 @@ fn run(args: Args) -> Result<bool> {
                     references,
                 },
             )
+        }
+
+        Command::Unused {
+            files,
+            schema,
+            schema_dir,
+            ignore,
+            exclude,
+            fail_on_unused,
+            config: config_path,
+            dialect,
+            templating,
+            dbt_catalog,
+            format,
+        } => {
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                schema_dir.as_deref(),
+                &files,
+                &ignore,
+                format,
+                dialect.as_deref(),
+                templating.as_deref(),
+                dbt_catalog.as_deref(),
+                None,
+                None,
+            );
+            let found = unused::run(&config, &exclude, quiet)?;
+            Ok(found && fail_on_unused)
         }
 
         Command::Init {

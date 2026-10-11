@@ -50,6 +50,9 @@ pub struct Reference {
     pub kind: ReferenceKind,
     /// Where it is used: the table name, the column reference or the `*`
     pub span: Span,
+    /// Whether a column is written (a target of INSERT or UPDATE SET; every
+    /// column of an INSERT without a column list) rather than read
+    pub write: bool,
 }
 
 /// What a [`Reference`] uses

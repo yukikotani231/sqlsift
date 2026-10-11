@@ -128,12 +128,33 @@ impl<'a> Resolver<'a> {
         kind: ReferenceKind,
         span: Option<Span>,
     ) {
+        self.record_reference(source, kind, span, false);
+    }
+
+    /// Record a column written by INSERT or UPDATE SET, if references are recorded
+    fn written_column(&mut self, source: Option<&QualifiedName>, column: &str, span: Option<Span>) {
+        self.record_reference(
+            source,
+            ReferenceKind::Column(column.to_string()),
+            span,
+            true,
+        );
+    }
+
+    fn record_reference(
+        &mut self,
+        source: Option<&QualifiedName>,
+        kind: ReferenceKind,
+        span: Option<Span>,
+        write: bool,
+    ) {
         if let (Some(references), Some(relation), Some(span)) = (&mut self.references, source, span)
         {
             references.push(Reference {
                 relation: relation.clone(),
                 kind,
                 span,
+                write,
             });
         }
     }
@@ -258,6 +279,15 @@ impl<'a> Resolver<'a> {
 
         self.check_duplicate_insert_columns(&insert_columns);
 
+        // Without a column list every column is written
+        if insert_columns.is_empty() && self.references.is_some() {
+            let source = self.catalog.resolve_relation(&table_name);
+            let columns: Vec<String> = table_def.columns.values().map(|c| c.name.clone()).collect();
+            for column in &columns {
+                self.written_column(source.as_ref(), column, table_span);
+            }
+        }
+
         // Check if specified columns exist
         for col_ident in &insert_columns {
             if let Some(column) = table_def.case_mismatched_column(col_ident) {
@@ -267,9 +297,9 @@ impl<'a> Resolver<'a> {
             } else if table_def.column_exists(&col_ident.value) {
                 if self.references.is_some() {
                     let source = self.catalog.resolve_relation(&table_name);
-                    self.reference(
+                    self.written_column(
                         source.as_ref(),
-                        ReferenceKind::Column(col_ident.value.clone()),
+                        &col_ident.value,
                         Some(Span::from_sqlparser(&col_ident.span)),
                     );
                 }
@@ -561,9 +591,9 @@ impl<'a> Resolver<'a> {
         if table_def.column_exists(&col.value) {
             if self.references.is_some() {
                 let source = self.catalog.resolve_relation(table_name);
-                self.reference(
+                self.written_column(
                     source.as_ref(),
-                    ReferenceKind::Column(col.value.clone()),
+                    &col.value,
                     Some(Span::from_sqlparser(&col.span)),
                 );
             }
