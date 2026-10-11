@@ -164,9 +164,6 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Current Limitations
 
-### SQL Dialect Support
-- Schema-qualified names (e.g., `public.users`) are not fully resolved
-
 ### Type Inference (Partial Implementation)
 **Implemented (E0003, E0007):**
 - WHERE clause type checking (comparisons, arithmetic)
@@ -217,6 +214,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ Resilient parsing (gracefully skips unsupported DDL)
 - ✅ DDL in query files (CREATE [TEMP] TABLE, CTAS, CREATE VIEW, ALTER TABLE, DROP) is applied by `Analyzer::analyze` to a file-local copy of the catalog via `SchemaBuilder::from_catalog`, visible to later statements of that file only
 - ✅ psql scripts (PostgreSQL only, `psql.rs`): meta-commands blanked out, `\g`/`\gset` end a query, `:var`/`:'var'` → `$1`, `:"var"` → identifier whose name diagnostics are dropped; the rewrite keeps every byte offset
+- ✅ Schema-qualified names: tables, views and enums are keyed by schema; `table`, `schema.table`, `db.schema.table` (database part ignored) and column references up to `db.schema.table.column` (`split_column_ref`, `Scope::qualified_relation`); backtick-quoted dotted names are split (`split_dotted_idents`). PostgreSQL catalogs are `strict_schemas` (search_path only, E0001 help for a table off the path); MySQL/SQLite catalogs fall back to the default schema / any schema since the current database is chosen at run time; `USE db` sets the database of unqualified names
 - ✅ Configuration file (sqlsift.toml)
 - ✅ dbt / Jinja templates in query files (`templating.rs`: tags are masked keeping locations; `--templating`, `templating = "jinja"`, auto-detected from `dbt_project.yml`)
 - ✅ SQL in application code: sqlc `-- name:` query names on diagnostics (`sqlc.rs`), SQL in TypeScript/JavaScript tagged templates (`embedded.rs`, `Analyzer::analyze_embedded`, `embedded_sql_tags`)

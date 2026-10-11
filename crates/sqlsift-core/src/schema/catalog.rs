@@ -3,6 +3,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Ident, ObjectName};
+use std::borrow::Cow;
 
 use crate::types::SqlType;
 
@@ -24,6 +25,15 @@ pub struct Catalog {
     /// are case-sensitive. When false, table/view/schema names match case-insensitively.
     #[serde(default)]
     pub case_sensitive_names: bool,
+    /// Schemas are namespaces with a known search path (PostgreSQL): a name is
+    /// looked up only in the schema it names, or in the search path. When false
+    /// (MySQL and SQLite databases, where the current database is chosen at run
+    /// time and schema files often leave it unnamed), a name that is not found
+    /// there falls back to the default schema (qualified names) or to any schema
+    /// (unqualified names), so that queries are not flagged for a database the
+    /// schema input does not name.
+    #[serde(default)]
+    pub strict_schemas: bool,
     /// Table, view and type definitions in the schema input that could not be parsed
     /// and were skipped (for diagnostics on queries that use them)
     #[serde(default)]
@@ -62,6 +72,7 @@ impl Catalog {
             enums: IndexMap::new(),
             search_path: Vec::new(),
             case_sensitive_names: false,
+            strict_schemas: false,
             skipped_definitions: Vec::new(),
             dropped_relations: Vec::new(),
         };
@@ -133,8 +144,33 @@ impl Catalog {
 
     /// Index of the schema and of the object named `name` in it, among the objects
     /// of each schema given by `objects` (an unqualified name is looked up in the
-    /// schemas of the search path, in order)
+    /// schemas of the search path, in order; see [`Self::strict_schemas`] for the
+    /// fallbacks of non-strict catalogs)
     fn locate<V>(
+        &self,
+        name: &QualifiedName,
+        objects: impl Fn(&Schema) -> &IndexMap<String, V>,
+    ) -> Option<(usize, usize)> {
+        let find_in = |schema: usize| {
+            let object = self.index_of(objects(&self.schemas[schema]), &name.name)?;
+            Some((schema, object))
+        };
+        let find = |schema_name: &str| find_in(self.index_of(&self.schemas, schema_name)?);
+        let found = self.locate_exact(name, &objects);
+        if found.is_some() || self.strict_schemas {
+            return found;
+        }
+        match &name.schema {
+            // `db.table` where the schema input left the database unnamed
+            Some(_) => self.search_path().find_map(find),
+            // The current database is chosen at run time: any database may have it
+            None => (0..self.schemas.len()).find_map(find_in),
+        }
+    }
+
+    /// [`Self::locate`] without the fallbacks of non-strict catalogs: in the schema
+    /// `name` names, or in the search path
+    fn locate_exact<V>(
         &self,
         name: &QualifiedName,
         objects: impl Fn(&Schema) -> &IndexMap<String, V>,
@@ -150,6 +186,60 @@ impl Catalog {
         }
     }
 
+    /// Whether a table or view `name` exists exactly where `CREATE ... name` would
+    /// create it (for `IF NOT EXISTS`): no fallback to other schemas
+    pub fn relation_exists_exactly(&self, name: &QualifiedName) -> bool {
+        let name = QualifiedName {
+            schema: Some(
+                name.schema
+                    .clone()
+                    .unwrap_or_else(|| self.creation_schema().to_string()),
+            ),
+            name: name.name.clone(),
+        };
+        self.locate_exact(&name, |s| &s.tables).is_some()
+            || self.locate_exact(&name, |s| &s.views).is_some()
+    }
+
+    /// Fully qualified name (schema and object name as stored in the catalog) of
+    /// the table or view `name` refers to
+    pub fn resolve_relation(&self, name: &QualifiedName) -> Option<QualifiedName> {
+        let full = |schema: usize, object: Option<&String>| {
+            let schema_name = self.schemas.get_index(schema)?.0;
+            Some(QualifiedName::with_schema(
+                schema_name.clone(),
+                object?.clone(),
+            ))
+        };
+        if let Some((schema, table)) = self.locate(name, |s| &s.tables) {
+            let key = self.schemas[schema].tables.get_index(table).map(|(k, _)| k);
+            return full(schema, key);
+        }
+        let (schema, view) = self.locate(name, |s| &s.views)?;
+        let key = self.schemas[schema].views.get_index(view).map(|(k, _)| k);
+        full(schema, key)
+    }
+
+    /// A table or view named `name` (unqualified) in a schema that is not on the
+    /// search path, as a schema-qualified name. Only for catalogs with
+    /// [`Self::strict_schemas`], where such a name is not found unqualified.
+    pub fn relation_off_search_path(&self, name: &str) -> Option<QualifiedName> {
+        if !self.strict_schemas {
+            return None;
+        }
+        self.schemas
+            .iter()
+            .filter(|(schema, _)| !self.search_path().any(|s| self.names_match(s, schema)))
+            .find_map(|(schema_name, schema)| {
+                let key = schema
+                    .tables
+                    .keys()
+                    .chain(schema.views.keys())
+                    .find(|k| self.names_match(k, name))?;
+                Some(QualifiedName::with_schema(schema_name.clone(), key.clone()))
+            })
+    }
+
     /// Name of an identifier as stored in the catalog: with PostgreSQL rules, unquoted
     /// identifiers fold to lowercase and quoted ones are kept as written
     pub fn ident_name(&self, ident: &Ident) -> String {
@@ -162,8 +252,12 @@ impl Catalog {
 
     /// Convert a (possibly schema-qualified) object name to a [`QualifiedName`],
     /// applying [`Self::ident_name`] to each part
+    ///
+    /// A three-part name is `database.schema.table`: the database is not modeled
+    /// and is ignored. A backtick-quoted identifier containing dots
+    /// (`` `project.dataset.table` ``) is split into its parts.
     pub fn qualified_name(&self, name: &ObjectName) -> QualifiedName {
-        match name.0.as_slice() {
+        match split_dotted_idents(&name.0).as_ref() {
             [table] => QualifiedName::new(self.ident_name(table)),
             [schema, table] | [_, schema, table] => {
                 QualifiedName::with_schema(self.ident_name(schema), self.ident_name(table))
@@ -386,6 +480,30 @@ impl Catalog {
     }
 }
 
+/// The parts of a dotted name, with each backtick-quoted identifier that contains
+/// dots (`` `project.dataset.table` ``, a single identifier for the parser) split
+/// into its parts. Double-quoted identifiers are kept whole: in PostgreSQL `"a.b"`
+/// is one name.
+pub fn split_dotted_idents(parts: &[Ident]) -> Cow<'_, [Ident]> {
+    let splits = |ident: &Ident| ident.quote_style == Some('`') && ident.value.contains('.');
+    if !parts.iter().any(splits) {
+        return Cow::Borrowed(parts);
+    }
+    let mut split = Vec::with_capacity(parts.len() + 2);
+    for ident in parts {
+        if splits(ident) {
+            split.extend(ident.value.split('.').map(|value| Ident {
+                value: value.to_string(),
+                quote_style: ident.quote_style,
+                span: ident.span,
+            }));
+        } else {
+            split.push(ident.clone());
+        }
+    }
+    Cow::Owned(split)
+}
+
 /// Index of `key` in `map`, matching exactly first and then ignoring ASCII case
 fn index_ignore_case<V>(map: &IndexMap<String, V>, key: &str) -> Option<usize> {
     map.get_index_of(key)
@@ -422,9 +540,11 @@ impl QualifiedName {
         }
     }
 
-    /// Parse from a dotted name like "schema.table" or just "table"
+    /// Parse from a dotted name like "schema.table" or just "table" (in
+    /// "database.schema.table" the database is ignored)
     pub fn parse(s: &str) -> Self {
-        if let Some((schema, name)) = s.split_once('.') {
+        if let Some((qualifier, name)) = s.rsplit_once('.') {
+            let schema = qualifier.rsplit('.').next().unwrap_or(qualifier);
             Self::with_schema(schema, name)
         } else {
             Self::new(s)

@@ -7,50 +7,55 @@
 //! - return types of common BigQuery functions, and the date parts (`DAY`,
 //!   `ISOWEEK`, `WEEK(MONDAY)`, ...) their arguments take as bare words
 //!
-//! sqlparser already splits a backtick-quoted `` `project.dataset.table` `` into its
-//! parts in FROM, INSERT, UPDATE, DELETE and CREATE statements, and a three-part
-//! name is resolved by its last two parts (dataset and table).
+//! `` `project.dataset.table` `` names are split and resolved like any qualified
+//! name (`split_dotted_idents`, `Scope::qualified_relation`); BigQuery catalogs are
+//! not strict about schemas, so a dataset prefix the schema input leaves out still
+//! finds the table.
 
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident};
 
-use crate::schema::QualifiedName;
+use crate::schema::{split_dotted_idents, QualifiedName};
 use crate::types::SqlType;
 
 use super::resolver::Resolver;
-use super::scope::{ColumnLookup, ExpressionType};
+use super::scope::{split_column_ref, ColumnLookup, ExpressionType};
 
 impl Resolver<'_> {
     /// Resolve a BigQuery path `a.b[.c...]`: `alias.column[.field...]`,
-    /// `column.field[.field...]`, or `table.column` of a table named with its dataset
+    /// `column.field[.field...]`, or `[[project.]dataset.]table.column`
     pub(super) fn bigquery_path(&mut self, idents: &[Ident]) {
-        let [first, second, rest @ ..] = idents else {
+        let parts = split_dotted_idents(idents);
+        let [first, second, ..] = parts.as_ref() else {
             return;
         };
         if self.scope.relation(&first.value).is_some() {
-            self.column(Some(first), second);
-            return;
-        }
-        if self.is_value_name(first) {
+            self.column(Some((None, first)), second);
+        } else if self.is_value_name(first) {
             // A STRUCT column (or output alias): the rest are its fields
             self.column(None, first);
-            return;
+        } else if let Some((schema, table, column)) = split_column_ref(&parts) {
+            // A table named with its dataset, or else an unknown alias
+            self.column(Some((schema, table)), column);
         }
-        if let Some(third) = rest.first() {
-            if self.scope.relation(&second.value).is_some() {
-                self.column(Some(second), third);
-                return;
-            }
-        }
-        // Neither an alias nor a column: report the unknown alias
-        self.column(Some(first), second);
     }
 
-    /// Type of a BigQuery path `a.b[.c...]`: a column's type for `alias.column`,
-    /// unknown for STRUCT fields
+    /// Type of a BigQuery path `a.b[.c...]`: a column's type for `alias.column` and
+    /// `dataset.table.column`, unknown for STRUCT fields
     pub(super) fn infer_bigquery_path(&self, idents: &[Ident]) -> ExpressionType {
-        match idents {
+        let parts = split_dotted_idents(idents);
+        match parts.as_ref() {
             [table, column] if self.scope.relation(&table.value).is_some() => {
-                self.infer_qualified_column(table, column)
+                self.infer_qualified_column(None, table, column)
+            }
+            [first, _, _, ..]
+                if self.scope.relation(&first.value).is_none() && !self.is_value_name(first) =>
+            {
+                match split_column_ref(&parts) {
+                    Some((schema, table, column)) => {
+                        self.infer_qualified_column(schema, table, column)
+                    }
+                    None => ExpressionType::Unknown,
+                }
             }
             _ => ExpressionType::Unknown,
         }
@@ -80,20 +85,6 @@ impl Resolver<'_> {
                     .keys()
                     .any(|s| self.catalog.names_match(s, dataset))
             })
-    }
-
-    /// A table of a dataset the schema doesn't define, looked up by its name alone
-    /// (schemas often define tables without their dataset)
-    pub(super) fn bigquery_unqualified_fallback(
-        &self,
-        name: &QualifiedName,
-    ) -> Option<QualifiedName> {
-        if name.schema.is_none() || !self.bigquery_table_may_exist(name) {
-            return None;
-        }
-        let bare = QualifiedName::new(name.name.clone());
-        (self.catalog.get_table(&bare).is_some() || self.catalog.get_view(&bare).is_some())
-            .then_some(bare)
     }
 
     /// Return type of a BigQuery function (`name` is uppercase, without a `SAFE.`
