@@ -6,52 +6,41 @@
 [![Playground](https://img.shields.io/badge/try_it-playground-2ea44f.svg)](https://yukikotani231.github.io/sqlsift/)
 [![Docs](https://img.shields.io/badge/docs-user_guide-0f766e.svg)](https://yukikotani231.github.io/sqlsift/docs/)
 
-**Catch broken SQL before it reaches production — without a database.**
+**Schema-aware static analysis for SQL. No database needed.**
 
-sqlsift reads your schema (`CREATE TABLE`, migrations, `structure.sql`, …) and checks your raw SQL queries against it: missing tables, typo'd columns, type mismatches, wrong `INSERT` arity, ambiguous columns. It runs offline in milliseconds, so it fits in pre-commit hooks, CI, and your editor.
+Think of it as a type checker for your SQL: sqlsift replays your migrations into an in-memory schema and checks every query against it — in `.sql` files, sqlc and aiosql query files, and `` sql`...` `` templates in TypeScript / JavaScript. It runs offline in milliseconds, so it fits in your editor, pre-commit hooks and CI.
 
 **▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://yukikotani231.github.io/sqlsift/docs/)** for everything else.
 
-```sql
--- schema.sql
-CREATE TABLE users  (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, email TEXT UNIQUE);
-CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), total NUMERIC(10, 2));
-```
-
-```sql
--- queries/report.sql
-SELECT u.naem, o.total
-FROM users u
-JOIN orders o ON o.user_id = u.email
-WHERE u.id = 'abc';
-```
-
 ```console
-$ npx sqlsift-cli check --schema schema.sql queries/report.sql
-error[E0002]: Column 'naem' not found in table 'users'
-  --> queries/report.sql:1:10
+$ npx sqlsift-cli init     # finds your migrations, dialect and queries, writes sqlsift.toml
+$ npx sqlsift-cli check
+error[E0002]: Column 'site_id' not found in table 'page_views'
+  --> src/retention.ts:6:11
     |
-  1 | SELECT u.naem, o.total
-    |          ^^^^
-    = help: Did you mean 'name'?
+  6 |     WHERE site_id = ${siteId} AND created_at < ${cutoff}
+    |           ^^^^^^^
+    = help: 'site_id' was renamed to 'website_id' in migrations/002_rename_site_id.sql:1
 
-error[E0007]: JOIN condition type mismatch: integer vs text
-  --> queries/report.sql:3:18
+error[E0014]: No unique constraint or primary key of 'users' matches ON CONFLICT (email)
+  --> src/retention.ts:11:70
     |
-  3 | JOIN orders o ON o.user_id = u.email
-    |                  ^^^^^^^^^
-    = help: JOIN condition should compare compatible types. Consider using explicit CAST.
+ 11 |   await sql`INSERT INTO users (email) VALUES (${email}) ON CONFLICT (email) DO NOTHING`;
+    |                                                                      ^^^^^
+    = help: The unique keys of 'users' are (id); add a unique constraint or index on (email)
 
-error[E0003]: Type mismatch: cannot compare integer with text
-  --> queries/report.sql:4:7
+warning[E0023]: WHERE condition on 'p.published_at' removes the rows the outer join adds without a match in 'p': it works as an inner join
+  --> src/retention.ts:19:11
     |
-  4 | WHERE u.id = 'abc';
-    |       ^^^^
-    = help: Types are not implicitly compatible. Consider using explicit CAST.
+ 19 |     WHERE p.published_at > now() - interval '7 days'
+    |           ^^^^^^^^^^^^^^
+    = help: Move the condition into the join's ON clause to keep unmatched rows, or write an inner JOIN (or test 'p.published_at IS NULL OR ...')
 
 
-Found 3 error(s), 0 warning(s) in 1 file(s)
+Found 2 error(s), 1 warning(s) in 1 file(s)
 ```
+
+[27 rules](#diagnostic-rules) cover what the schema alone can tell you: missing tables and columns, type mismatches, NOT NULL columns left out, `ON CONFLICT` targets with no unique key, `GROUP BY` errors, values out of range, and warnings for queries that are valid but probably not what you meant. Anything sqlsift can't work out is left unreported: on 16 open-source apps (687 files) it reports zero false positives.
 
 > **Status:** early development (alpha). Diagnostics may change between versions. Feedback, bug reports and real-world SQL that sqlsift gets wrong are very welcome — please [open an issue](https://github.com/yukikotani231/sqlsift/issues).
 
