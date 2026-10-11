@@ -345,6 +345,13 @@ pub const RULES: &[Rule] = &[
         summary: "LIMIT or OFFSET without ORDER BY",
     },
     Rule {
+        kind: DiagnosticKind::ImplicitConversion,
+        code: "E0029",
+        name: "implicit-conversion",
+        category: RuleCategory::Suspicious,
+        summary: "Type mismatch MySQL or SQLite converts implicitly",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

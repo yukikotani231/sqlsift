@@ -748,32 +748,32 @@ fn mysql_invalid_column_not_found() {
 
 #[test]
 fn mysql_invalid_type_mismatch() {
-    use DiagnosticKind::TypeMismatch;
+    use DiagnosticKind::{ImplicitConversion, TypeMismatch};
     mysql_bad(&[
         bad(
             "SELECT id FROM customers WHERE email = 42",
-            TypeMismatch,
-            "cannot compare",
+            ImplicitConversion,
+            "comparing",
             Some("CAST"),
             Some((1, 32)),
         ),
         bad(
             "SELECT id FROM products WHERE name > price",
-            TypeMismatch,
-            "cannot compare",
+            ImplicitConversion,
+            "comparing",
             None,
             Some((1, 31)),
         ),
         bad(
             "SELECT id FROM customers WHERE profile = 1",
-            TypeMismatch,
+            ImplicitConversion,
             "json",
             None,
             None,
         ),
         bad(
             "SELECT full_name + 1 FROM customers",
-            TypeMismatch,
+            ImplicitConversion,
             "Arithmetic",
             None,
             Some((1, 8)),
@@ -794,15 +794,15 @@ fn mysql_invalid_type_mismatch() {
         ),
         bad(
             "UPDATE customers SET birth_date = 5 WHERE id = 1",
-            TypeMismatch,
+            ImplicitConversion,
             "birth_date",
             None,
             None,
         ),
         bad(
             "SELECT id FROM orders WHERE customer_id = UPPER(notes)",
-            TypeMismatch,
-            "cannot compare",
+            ImplicitConversion,
+            "comparing",
             None,
             None,
         ),
@@ -811,25 +811,25 @@ fn mysql_invalid_type_mismatch() {
 
 #[test]
 fn mysql_invalid_join_type_mismatch() {
-    use DiagnosticKind::JoinTypeMismatch;
+    use DiagnosticKind::ImplicitConversion;
     mysql_bad(&[
         bad(
             "SELECT o.id FROM orders o JOIN customers c ON c.email = o.customer_id",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "JOIN condition type mismatch",
             Some("CAST"),
             Some((1, 47)),
         ),
         bad(
             "SELECT p.id FROM products p\nJOIN settings s ON p.id = s.`key`",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "bigint vs varchar",
             None,
             Some((2, 20)),
         ),
         bad(
             "SELECT a.id FROM audit_log a LEFT JOIN customers c ON a.payload = c.id",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "json",
             None,
             None,
@@ -1281,42 +1281,42 @@ fn sqlite_invalid_type_count_ambiguity_null() {
     sqlite_bad(&[
         bad(
             "SELECT id FROM authors WHERE name = 5",
-            TypeMismatch,
-            "cannot compare",
+            ImplicitConversion,
+            "comparing",
             Some("CAST"),
             Some((1, 30)),
         ),
         bad(
             "SELECT id FROM posts WHERE view_count = 'many'",
-            TypeMismatch,
-            "cannot compare",
+            ImplicitConversion,
+            "comparing",
             None,
             Some((1, 28)),
         ),
         bad(
             "SELECT title * 2 FROM posts",
-            TypeMismatch,
+            ImplicitConversion,
             "Arithmetic",
             None,
             Some((1, 8)),
         ),
         bad(
             "INSERT INTO posts (author_id, title, view_count) VALUES (1, 't', 'lots')",
-            TypeMismatch,
+            ImplicitConversion,
             "view_count",
             None,
             None,
         ),
         bad(
             "UPDATE posts SET author_id = 'bob' WHERE id = 1",
-            TypeMismatch,
+            ImplicitConversion,
             "author_id",
             None,
             None,
         ),
         bad(
             "SELECT p.id FROM posts p JOIN authors a ON a.name = p.author_id",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "text vs integer",
             Some("CAST"),
             Some((1, 44)),
@@ -1453,8 +1453,8 @@ fn mysql_valid_expressions_and_dml_misc() {
 fn mysql_invalid_in_nested_and_dml_contexts() {
     use DiagnosticKind::*;
     mysql_bad(&[
-        bad("INSERT INTO products (sku, name, price, stock) VALUES ('S', 'N', 1, UPPER('x'))", TypeMismatch, "stock", None, Some((1, 69))),
-        bad("UPDATE order_items SET quantity = LOWER('x') WHERE order_id = 1", TypeMismatch, "quantity", None, Some((1, 35))),
+        bad("INSERT INTO products (sku, name, price, stock) VALUES ('S', 'N', 1, UPPER('x'))", ImplicitConversion, "stock", None, Some((1, 69))),
+        bad("UPDATE order_items SET quantity = LOWER('x') WHERE order_id = 1", ImplicitConversion, "quantity", None, Some((1, 35))),
         bad("UPDATE customers c JOIN orders o ON o.customer_id = c.id SET c.balanse = 1", ColumnNotFound, "balanse", Some("Did you mean 'balance'?"), None),
         bad("SELECT customer_id, GROUP_CONCAT(stats) FROM orders GROUP BY customer_id", ColumnNotFound, "stats", Some("Did you mean 'status'?"), None),
         bad("SELECT id, ROW_NUMBER() OVER (PARTITION BY custmer_id ORDER BY id) FROM orders", ColumnNotFound, "custmer_id", None, None),
@@ -1464,13 +1464,13 @@ fn mysql_invalid_in_nested_and_dml_contexts() {
         bad("SELECT JSON_EXTRACT(atributes, '$.c') FROM products", ColumnNotFound, "atributes", Some("Did you mean 'attributes'?"), None),
         bad("SELECT customer_id FROM orders GROUP BY customer_id HAVING SUM(totl) > 1", ColumnNotFound, "totl", None, None),
         bad("INSERT INTO audit_log (actor, action, payload) SELECT ful_name, 'x', '{}' FROM customers", ColumnNotFound, "ful_name", None, None),
-        bad("SELECT id FROM orders WHERE status = 'paid' AND customer_id = 'abc'", TypeMismatch, "cannot compare", None, Some((1, 49))),
+        bad("SELECT id FROM orders WHERE status = 'paid' AND customer_id = 'abc'", ImplicitConversion, "comparing", None, Some((1, 49))),
         bad("SELECT IFNULL(totl, 0) FROM orders", ColumnNotFound, "totl", None, None),
         bad("SELECT DATE_FORMAT(placed, '%Y') FROM orders", ColumnNotFound, "placed", None, None),
         bad("DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.stat = 'x'", ColumnNotFound, "stat", None, None),
         bad("SELECT c.id FROM customers c JOIN orders o ON o.customer_id = c.id WHERE x.id = 1", TableNotFound, "x", None, None),
         bad("INSERT INTO customers (email, full_name, is_verified) VALUES ('a', 'b', 'yes')", TypeMismatch, "is_verified", None, None),
-        bad("SELECT id FROM customers WHERE id = ? AND email = 1", TypeMismatch, "cannot compare", None, Some((1, 43))),
+        bad("SELECT id FROM customers WHERE id = ? AND email = 1", ImplicitConversion, "comparing", None, Some((1, 43))),
         bad("WITH t AS (SELECT id FROM orders) SELECT id FROM t JOIN customers c ON c.id = t.id", AmbiguousColumn, "id", None, None),
         bad("SELECT id FROM orders o\nWHERE o.customer_id IN (\n  SELECT c.id FROM customers c WHERE c.emial = ?\n)", ColumnNotFound, "emial", Some("Did you mean 'email'?"), Some((3, 40))),
     ]);
@@ -1521,10 +1521,10 @@ fn sqlite_invalid_in_nested_and_dml_contexts() {
         bad("WITH c AS (SELECT author_id FROM posts) SELECT c.post_id FROM c", ColumnNotFound, "post_id", None, None),
         bad("SELECT title FROM published_posts WHERE body = 'x'", ColumnNotFound, "body", None, None),
         bad("SELECT id FROM posts WHERE author_id = :author AND titl = :t", ColumnNotFound, "titl", None, Some((1, 52))),
-        bad("SELECT id FROM posts WHERE title = 1", TypeMismatch, "cannot compare", None, Some((1, 28))),
-        bad("UPDATE posts SET view_count = upper(title) WHERE id = 1", TypeMismatch, "view_count", None, Some((1, 31))),
+        bad("SELECT id FROM posts WHERE title = 1", ImplicitConversion, "comparing", None, Some((1, 28))),
+        bad("UPDATE posts SET view_count = upper(title) WHERE id = 1", ImplicitConversion, "view_count", None, Some((1, 31))),
         bad("INSERT INTO post_tags (post_id, tag_id) VALUES (NULL, 1)", PotentialNullViolation, "post_id", None, None),
-        bad("SELECT p.id FROM posts p JOIN tags t ON t.name = p.id", JoinTypeMismatch, "text vs integer", None, Some((1, 41))),
+        bad("SELECT p.id FROM posts p JOIN tags t ON t.name = p.id", ImplicitConversion, "text vs integer", None, Some((1, 41))),
         bad("SELECT id FROM posts p JOIN post_tags pt ON pt.post_id = p.id JOIN tags t ON t.id = pt.tag_id", AmbiguousColumn, "id", None, Some((1, 8))),
     ]);
 }
@@ -1640,28 +1640,28 @@ fn mysql_invalid_more_contexts() {
         ),
         bad(
             "DELETE FROM customers WHERE balance = 'lots'",
-            TypeMismatch,
+            ImplicitConversion,
             "numeric(12,2) with text",
             None,
             Some((1, 29)),
         ),
         bad(
             "SELECT id FROM customers WHERE created_at > 5",
-            TypeMismatch,
+            ImplicitConversion,
             "timestamp with integer",
             None,
             Some((1, 32)),
         ),
         bad(
             "SELECT id FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE quantity > 'x'",
-            TypeMismatch,
+            ImplicitConversion,
             "smallint with text",
             None,
             Some((1, 73)),
         ),
         bad(
             "SELECT p.id FROM products p JOIN order_items oi ON p.sku = oi.product_id",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "char(12) vs bigint",
             None,
             Some((1, 52)),
@@ -1855,28 +1855,28 @@ fn sqlite_invalid_more_contexts() {
         ),
         bad(
             "SELECT id FROM posts WHERE view_count > 'ten'",
-            TypeMismatch,
+            ImplicitConversion,
             "integer with text",
             None,
             Some((1, 28)),
         ),
         bad(
             "UPDATE posts SET rating = 'great'",
-            TypeMismatch,
+            ImplicitConversion,
             "rating",
             None,
             None,
         ),
         bad(
             "INSERT INTO authors (name, is_active) VALUES ('x', 'maybe')",
-            TypeMismatch,
+            ImplicitConversion,
             "is_active",
             None,
             None,
         ),
         bad(
             "SELECT a.id FROM authors a JOIN posts p ON a.created_at = p.id",
-            JoinTypeMismatch,
+            ImplicitConversion,
             "text vs integer",
             None,
             Some((1, 44)),

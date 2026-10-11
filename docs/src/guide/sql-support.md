@@ -58,6 +58,8 @@ sqlsift infers expression types to report [E0003](../rules/E0003.md), [E0007](..
 
 Anything sqlsift can't infer is treated as unknown and never reported, so missing type support leads to missed errors, not false positives.
 
+MySQL and SQLite convert mismatched values at run time instead of rejecting the query, so with these dialects type mismatches are the warning [E0029](../rules/E0029.md), not errors; only a string literal MySQL rejects when assigning it to a column stays [E0003](../rules/E0003.md).
+
 ## Known limitations
 
 - Function bodies and stored procedures are skipped, not analyzed.

@@ -206,6 +206,8 @@ pub enum DiagnosticKind {
     WrongArgumentType,
     /// E0028: LIMIT / OFFSET / FETCH FIRST without ORDER BY
     LimitWithoutOrderBy,
+    /// E0029: Type mismatch the database converts implicitly (MySQL, SQLite)
+    ImplicitConversion,
     /// Parse error
     ParseError,
 }

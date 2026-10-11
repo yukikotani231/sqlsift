@@ -259,7 +259,14 @@ fn inline_enum_value_names_the_column() {
         "UPDATE customers SET plan = 'premium'",
     ] {
         let d = single(&c, SqlDialect::MySQL, sql);
-        assert_eq!(d.kind, DiagnosticKind::TypeMismatch, "{sql}");
+        // MySQL rejects an invalid value when it is assigned; comparing with
+        // one runs (never true)
+        let kind = if sql.starts_with("SELECT") {
+            DiagnosticKind::ImplicitConversion
+        } else {
+            DiagnosticKind::TypeMismatch
+        };
+        assert_eq!(d.kind, kind, "{sql}");
         assert_eq!(d.message, expected, "{sql}");
         assert_eq!(
             d.help.as_deref(),

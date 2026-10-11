@@ -107,6 +107,15 @@ impl SqlDialect {
         matches!(self, SqlDialect::MySQL | SqlDialect::SQLite)
     }
 
+    /// Whether values of mismatched types are converted at run time instead of
+    /// rejected when compared, combined in arithmetic or assigned (MySQL converts
+    /// with a warning, rejecting only a string that isn't a value of a column's
+    /// type when it is assigned in strict mode; SQLite compares by storage class
+    /// and stores any value in a column)
+    pub fn converts_mismatched_types(self) -> bool {
+        matches!(self, SqlDialect::MySQL | SqlDialect::SQLite)
+    }
+
     /// Whether `INSERT INTO t VALUES (...)` without a column list may give fewer
     /// values than the table has columns, filling the rest with their defaults
     /// (PostgreSQL; Redshift is PostgreSQL-based and isn't reported either)

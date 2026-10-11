@@ -2011,7 +2011,7 @@ fn test_sqlite_insert() {
         "Valid SQLite INSERT should have no errors: {diagnostics:?}"
     );
 
-    // Type mismatch: age is INTEGER, inserting TEXT
+    // Type mismatch: age is INTEGER, inserting TEXT (SQLite stores it: a warning)
     let diagnostics =
         analyzer.analyze("INSERT INTO users (name, age) VALUES ('Alice', 'not_a_number')");
     assert_eq!(
@@ -2019,7 +2019,7 @@ fn test_sqlite_insert() {
         1,
         "SQLite INSERT type mismatch should be detected: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ImplicitConversion);
 }
 
 #[test]
@@ -2034,14 +2034,14 @@ fn test_sqlite_update() {
         "Valid SQLite UPDATE should have no errors: {diagnostics:?}"
     );
 
-    // Type mismatch: age is INTEGER, setting to TEXT
+    // Type mismatch: age is INTEGER, setting to TEXT (SQLite stores it: a warning)
     let diagnostics = analyzer.analyze("UPDATE users SET age = 'old'");
     assert_eq!(
         diagnostics.len(),
         1,
         "SQLite UPDATE type mismatch should be detected: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::TypeMismatch);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::ImplicitConversion);
 }
 
 #[test]

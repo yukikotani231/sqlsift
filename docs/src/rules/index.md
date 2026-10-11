@@ -56,4 +56,5 @@ CREATE TABLE coupons (
 | [E0026](E0026.md) | `select-star` | SELECT * in a query's result columns |
 | [E0027](E0027.md) | `wrong-argument-type` | Function or operator given an argument type it doesn't take |
 | [E0028](E0028.md) | `limit-without-order-by` | LIMIT or OFFSET without ORDER BY |
+| [E0029](E0029.md) | `implicit-conversion` | Type mismatch MySQL or SQLite converts implicitly |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

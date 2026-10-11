@@ -43,16 +43,16 @@ error[E0002]: Column 'user_id' not found in table 'reviews'
   7 | SELECT r.user_id, r.rating, r.body
     |          ^^^^^^^
 
-error[E0007]: JOIN condition type mismatch: varchar(32) vs integer
+warning[E0029]: JOIN condition type mismatch: varchar(32) vs integer
   --> broken/inventory.sql:15:20
     |
  15 | JOIN products p ON p.sku = r.product_id;
     |                    ^^^^^
-    = help: JOIN condition should compare compatible types. Consider using explicit CAST.
+    = help: MySQL converts the values at run time, so this runs, but rarely does what was meant. Use an explicit CAST if the conversion is intended.
 
-Found 3 error(s), 0 warning(s) in 1 file(s)
+Found 2 error(s), 1 warning(s) in 1 file(s)
 ```
 
-In non-strict SQL mode MySQL stores an invalid `ENUM` value as an empty string with only a warning, and compares a string with a number by converting both, so the first and last mistakes don't even fail at run time.
+MySQL compares a string with a number by converting both, so the join runs and quietly matches the wrong rows: sqlsift reports it as a warning. In non-strict SQL mode MySQL also stores an invalid `ENUM` value as an empty string with only a warning, so the first mistake doesn't even fail at run time there.
 
 CI checks both commands on every change to sqlsift (`scripts/check-examples.sh`, against `expected-diagnostics.txt`).

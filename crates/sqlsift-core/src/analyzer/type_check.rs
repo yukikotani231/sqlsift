@@ -45,6 +45,7 @@ impl Resolver<'_> {
         right: &ExpressionType,
         column: Option<String>,
         span: Option<Span>,
+        assignment: bool,
     ) -> bool {
         let ((ExpressionType::Known(enum_type), ExpressionType::StringLiteral(literal))
         | (ExpressionType::StringLiteral(literal), ExpressionType::Known(enum_type))) =
@@ -93,8 +94,65 @@ impl Resolver<'_> {
         )
         .with_help(help);
         diag.span = span;
+        // MySQL compares an enum with any string (and strict mode rejects an
+        // invalid value only when it is assigned)
+        if self.dialect.converts_mismatched_types()
+            && !(assignment && self.assignment_rejected(left, right))
+        {
+            diag.kind = DiagnosticKind::ImplicitConversion;
+        }
         self.diagnostics.push(diag);
         true
+    }
+
+    /// Report a type mismatch that PostgreSQL rejects. MySQL and SQLite convert the
+    /// values at run time instead: there it is reported as E0029 (a warning)
+    fn push_mismatch(&mut self, mut diag: Diagnostic) {
+        if self.dialect.converts_mismatched_types() {
+            diag.kind = DiagnosticKind::ImplicitConversion;
+            diag.message = diag
+                .message
+                .replace("cannot compare", "comparing")
+                .replace("requires numeric types, but got", "on a non-numeric value:");
+            diag.help = Some(format!(
+                "{} converts the values at run time, so this runs, but rarely does what was \
+                 meant. Use an explicit CAST if the conversion is intended.",
+                self.dialect_name()
+            ));
+        }
+        self.diagnostics.push(diag);
+    }
+
+    fn dialect_name(&self) -> &'static str {
+        match self.dialect {
+            SqlDialect::MySQL => "MySQL",
+            SqlDialect::SQLite => "SQLite",
+            _ => "The database",
+        }
+    }
+
+    /// Whether the database rejects assigning `value` to a column of type `column`
+    /// that [`Self::type_conflict`] reported. MySQL (in its default strict mode)
+    /// rejects only a string that isn't a value of the column's type; SQLite
+    /// stores any value
+    fn assignment_rejected(&self, column: &ExpressionType, value: &ExpressionType) -> bool {
+        match self.dialect {
+            SqlDialect::SQLite => false,
+            SqlDialect::MySQL => matches!(
+                (column, value),
+                (ExpressionType::Known(_), ExpressionType::StringLiteral(_))
+            ),
+            _ => true,
+        }
+    }
+
+    /// Whether a column or value of type `ty` accepts the string literal `literal`
+    fn accepts_literal(&self, ty: &SqlType, literal: &str) -> bool {
+        // MySQL and SQLite read '1.5' as a number in integer context too
+        if self.dialect.converts_mismatched_types() && ty.is_numeric() {
+            return literal.trim().parse::<f64>().is_ok();
+        }
+        ty.accepts_string_literal(literal)
     }
 
     /// The display names of two types that can't be compared or assigned, or `None`
@@ -124,7 +182,7 @@ impl Resolver<'_> {
                 })
             }
             (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => {
-                (!t.accepts_string_literal(lit)).then(|| {
+                (!self.accepts_literal(t, lit)).then(|| {
                     (
                         t.display_name_in(self.dialect),
                         SqlType::Text.display_name_in(self.dialect),
@@ -132,7 +190,7 @@ impl Resolver<'_> {
                 })
             }
             (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => {
-                (!t.accepts_string_literal(lit)).then(|| {
+                (!self.accepts_literal(t, lit)).then(|| {
                     (
                         SqlType::Text.display_name_in(self.dialect),
                         t.display_name_in(self.dialect),
@@ -151,7 +209,7 @@ impl Resolver<'_> {
         // Literals carry no location: use the other operand's
         let span = located_span(left).or_else(|| located_span(right));
         let column = self.column_label(left).or_else(|| self.column_label(right));
-        if self.report_enum_literal(&left_type, &right_type, column, span) {
+        if self.report_enum_literal(&left_type, &right_type, column, span, false) {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
@@ -161,7 +219,7 @@ impl Resolver<'_> {
             )
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = span;
-            self.diagnostics.push(diag);
+            self.push_mismatch(diag);
         }
     }
 
@@ -172,11 +230,11 @@ impl Resolver<'_> {
         self.note_compared_parameters(left, &left_type, right, &right_type);
         let span = located_span(left).or_else(|| located_span(right));
         let column = self.column_label(left).or_else(|| self.column_label(right));
-        if self.report_enum_literal(&left_type, &right_type, column, span) {
+        if self.report_enum_literal(&left_type, &right_type, column, span, false) {
             return;
         }
         if let Some((lt, rt)) = self.type_conflict(&left_type, &right_type) {
-            self.diagnostics.push(
+            self.push_mismatch(
                 Diagnostic::error(
                     DiagnosticKind::JoinTypeMismatch,
                     format!("JOIN condition type mismatch: {lt} vs {rt}"),
@@ -205,7 +263,7 @@ impl Resolver<'_> {
             )
             .with_help("Types are not implicitly compatible. Consider using explicit CAST.");
             diag.span = located_span(expr);
-            self.diagnostics.push(diag);
+            self.push_mismatch(diag);
         }
     }
 
@@ -248,8 +306,8 @@ impl Resolver<'_> {
             _ => None,
         };
         if let Some((t, lit, lit_expr)) = literal_operand {
-            if t.is_numeric() && !t.accepts_string_literal(lit) {
-                self.diagnostics.push(
+            if t.is_numeric() && !self.accepts_literal(t, lit) {
+                self.push_mismatch(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
                         format!(
@@ -287,7 +345,7 @@ impl Resolver<'_> {
         for (ty, expr) in [(lt, left), (rt, right)] {
             let numeric = ty.is_numeric() || (self.dialect.coerces_strings() && ty.is_string());
             if !numeric {
-                self.diagnostics.push(
+                self.push_mismatch(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
                         format!(
@@ -322,7 +380,7 @@ impl Resolver<'_> {
                 .with_help("All THEN/ELSE results of a CASE expression must have compatible types");
                 diag.span =
                     located_span(expr).or_else(|| typed.iter().find_map(|(e, _)| located_span(e)));
-                self.diagnostics.push(diag);
+                self.push_mismatch(diag);
                 return;
             }
         }
@@ -353,7 +411,7 @@ impl Resolver<'_> {
 
         for (idx, (l, r)) in left.iter().zip(right).enumerate() {
             if let Some((lt, rt)) = self.type_conflict(&l.ty, &r.ty) {
-                self.diagnostics.push(
+                self.push_mismatch(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
                         format!(
@@ -440,14 +498,24 @@ impl Resolver<'_> {
                     .get(i)
                     .map(|c| Span::from_sqlparser(&column_ident(c).span));
                 let column = format!("{}.{}", table_def.name, col_def.name);
-                if self.report_enum_literal(&column_type, &value_type, Some(column), column_span) {
+                if self.report_enum_literal(
+                    &column_type,
+                    &value_type,
+                    Some(column),
+                    column_span,
+                    true,
+                ) {
                     continue;
                 }
                 if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                     let mut diag = assignment_mismatch(col_name, &expected, &actual);
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
-                    self.diagnostics.push(diag);
+                    if self.assignment_rejected(&column_type, &value_type) {
+                        self.diagnostics.push(diag);
+                    } else {
+                        self.push_mismatch(diag);
+                    }
                     continue;
                 }
                 let fallback = column_span.or_else(|| {
@@ -501,15 +569,24 @@ impl Resolver<'_> {
             let value_type = self.infer_expr_type(&assignment.value);
             let column_type = ExpressionType::of_column(&col_def.data_type);
             let column = format!("{}.{}", table_def.name, col_def.name);
-            if self.report_enum_literal(&column_type, &value_type, Some(column), Some(target_span))
-            {
+            if self.report_enum_literal(
+                &column_type,
+                &value_type,
+                Some(column),
+                Some(target_span),
+                true,
+            ) {
                 continue;
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
                 let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
-                self.diagnostics.push(diag);
+                if self.assignment_rejected(&column_type, &value_type) {
+                    self.diagnostics.push(diag);
+                } else {
+                    self.push_mismatch(diag);
+                }
                 continue;
             }
             self.check_value_range(

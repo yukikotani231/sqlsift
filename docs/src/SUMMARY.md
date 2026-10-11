@@ -57,6 +57,7 @@
   - [E0026 select-star](rules/E0026.md)
   - [E0027 wrong-argument-type](rules/E0027.md)
   - [E0028 limit-without-order-by](rules/E0028.md)
+  - [E0029 implicit-conversion](rules/E0029.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

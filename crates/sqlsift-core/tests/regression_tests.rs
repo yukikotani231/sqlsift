@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use sqlsift_core::analyzer::Analyzer;
 use sqlsift_core::dialect::SqlDialect;
-use sqlsift_core::error::{Diagnostic, DiagnosticKind};
+use sqlsift_core::error::{Diagnostic, DiagnosticKind, Severity};
 use sqlsift_core::schema::{Catalog, SchemaBuilder};
 
 const PG_SCHEMA: &str = r"
@@ -954,7 +954,11 @@ fn mysql_inline_enum_values_are_checked() {
         SqlDialect::MySQL,
         "SELECT id FROM tickets WHERE status = 'opne'",
     );
-    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::TypeMismatch]);
+    // MySQL runs the comparison (never true): a warning
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![DiagnosticKind::ImplicitConversion]
+    );
     assert_eq!(diagnostics[0].help.as_deref(), Some("Did you mean 'open'?"));
     for sql in [
         "INSERT INTO tickets (status) VALUES ('archived')",
@@ -1189,4 +1193,63 @@ fn order_by_bare_name_of_one_output_column_is_not_ambiguous() {
             );
         }
     }
+}
+
+// #284: MySQL and SQLite convert mismatched types at run time
+const CONVERTING_SCHEMA: &str = r"
+    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER);
+    CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL);
+";
+
+#[test]
+fn mysql_and_sqlite_type_mismatches_are_implicit_conversions() {
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        for sql in [
+            "SELECT name FROM users WHERE age = name",
+            "SELECT name FROM users WHERE age = 'abc'",
+            "SELECT age + name FROM users",
+            "SELECT u.name FROM users u JOIN posts p ON p.title = u.id",
+            "UPDATE users SET age = name",
+            "SELECT CASE WHEN age > 1 THEN age ELSE name END FROM users",
+        ] {
+            let diagnostics = analyze(CONVERTING_SCHEMA, dialect, sql);
+            assert_eq!(
+                kinds(&diagnostics),
+                vec![DiagnosticKind::ImplicitConversion],
+                "{dialect}: {sql}"
+            );
+            assert_eq!(diagnostics[0].severity, Severity::Warning, "{sql}");
+        }
+        for sql in [
+            "SELECT name FROM users WHERE age = '42'",
+            "SELECT name FROM users WHERE age = '1.5'",
+            "UPDATE users SET age = '1.5'",
+            "SELECT age + '2.5' FROM users",
+        ] {
+            assert!(
+                analyze(CONVERTING_SCHEMA, dialect, sql).is_empty(),
+                "{dialect}: {sql}"
+            );
+        }
+    }
+    // MySQL strict mode rejects a string that isn't a number in an integer
+    // column; SQLite stores it
+    let sql = "INSERT INTO users (id, name, age) VALUES (1, 'a', 'abc')";
+    assert_eq!(
+        kinds(&analyze(CONVERTING_SCHEMA, SqlDialect::MySQL, sql)),
+        vec![DiagnosticKind::TypeMismatch]
+    );
+    assert_eq!(
+        kinds(&analyze(CONVERTING_SCHEMA, SqlDialect::SQLite, sql)),
+        vec![DiagnosticKind::ImplicitConversion]
+    );
+    // PostgreSQL still rejects them
+    assert_eq!(
+        kinds(&analyze(
+            CONVERTING_SCHEMA,
+            SqlDialect::PostgreSQL,
+            "SELECT name FROM users WHERE age = name"
+        )),
+        vec![DiagnosticKind::TypeMismatch]
+    );
 }
