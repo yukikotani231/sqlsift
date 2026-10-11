@@ -18,11 +18,13 @@ sqlsift/
 │   │   ├── dialect/       # SQL dialect abstraction
 │   │   ├── rules.rs       # Rule registry, categories and rule levels
 │   │   ├── baseline.rs    # Baseline file (known diagnostics), shared by CLI and LSP
+│   │   ├── impact.rs      # `sqlsift impact`: catalog diff (changed relations) and diagnostic diff
 │   │   └── error.rs       # Diagnostic types
 │   │
 │   ├── sqlsift-cli/      # CLI binary
 │   │   ├── args.rs        # CLI argument definitions (clap)
 │   │   ├── config.rs      # Configuration file (sqlsift.toml) support
+│   │   ├── impact.rs      # `sqlsift impact` (schema before/after the migrations, output)
 │   │   ├── init/          # `sqlsift init`: project layout detection (detect.rs, sqlc_config.rs), sqlsift.toml rendering
 │   │   ├── output/        # Output formatters (human, JSON, SARIF, GitHub Actions)
 │   │   └── main.rs        # Entry point
@@ -57,7 +59,7 @@ sqlsift/
 1. **SchemaBuilder** (`schema/builder.rs`): Parses DDL statements (CREATE TABLE, CREATE VIEW, CREATE TYPE, ALTER TABLE) using sqlparser-rs and builds a `Catalog`. Supports resilient parsing to skip unsupported syntax.
 2. **Catalog** (`schema/catalog.rs`): In-memory representation of database schema (tables, columns, constraints, views, enums)
 3. **Analyzer** (`analyzer/mod.rs`): Entry point for query validation
-4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types
+4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types; with `Analyzer::with_references` it also records the uses of catalog tables, views and columns (`analyzer::Reference`, for `impact --references` and an unused-objects report)
 5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
 6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
 7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016 and `analyzer/ranges.rs` E0017, implemented on `Resolver`

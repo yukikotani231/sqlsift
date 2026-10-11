@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Introducing sqlsift: schema-aware static analysis for SQL, no database needed | sqlsift</title>
+  <meta name="description" content="sqlsift replays your migrations into an in-memory schema and checks every query against it, like a type checker for your SQL.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="canonical" href="https://sqlsift.dev/blog/introducing-sqlsift/">
+  <meta property="og:title" content="Introducing sqlsift: schema-aware static analysis for SQL, no database needed | sqlsift">
+  <meta property="og:description" content="sqlsift replays your migrations into an in-memory schema and checks every query against it, like a type checker for your SQL.">
+  <meta property="og:url" content="https://sqlsift.dev/blog/introducing-sqlsift/">
+  <meta property="og:type" content="article">
+  <meta property="og:image" content="https://sqlsift.dev/blog/introducing-sqlsift/cover.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Cpath d='M8 10h16l-6 7v6l-4 2v-8z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../../style.css">
+  <link rel="stylesheet" href="../../blog/blog.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="../../" aria-label="sqlsift home">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M8 10h16l-6 7v6l-4 2v-8z"/></svg>
+        <span class="brand-name">sqlsift</span>
+        <span class="brand-tag">Blog</span>
+      </a>
+      <nav class="header-links">
+        <a class="gh-link" href="../../">Playground</a>
+        <a class="gh-link" href="../../docs/">Docs</a>
+        <a class="gh-link" href="https://github.com/yukikotani231/sqlsift" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="post">
+    <article>
+      <h1>Introducing sqlsift: schema-aware static analysis for SQL, no database needed</h1>
+      <p class="meta">October 2026 · Yuki Kotani</p>
+<p>Nothing checks the SQL in most codebases before it runs. The compiler
+sees a string, the tests cover the queries someone thought to test, and
+the rest gets checked by the database, sometimes for the first time in
+production.</p>
+<p><a href="https://github.com/yukikotani231/sqlsift">sqlsift</a> moves
+that last check earlier. It replays your migrations into an in-memory
+schema and checks every query against it, without a database. Think of
+it as a type checker for your SQL.</p>
+<p><img
+src="demo.gif"
+alt="sqlsift init and check on a project whose migration renamed a column" /></p>
+<h2 id="an-example">An example</h2>
+<p>Say a migration renames a column:</p>
+<pre class="sql"><code>ALTER TABLE page_views RENAME COLUMN site_id TO website_id;</code></pre>
+<p>Later, someone adds a cleanup job that still uses the old name:</p>
+<pre class="ts"><code>await sql`
+  DELETE FROM page_views
+  WHERE site_id = ${siteId} AND created_at &lt; ${cutoff}
+`;</code></pre>
+<p>Tests pass and TypeScript is happy, because to both of them the SQL
+is a string. This exact shape happened in a real open-source app: the
+cleanup job kept failing until the maintainers spotted it and <a
+href="https://github.com/Seentics/seentics/commit/d2f0d97">fixed it</a>.
+The rename and the new job came from two separate changes a couple of
+hours apart, and nothing in the toolchain could connect them.</p>
+<p>sqlsift catches it before it ships:</p>
+<pre class="console"><code>$ npx sqlsift-cli check
+error[E0002]: Column &#39;site_id&#39; not found in table &#39;page_views&#39;
+  --&gt; src/retention.ts:6:11
+    |
+  6 |     WHERE site_id = ${siteId} AND created_at &lt; ${cutoff}
+    |           ^^^^^^^
+    = help: &#39;site_id&#39; was renamed to &#39;website_id&#39; in migrations/002_rename_site_id.sql:1</code></pre>
+<h2 id="more-than-renames">More than renames</h2>
+<p>The goal is to catch everything the schema alone can tell you. There
+are 27 rules so far, in three categories:</p>
+<ul>
+<li><strong>correctness</strong> (errors): missing tables and columns,
+type mismatches, NOT NULL columns left out of an INSERT,
+<code>ON CONFLICT</code> targets with no unique key,
+<code>GROUP BY</code> errors, writes to generated columns, values out of
+range, functions given the wrong argument types</li>
+<li><strong>suspicious</strong> (warnings): <code>= NULL</code>,
+<code>NOT IN</code> over a nullable column, tables with no join
+condition, conditions that are always true or false, a
+<code>WHERE</code> that turns a <code>LEFT JOIN</code> into an inner
+join</li>
+<li><strong>restriction</strong> (off by default):
+<code>UPDATE</code>/<code>DELETE</code> without <code>WHERE</code>,
+<code>INSERT</code> without a column list, <code>SELECT *</code></li>
+</ul>
+<p>Each rule can be set to off, warn or error.</p>
+<h2 id="when-it-isnt-sure-it-stays-quiet">When it isn't sure, it stays
+quiet</h2>
+<p>If sqlsift can't work out a type or a name, it reports nothing rather
+than guess.</p>
+<p>To check that, I ran it the way a user would on 16 open-source apps
+using sqlc, Prisma TypedSQL, postgres.js, MySQL and Supabase (687
+files), and fixed it until it reported zero false positives. Along the
+way it found a real bug in <a
+href="https://github.com/shantanuraj/podcst-web">podcst-web</a>: an
+<code>ON CONFLICT (name)</code> on a column with no unique constraint,
+which PostgreSQL rejects when it runs. I've <a
+href="https://github.com/shantanuraj/podcst-web/issues/85">reported
+it</a>.</p>
+<h2 id="trying-it">Trying it</h2>
+<pre class="console"><code>npx sqlsift-cli init    # finds migrations, dialect and query files, writes sqlsift.toml
+npx sqlsift-cli check</code></pre>
+<p>Queries can be <code>.sql</code> files, sqlc and aiosql query files,
+or <code>sql`...`</code> templates in TypeScript and JavaScript
+(postgres.js, Slonik, also inside Vue and Svelte).</p>
+<ul>
+<li><strong>Existing codebase</strong>:
+<code>sqlsift check --write-baseline</code> records today's findings, so
+only new ones are reported.</li>
+<li><strong>CI</strong>: the <a
+href="https://github.com/marketplace/actions/sqlsift">GitHub Action</a>
+annotates pull requests, and with <code>diff-base</code> only shows what
+the PR introduces.</li>
+<li><strong>Editor</strong>: a language server with a <a
+href="https://marketplace.visualstudio.com/items?itemName=sqlsift.sqlsift">VS
+Code extension</a>.</li>
+<li><strong>Browser</strong>: a <a href="https://sqlsift.dev/">WASM
+playground</a>; your SQL never leaves the page.</li>
+</ul>
+<p>There are <a
+href="https://github.com/yukikotani231/sqlsift/tree/main/examples">example
+projects</a> for sqlc, Prisma TypedSQL, postgres.js, sqlx, aiosql,
+MySQL, plain migrations and dbt, all checked in CI. The <a
+href="https://sqlsift.dev/docs/">user guide</a> has the rest.</p>
+<h2 id="what-it-doesnt-do-yet">What it doesn't do yet</h2>
+<ul>
+<li>Function bodies (PL/pgSQL) aren't analyzed.</li>
+<li>SQL inside Rust, Go or Python code isn't read yet (<code>.sql</code>
+files are).</li>
+<li>Schemas written in Drizzle or Prisma schema files need exporting to
+SQL first.</li>
+<li>A few constructs the parser can't read yet.</li>
+</ul>
+<h2 id="how-its-built">How it's built</h2>
+<p>sqlsift is written in Rust on top of <a
+href="https://github.com/apache/datafusion-sqlparser-rs">sqlparser-rs</a>.
+I build it with heavy use of Claude Code: I set the direction, decide
+the design and review what goes in. Running it on real projects is how I
+check it isn't flagging valid SQL.</p>
+<p>If it gets your SQL wrong, please <a
+href="https://github.com/yukikotani231/sqlsift/issues">open an
+issue</a>; a schema and the query that broke it is all I need.</p>
+    </article>
+  </main>
+</body>
+</html>

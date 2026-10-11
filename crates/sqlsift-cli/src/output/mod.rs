@@ -134,7 +134,7 @@ impl OutputFormatter {
 }
 
 /// Resolve the 1-indexed (line, column) of a diagnostic, if it has a span
-fn location(diag: &Diagnostic, source: &str) -> Option<(usize, usize)> {
+pub fn location(diag: &Diagnostic, source: &str) -> Option<(usize, usize)> {
     let span = diag.span.as_ref()?;
     // Use line/column from span if available, otherwise compute from offset
     Some(if span.line > 0 {
@@ -146,7 +146,13 @@ fn location(diag: &Diagnostic, source: &str) -> Option<(usize, usize)> {
 
 /// JSON output: `{"files": [{"file": ..., "diagnostics": [...]}, ...]}`
 fn print_json(files: &[&FileDiagnostics]) {
-    let files: Vec<serde_json::Value> = files
+    let output = serde_json::json!({ "files": json_files(files) });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+/// The `files` array of the JSON output
+pub fn json_files(files: &[&FileDiagnostics]) -> Vec<serde_json::Value> {
+    files
         .iter()
         .map(|f| {
             let diagnostics: Vec<serde_json::Value> = f
@@ -168,9 +174,7 @@ fn print_json(files: &[&FileDiagnostics]) {
                 "diagnostics": diagnostics,
             })
         })
-        .collect();
-    let output = serde_json::json!({ "files": files });
-    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        .collect()
 }
 
 /// SARIF 2.1.0 output with a single run containing results for all files

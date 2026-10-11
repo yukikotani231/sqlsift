@@ -107,6 +107,84 @@ pub enum Command {
         write_baseline: bool,
     },
 
+    /// Show the queries a schema change breaks or fixes
+    ///
+    /// Builds the schema without and with the given migrations, checks the query
+    /// files against both and reports the diagnostics that differ. Migrations that
+    /// are among the schema files are left out of the "before" schema together
+    /// with the schema files after them; others are applied after all schema
+    /// files. Only query files that name a changed table or view are checked.
+    /// Exits 1 when the change introduces errors.
+    Impact {
+        /// Migration (schema) files whose effect is shown (supports glob patterns)
+        #[arg(required_unless_present = "base")]
+        migrations: Vec<PathBuf>,
+
+        /// Show the effect of the schema files added or changed since the commit
+        /// where the current branch left this git revision (e.g. `origin/main`),
+        /// uncommitted and untracked files included
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+
+        /// Also list the queries that use a changed table or view without a
+        /// diagnostic changing (where to look when reviewing the change)
+        #[arg(long)]
+        references: bool,
+
+        /// Query files to check (supports glob patterns) [default: `files` in sqlsift.toml]
+        #[arg(long = "queries", value_name = "PATTERN")]
+        queries: Vec<PathBuf>,
+
+        /// Schema definition files
+        #[arg(short, long = "schema", value_name = "FILE")]
+        schema: Vec<PathBuf>,
+
+        /// Directory containing schema files
+        #[arg(long = "schema-dir", value_name = "DIR")]
+        schema_dir: Option<PathBuf>,
+
+        /// Skip query files matching a glob pattern (repeatable)
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
+
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
+        #[arg(short, long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+
+        /// Turn rules or rule categories off
+        #[arg(
+            short = 'A',
+            long = "allow",
+            visible_alias = "disable",
+            value_name = "RULE"
+        )]
+        allow: Vec<String>,
+
+        /// Report rules or rule categories as warnings
+        #[arg(short = 'W', long = "warn", value_name = "RULE")]
+        warn: Vec<String>,
+
+        /// Report rules or rule categories as errors
+        #[arg(short = 'D', long = "deny", value_name = "RULE")]
+        deny: Vec<String>,
+
+        /// SQL dialect [default: postgresql]
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Query file templating: jinja, none
+        #[arg(long, value_name = "ENGINE")]
+        templating: Option<String>,
+
+        /// dbt catalog.json with the columns of models and sources (alpha)
+        #[arg(long = "dbt-catalog", value_name = "PATH")]
+        dbt_catalog: Option<PathBuf>,
+
+        /// Output format (SARIF and GitHub annotations show what the change breaks)
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
+    },
+
     /// Detect the project layout and write sqlsift.toml
     ///
     /// Finds the schema (sqlc configuration, Prisma / Supabase / Drizzle / Flyway /

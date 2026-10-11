@@ -34,6 +34,7 @@ use super::scope::{
 };
 use super::structure::Clause;
 use super::suspicious::InSubquery;
+use super::{Reference, ReferenceKind};
 
 /// Resolves names and checks types in SQL statements
 pub(super) struct Resolver<'a> {
@@ -68,6 +69,8 @@ pub(super) struct Resolver<'a> {
     pub(super) in_subquery: Option<InSubquery>,
     /// Whether a restriction rule (off by default) is enabled
     pub(super) restrictions: bool,
+    /// Uses of catalog tables, views and their columns, when they are recorded
+    pub(super) references: Option<Vec<Reference>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -87,6 +90,7 @@ impl<'a> Resolver<'a> {
             row_subqueries: Vec::new(),
             in_subquery: None,
             restrictions: false,
+            references: None,
         }
     }
 
@@ -109,6 +113,24 @@ impl<'a> Resolver<'a> {
     /// Consume the resolver and return collected diagnostics
     pub(super) fn into_diagnostics(self) -> Vec<Diagnostic> {
         self.diagnostics
+    }
+
+    /// Record a use of a catalog table or view (`source` of a relation), if
+    /// references are recorded
+    fn reference(
+        &mut self,
+        source: Option<&QualifiedName>,
+        kind: ReferenceKind,
+        span: Option<Span>,
+    ) {
+        if let (Some(references), Some(relation), Some(span)) = (&mut self.references, source, span)
+        {
+            references.push(Reference {
+                relation: relation.clone(),
+                kind,
+                span,
+            });
+        }
     }
 
     /// Resolve a statement. Returns its output columns (the result of a query, or
@@ -236,7 +258,16 @@ impl<'a> Resolver<'a> {
                 let owner = format!("table '{table_name}'");
                 self.diagnostics
                     .push(case_mismatch_diagnostic(col_ident, column, &owner));
-            } else if !table_def.column_exists(&col_ident.value) {
+            } else if table_def.column_exists(&col_ident.value) {
+                if self.references.is_some() {
+                    let source = self.catalog.resolve_relation(&table_name);
+                    self.reference(
+                        source.as_ref(),
+                        ReferenceKind::Column(col_ident.value.clone()),
+                        Some(Span::from_sqlparser(&col_ident.span)),
+                    );
+                }
+            } else {
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::ColumnNotFound,
                     format!(
@@ -380,6 +411,7 @@ impl<'a> Resolver<'a> {
 
         // ON CONFLICT / ON DUPLICATE KEY UPDATE and RETURNING see the target table
         let target = Relation::table(self.catalog, &table_name)?;
+        self.reference(target.source.as_ref(), ReferenceKind::Relation, table_span);
         let key = insert
             .table_alias
             .as_ref()
@@ -521,6 +553,14 @@ impl<'a> Resolver<'a> {
             return;
         }
         if table_def.column_exists(&col.value) {
+            if self.references.is_some() {
+                let source = self.catalog.resolve_relation(table_name);
+                self.reference(
+                    source.as_ref(),
+                    ReferenceKind::Column(col.value.clone()),
+                    Some(Span::from_sqlparser(&col.span)),
+                );
+            }
             return;
         }
         let mut diag = Diagnostic::error(
@@ -1330,6 +1370,15 @@ impl<'a> Resolver<'a> {
                     // into column/alias errors
                     Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 };
+                let name_span = name
+                    .0
+                    .last()
+                    .map(|id| Span::from_sqlparser(&id.ident().span));
+                self.reference(
+                    relation.source.clone().as_ref(),
+                    ReferenceKind::Relation,
+                    name_span,
+                );
                 if let Some(alias) = alias {
                     self.check_alias_count(
                         "Table",
@@ -1568,6 +1617,15 @@ impl<'a> Resolver<'a> {
                         f.qualified_relation(self.catalog, schema, table).is_some()
                     });
                     if in_scope {
+                        let source = self.scope.current_ref().and_then(|f| {
+                            f.qualified_relation(self.catalog, schema, table)
+                                .and_then(|r| r.source.clone())
+                        });
+                        self.reference(
+                            source.as_ref(),
+                            ReferenceKind::AllColumns,
+                            Some(*select_span),
+                        );
                         self.wildcard_options(Some((schema, table)), options);
                     } else if self.dialect.struct_field_paths() && self.bigquery_struct_star(&parts)
                     {
@@ -1579,6 +1637,18 @@ impl<'a> Resolver<'a> {
                 }
             }
             SelectItem::Wildcard(options) => {
+                if self.references.is_some() {
+                    let sources: Vec<QualifiedName> = self
+                        .scope
+                        .current_ref()
+                        .into_iter()
+                        .flat_map(|f| f.relations.values())
+                        .filter_map(|r| r.source.clone())
+                        .collect();
+                    for source in &sources {
+                        self.reference(Some(source), ReferenceKind::AllColumns, Some(*select_span));
+                    }
+                }
                 self.wildcard_options(None, options);
                 // * - valid if we have at least one table
                 if self
@@ -2069,6 +2139,7 @@ impl<'a> Resolver<'a> {
                     return;
                 }
                 ColumnMatch::Yes(_) => {
+                    let source = relation.source.clone();
                     if let Some(column) = relation.case_mismatched_column(column_ident) {
                         let owner = format!("{} '{}'", relation.kind_name(), relation.name);
                         self.diagnostics.push(case_mismatch_diagnostic(
@@ -2077,6 +2148,11 @@ impl<'a> Resolver<'a> {
                             &owner,
                         ));
                     }
+                    self.reference(
+                        source.as_ref(),
+                        ReferenceKind::Column(column_name.clone()),
+                        Some(column_span),
+                    );
                     return;
                 }
                 ColumnMatch::Maybe => return,
@@ -2107,6 +2183,17 @@ impl<'a> Resolver<'a> {
             ColumnLookup::Found(_) => {
                 if let Some(diag) = self.case_mismatch(column_ident) {
                     self.diagnostics.push(diag);
+                }
+                if self.references.is_some() {
+                    let source = self
+                        .scope
+                        .column_relation(column_name, self.dialect)
+                        .and_then(|r| r.source.clone());
+                    self.reference(
+                        source.as_ref(),
+                        ReferenceKind::Column(column_name.clone()),
+                        Some(column_span),
+                    );
                 }
             }
             ColumnLookup::Unknown => {}

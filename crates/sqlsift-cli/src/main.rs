@@ -3,6 +3,7 @@
 mod args;
 mod config;
 mod dbt;
+mod impact;
 mod init;
 mod output;
 
@@ -13,6 +14,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
+use sqlsift_core::analyzer::Reference;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
 use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
@@ -64,8 +66,12 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .init();
 }
 
-/// A query file's contents and what was found in it (its diagnostics for `check`)
-type AnalyzedFile<T = Vec<Diagnostic>> = Result<(String, T)>;
+/// A query file's contents, its diagnostics and the references of its queries
+/// (empty unless [`QueryOptions::references`])
+type AnalyzedFile = Result<(String, Vec<Diagnostic>, Vec<Reference>)>;
+
+/// A query file's contents and what was found in it
+type ProcessedFile<T> = Result<(String, T)>;
 
 /// The file argument that reads a query from stdin
 const STDIN_ARG: &str = "-";
@@ -89,6 +95,8 @@ struct QueryOptions<'a> {
     embedded_sql_tags: &'a [String],
     /// `--stdin-filename`, whose extension decides how stdin is analyzed
     stdin_filename: Option<&'a Path>,
+    /// Record the references of the queries to catalog tables and columns
+    references: bool,
 }
 
 /// Read and analyze each query file, in parallel across the available cores.
@@ -101,14 +109,18 @@ fn analyze_files(
     options: &QueryOptions,
 ) -> Vec<AnalyzedFile> {
     process_files(files, stdin, options, |analyzer, name, content| {
-        if is_component_file(name) {
+        let diagnostics = if is_component_file(name) {
             analyzer.analyze_embedded_component(content, options.embedded_sql_tags)
         } else if is_embedded_sql_file(name) {
             analyzer.analyze_embedded(content, options.embedded_sql_tags)
         } else {
             analyzer.analyze(content)
-        }
+        };
+        (diagnostics, analyzer.references().to_vec())
     })
+    .into_iter()
+    .map(|r| r.map(|(content, (diagnostics, references))| (content, diagnostics, references)))
+    .collect()
 }
 
 /// Read each query file and run `process` on it with an analyzer set up as
@@ -120,8 +132,8 @@ fn process_files<T: Send>(
     stdin: Option<&str>,
     options: &QueryOptions,
     process: impl Fn(&mut Analyzer, &Path, &str) -> T + Sync,
-) -> Vec<AnalyzedFile<T>> {
-    let analyze_one = |i: usize, path: &PathBuf| -> AnalyzedFile<T> {
+) -> Vec<ProcessedFile<T>> {
+    let analyze_one = |i: usize, path: &PathBuf| -> ProcessedFile<T> {
         tracing::debug!(file = %path.display(), "Analyzing SQL file");
         let (content, name) = match stdin {
             Some(stdin) if is_stdin(path) => (
@@ -133,6 +145,9 @@ fn process_files<T: Send>(
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
             .with_templating(options.templating[i]);
+        if options.references {
+            analyzer = analyzer.with_references();
+        }
         let result = process(&mut analyzer, name, &content);
         Ok((content, result))
     };
@@ -154,7 +169,7 @@ fn process_files<T: Send>(
 
     // Workers take the next unclaimed file until none are left
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut results: Vec<Option<AnalyzedFile<T>>> = (0..files.len()).map(|_| None).collect();
+    let mut results: Vec<Option<ProcessedFile<T>>> = (0..files.len()).map(|_| None).collect();
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
@@ -296,6 +311,22 @@ fn config_dialect(config: &Config) -> Result<SqlDialect> {
         Some(d) => d.parse().map_err(|e: String| miette::miette!(e)),
         None => Ok(SqlDialect::default()),
     }
+}
+
+/// The configured output format (human by default)
+fn output_format(config: &Config) -> Result<OutputFormat> {
+    Ok(match config.format.as_deref() {
+        None | Some("human") => OutputFormat::Human,
+        Some("json") => OutputFormat::Json,
+        Some("sarif") => OutputFormat::Sarif,
+        Some("github") => OutputFormat::Github,
+        Some(other) => {
+            return Err(miette::miette!(
+                "Invalid format '{}'. Supported formats: human, json, sarif, github.",
+                other
+            ))
+        }
+    })
 }
 
 /// Schema files from `schema` (glob patterns are expanded) followed by every
@@ -452,10 +483,12 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
 }
 
 /// Build the catalog from the schema files. Schema warnings are printed to
-/// stderr; a file with errors is returned with its diagnostics instead.
+/// stderr (unless `!warn`); a file with errors is returned with its diagnostics
+/// instead.
 fn build_catalog(
     schema_files: &[PathBuf],
     dialect: SqlDialect,
+    warn: bool,
 ) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
     let mut builder = SchemaBuilder::with_dialect(dialect);
     for schema_file in schema_files {
@@ -472,7 +505,7 @@ fn build_catalog(
     }
     let (catalog, schema_diags) = builder.build();
 
-    if !schema_diags.is_empty() {
+    if warn && !schema_diags.is_empty() {
         eprintln!(
             "Warning: Schema parsing produced {} warning(s):",
             schema_diags.len()
@@ -484,46 +517,25 @@ fn build_catalog(
     Ok(Ok(catalog))
 }
 
-/// The catalog queries are checked against: the schema files and dbt catalogs
-/// (`dbt_catalog`, or the dbt project's target/catalog.json; schema files are
-/// optional with one), and dbt relation variables. `Err` holds the schema file
-/// that failed to parse.
-fn query_catalog(
-    config: &Config,
-    dialect: SqlDialect,
-    templating: Templating,
-    dbt_projects: &mut dbt::DbtProjects,
-) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
-    let dbt_catalogs = dbt_catalog_files(config, templating, dbt_projects)?;
-    let schema_files = schema_files(config, !dbt_catalogs.is_empty())?;
-    let mut catalog = match build_catalog(&schema_files, dialect)? {
-        Ok(catalog) => catalog,
-        Err(failed) => return Ok(Err(failed)),
-    };
-    load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
-    load_dbt_vars(&mut catalog, config, templating, dbt_projects);
-    Ok(Ok(catalog))
-}
-
-/// Query files to analyze, after `ignore` and dbt project files are skipped
+/// The query files to analyze, and their templating (same order)
 struct QueryFiles {
     files: Vec<PathBuf>,
-    /// Templating of each file
     templating: Vec<Templating>,
-    /// Number of files found before skipping
-    found: usize,
-    /// The `ignore` patterns
-    ignore: IgnorePatterns,
+    /// Number of files skipped by `ignore` patterns or as dbt macros, packages
+    /// or build output
+    ignored: usize,
+    ignore_patterns: IgnorePatterns,
 }
 
-/// The query files of the configuration or command line (glob patterns are
-/// expanded), without ignored files, each with its templating. `-` is stdin,
-/// named `stdin_filename`.
+/// The query files of `config.files` (glob patterns are expanded), without
+/// ignored files, each with its templating. No files at all is an error, whose
+/// message ends with `files_hint` (how to give them).
 fn collect_query_files(
     config: &Config,
     templating: Templating,
     dbt_projects: &mut dbt::DbtProjects,
     stdin_filename: Option<&Path>,
+    files_hint: &str,
 ) -> Result<QueryFiles> {
     // Collect query files from config or CLI (glob patterns are expanded)
     let mut query_files = Vec::new();
@@ -551,9 +563,7 @@ fn collect_query_files(
         if !unmatched.is_empty() {
             miette::bail!("No files match {}", unmatched.join(", "));
         }
-        miette::bail!(
-            "No query files specified. Use positional arguments or configure in sqlsift.toml"
-        );
+        miette::bail!("No query files specified. {}", files_hint);
     }
     // A typo in one of several patterns shouldn't go unnoticed
     for pattern in &unmatched {
@@ -608,10 +618,10 @@ fn collect_query_files(
         true
     });
     Ok(QueryFiles {
+        ignored: found - query_files.len(),
         files: query_files,
         templating: file_templating,
-        found,
-        ignore: ignore_patterns,
+        ignore_patterns,
     })
 }
 
@@ -667,40 +677,35 @@ fn run(args: Args) -> Result<bool> {
             let templating = config.templating()?;
             tracing::info!(%templating, "Query file templating");
 
-            // Determine output format
-            let output_format = match config.format.as_deref() {
-                None | Some("human") => OutputFormat::Human,
-                Some("json") => OutputFormat::Json,
-                Some("sarif") => OutputFormat::Sarif,
-                Some("github") => OutputFormat::Github,
-                Some(other) => {
-                    return Err(miette::miette!(
-                        "Invalid format '{}'. Supported formats: human, json, sarif, github.",
-                        other
-                    ))
-                }
-            };
+            let output_format = output_format(&config)?;
 
-            let formatter = OutputFormatter::new(output_format);
+            // dbt catalogs (`dbt_catalog`, or the dbt project's target/catalog.json):
+            // schema files are optional with one
             let mut dbt_projects = dbt::DbtProjects::default();
-            let catalog = match query_catalog(&config, dialect, templating, &mut dbt_projects)? {
+            let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
+            let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
+            let formatter = OutputFormatter::new(output_format);
+            let mut catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     formatter.print(&[failed]);
                     return Ok(true);
                 }
             };
+            load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
+            load_dbt_vars(&mut catalog, &config, templating, &mut dbt_projects);
 
             let QueryFiles {
                 files: query_files,
                 templating: file_templating,
-                found,
-                ignore: ignore_patterns,
+                ignored: ignored_count,
+                ignore_patterns,
             } = collect_query_files(
                 &config,
                 templating,
                 &mut dbt_projects,
                 stdin_filename.as_deref(),
+                "Use positional arguments or configure in sqlsift.toml",
             )?;
 
             // The query read from stdin (`-`)
@@ -754,7 +759,6 @@ fn run(args: Args) -> Result<bool> {
                 baseline::file_key(Path::new(&name), &baseline_dir)
             };
 
-            let ignored_count = found - query_files.len();
             if query_files.is_empty() {
                 if !quiet {
                     eprintln!("No files to check ({ignored_count} ignored)");
@@ -773,6 +777,7 @@ fn run(args: Args) -> Result<bool> {
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
                 stdin_filename: stdin_filename.as_deref(),
+                references: false,
             };
             let analyzed = analyze_files(&query_files, stdin.as_deref(), &options);
 
@@ -796,7 +801,7 @@ fn run(args: Args) -> Result<bool> {
                 let mut baseline = Baseline::default();
                 let mut checked_keys = HashSet::new();
                 for (query_file, analyzed) in query_files.iter().zip(analyzed) {
-                    let (content, diagnostics) = analyzed?;
+                    let (content, diagnostics, _) = analyzed?;
                     let key = file_key(query_file);
                     baseline.add_file(&key, &baseline_sql(query_file, &content), &diagnostics);
                     checked_keys.insert(key);
@@ -878,7 +883,7 @@ fn run(args: Args) -> Result<bool> {
                     break;
                 }
 
-                let (content, diagnostics) = analyzed?;
+                let (content, diagnostics, _) = analyzed?;
                 files_checked += 1;
 
                 let diagnostics = match &baseline_filter {
@@ -988,6 +993,52 @@ fn run(args: Args) -> Result<bool> {
             Ok(total_errors > 0 || too_many_warnings.is_some())
         }
 
+        Command::Impact {
+            migrations,
+            base,
+            references,
+            queries,
+            schema,
+            schema_dir,
+            ignore,
+            config: config_path,
+            allow,
+            warn,
+            deny,
+            dialect,
+            templating,
+            dbt_catalog,
+            format,
+        } => {
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                schema_dir.as_deref(),
+                &queries,
+                &ignore,
+                format,
+                dialect.as_deref(),
+                templating.as_deref(),
+                dbt_catalog.as_deref(),
+                None,
+                None,
+            );
+            let rules = config.rule_config(&RuleFlags {
+                allow: &allow,
+                warn: &warn,
+                deny: &deny,
+            })?;
+            impact::run(
+                &config,
+                &impact::ImpactOptions {
+                    migrations: &migrations,
+                    base: base.as_deref(),
+                    rules: &rules,
+                    quiet,
+                    references,
+                },
+            )
+        }
+
         Command::Init {
             dir,
             force,
@@ -1032,7 +1083,7 @@ fn run(args: Args) -> Result<bool> {
             let dialect = config_dialect(&config)?;
             let schema_files = schema_files(&config, false)?;
 
-            let catalog = match build_catalog(&schema_files, dialect)? {
+            let catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     let output_format = match format {
@@ -1086,18 +1137,29 @@ fn run(args: Args) -> Result<bool> {
             let templating = config.templating()?;
 
             let mut dbt_projects = dbt::DbtProjects::default();
-            let catalog = match query_catalog(&config, dialect, templating, &mut dbt_projects)? {
+            let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
+            let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
+            let mut catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     OutputFormatter::new(OutputFormat::Human).print(&[failed]);
                     return Ok(true);
                 }
             };
+            load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
+            load_dbt_vars(&mut catalog, &config, templating, &mut dbt_projects);
+
             let QueryFiles {
                 files: query_files,
                 templating: file_templating,
                 ..
-            } = collect_query_files(&config, templating, &mut dbt_projects, None)?;
+            } = collect_query_files(
+                &config,
+                templating,
+                &mut dbt_projects,
+                None,
+                "Use positional arguments or configure in sqlsift.toml",
+            )?;
             if query_files.iter().any(|p| is_stdin(p)) {
                 miette::bail!("describe doesn't read queries from stdin ('-')");
             }
@@ -1110,6 +1172,7 @@ fn run(args: Args) -> Result<bool> {
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
                 stdin_filename: None,
+                references: false,
             };
             let described =
                 process_files(&query_files, None, &options, |analyzer, name, content| {
