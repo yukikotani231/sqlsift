@@ -56,6 +56,11 @@ pub enum SqlType {
     // Array
     Array(Box<SqlType>),
 
+    /// Semi-structured or spatial type whose values sqlsift doesn't model
+    /// (Snowflake `VARIANT`, `OBJECT`, untyped `ARRAY`, `GEOGRAPHY`, `GEOMETRY`).
+    /// Expressions of this type are never type checked. Holds the lowercase type name.
+    SemiStructured(String),
+
     // Inline ENUM type with its allowed values (MySQL `ENUM('a', 'b')`)
     Enum(Vec<String>),
 
@@ -171,23 +176,47 @@ impl SqlType {
                 sqlparser::ast::ArrayElemTypeDef::Parenthesis(dt) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
+                // A bare `ARRAY` is Snowflake's semi-structured array
                 sqlparser::ast::ArrayElemTypeDef::None => {
-                    SqlType::Array(Box::new(SqlType::Unknown))
+                    SqlType::SemiStructured("array".to_string())
                 }
             },
 
-            DataType::Custom(name, _) => {
+            DataType::Custom(name, modifiers) => {
                 let type_name = name
                     .0
                     .iter()
                     .map(|i| i.value.clone())
                     .collect::<Vec<_>>()
                     .join(".");
-                // Handle common PostgreSQL type aliases
-                match type_name.to_lowercase().as_str() {
+                let modifier = |i: usize| -> Option<u64> {
+                    modifiers.get(i).and_then(|m| m.trim().parse().ok())
+                };
+                let lower = type_name.to_lowercase();
+                match lower.as_str() {
+                    // PostgreSQL serial types
                     "serial" | "serial4" => SqlType::Integer,
                     "bigserial" | "serial8" => SqlType::BigInt,
                     "smallserial" | "serial2" => SqlType::SmallInt,
+                    // Snowflake (and Oracle) NUMBER(p, s)
+                    "number" => SqlType::Decimal {
+                        precision: modifier(0),
+                        scale: modifier(1),
+                    },
+                    "byteint" => SqlType::TinyInt,
+                    // Snowflake timestamps: no time zone, local time zone, time zone
+                    "timestamp_ntz" => SqlType::Timestamp {
+                        precision: modifier(0),
+                        with_timezone: false,
+                    },
+                    "timestamp_ltz" | "timestamp_tz" => SqlType::Timestamp {
+                        precision: modifier(0),
+                        with_timezone: true,
+                    },
+                    // Snowflake semi-structured and spatial types
+                    "variant" | "object" | "geography" | "geometry" => {
+                        SqlType::SemiStructured(lower)
+                    }
                     _ => SqlType::Custom(type_name),
                 }
             }
@@ -237,6 +266,9 @@ impl SqlType {
 
             // String to UUID coercion (PostgreSQL implicit cast)
             (Char { .. } | Varchar { .. } | Text, Uuid) => TypeCompatibility::ImplicitCast,
+
+            // Semi-structured values (VARIANT, ...) hold values of any type
+            (SemiStructured(_), _) | (_, SemiStructured(_)) => TypeCompatibility::ImplicitCast,
 
             // Inline ENUMs compare with strings (their values) and, in MySQL, with
             // numbers (their index); literal values are checked separately
@@ -288,6 +320,14 @@ impl SqlType {
                 | SqlType::Real
                 | SqlType::DoublePrecision
                 | SqlType::Decimal { .. }
+        )
+    }
+
+    /// Check whether this is a character string type
+    pub fn is_string(&self) -> bool {
+        matches!(
+            self,
+            SqlType::Char { .. } | SqlType::Varchar { .. } | SqlType::Text
         )
     }
 
@@ -393,7 +433,7 @@ impl SqlType {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            SqlType::Custom(name) => name.clone(),
+            SqlType::SemiStructured(name) | SqlType::Custom(name) => name.clone(),
             SqlType::Unknown => "unknown".to_string(),
         }
     }

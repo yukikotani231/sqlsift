@@ -29,11 +29,12 @@ pub(super) enum ExpressionType {
 }
 
 impl ExpressionType {
-    /// Expression type of a column with the given declared type. Columns whose type
-    /// sqlsift doesn't model (typeless SQLite columns, unsupported types) are unknown.
+    /// Expression type of a column (or cast) with the given declared type. Columns
+    /// whose type sqlsift doesn't model (typeless SQLite columns, unsupported types,
+    /// semi-structured types such as Snowflake's VARIANT) are unknown.
     pub(super) fn of_column(data_type: &SqlType) -> Self {
         match data_type {
-            SqlType::Unknown => ExpressionType::Unknown,
+            SqlType::Unknown | SqlType::SemiStructured(_) => ExpressionType::Unknown,
             t => ExpressionType::Known(t.clone()),
         }
     }
