@@ -116,7 +116,7 @@ fn test_parse_error() {
     let mut analyzer = Analyzer::new(&catalog);
 
     // Invalid SQL syntax
-    let diagnostics = analyzer.analyze("SELECT FROM WHERE");
+    let diagnostics = analyzer.analyze("SELECT 1 1 FROM t");
     assert!(!diagnostics.is_empty());
     assert_eq!(diagnostics[0].kind, DiagnosticKind::ParseError);
 }
@@ -2196,7 +2196,7 @@ fn test_disable_file_without_rules_suppresses_everything() {
     let sql = "-- sqlsift:disable-file\n\
                SELECT bad_col FROM users;\n\
                SELECT * FROM missing_table;\n\
-               SELECT FROM WHERE;";
+               SELECT 1 1 FROM t;";
     let diagnostics = analyzer.analyze(sql);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }

@@ -1070,7 +1070,7 @@ fn missing_required_column_can_be_disabled_inline() {
 
 #[test]
 fn spans_stay_absolute_for_statements_on_the_same_line_as_a_syntax_error() {
-    let sql = "SELECT naem FROM users; SELECT FROM WHERE; SELECT emial FROM users;\nSELECT nme FROM users;";
+    let sql = "SELECT naem FROM users; SELECT 1 1 FROM t; SELECT emial FROM users;\nSELECT nme FROM users;";
     let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
     assert_eq!(
         kinds(&diagnostics),
@@ -1087,7 +1087,7 @@ fn spans_stay_absolute_for_statements_on_the_same_line_as_a_syntax_error() {
     // same location as when the whole input is parsed at once
     assert_eq!(
         (parse_error.line, parse_error.column),
-        (1, 37),
+        (1, 34),
         "{diagnostics:#?}"
     );
     assert_eq!(span_text(sql, &diagnostics[2]), "emial");
@@ -1101,7 +1101,7 @@ fn large_input_with_a_syntax_error_is_analyzed_in_linear_time() {
     for i in 0..3000 {
         let _ = writeln!(sql, "SELECT id, name FROM users WHERE id = {i};");
     }
-    sql.push_str("SELECT FROM WHERE;\n");
+    sql.push_str("SELECT 1 1 FROM t;\n");
     let catalog = catalog(PG_SCHEMA, SqlDialect::PostgreSQL);
     let started = std::time::Instant::now();
     let diagnostics = Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL).analyze(&sql);
@@ -1136,7 +1136,7 @@ fn span_offsets_point_at_the_reported_location() {
 #[test]
 fn span_offsets_are_set_when_statements_are_parsed_one_by_one() {
     // The syntax error makes the analyzer parse each statement separately
-    let sql = "SELECT naem FROM users;\nSELECT FROM WHERE;\nSELECT 'ä', emial FROM users;\n";
+    let sql = "SELECT naem FROM users;\nSELECT 1 1 FROM t;\nSELECT 'ä', emial FROM users;\n";
     let diagnostics = analyze(PG_SCHEMA, SqlDialect::PostgreSQL, sql);
     assert_eq!(
         kinds(&diagnostics),
@@ -1149,11 +1149,44 @@ fn span_offsets_are_set_when_statements_are_parsed_one_by_one() {
     );
     assert_eq!(offset_text(sql, &diagnostics[0]), "naem");
     let parse_error = diagnostics[1].span.unwrap();
-    let second = sql.find("SELECT FROM").unwrap();
+    let second = sql.find("SELECT 1 1").unwrap();
     let third = sql.find("SELECT 'ä'").unwrap();
     assert!(
         (second..third).contains(&parse_error.offset),
         "{parse_error:?}"
     );
     assert_eq!(offset_text(sql, &diagnostics[2]), "emial");
+}
+
+#[test]
+fn order_by_bare_name_of_one_output_column_is_not_ambiguous() {
+    let schema = "CREATE TABLE a (id INT, x INT); CREATE TABLE b (id INT, y INT);";
+    for dialect in [
+        SqlDialect::PostgreSQL,
+        SqlDialect::MySQL,
+        SqlDialect::Redshift,
+    ] {
+        assert_valid(
+            schema,
+            dialect,
+            "SELECT a.id FROM a JOIN b ON a.id = b.id ORDER BY id",
+        );
+        assert_valid(
+            schema,
+            dialect,
+            "SELECT a.x AS id FROM a JOIN b ON a.id = b.id ORDER BY id DESC",
+        );
+        // Two output columns of that name, an expression, or no output column
+        for sql in [
+            "SELECT a.id, b.id FROM a JOIN b ON a.x = b.y ORDER BY id",
+            "SELECT a.id FROM a JOIN b ON a.id = b.id ORDER BY id + 1",
+            "SELECT a.x FROM a JOIN b ON a.id = b.id ORDER BY id",
+        ] {
+            assert_eq!(
+                kinds(&analyze(schema, dialect, sql)),
+                vec![DiagnosticKind::AmbiguousColumn],
+                "{sql}"
+            );
+        }
+    }
 }

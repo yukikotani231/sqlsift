@@ -2109,14 +2109,14 @@ fn e0007_operand_order_reflected_in_message() {
 #[test]
 fn e1000_parse_error_message_contains_location() {
     let c = diag_catalog();
-    let d = single(&c, "SELECT FROM WHERE");
+    let d = single(&c, "SELECT 1 1 FROM t");
     assert_eq!(d.code(), "E1000");
     assert_eq!(d.kind, DiagnosticKind::ParseError);
     assert!(d.message.starts_with("Parse error: "), "{}", d.message);
     assert!(!d.message.contains("sql parser error"), "{}", d.message);
     // The parser location is the diagnostic's span rather than part of the message
     let span = d.span.unwrap();
-    assert_eq!((span.line, span.column), (1, 13));
+    assert_eq!((span.line, span.column), (1, 10));
 }
 
 #[test]
@@ -2125,11 +2125,11 @@ fn e1000_parse_error_in_one_statement_does_not_hide_other_diagnostics() {
     let c = diag_catalog();
     let diags = analyze(
         &c,
-        "SELECT naem FROM users;\nSELECT FROM WHERE;\nSELECT id FROM userz;",
+        "SELECT naem FROM users;\nSELECT 1 1 FROM t;\nSELECT id FROM userz;",
     );
     assert_eq!(codes(&diags), vec!["E0002", "E1000", "E0001"], "{diags:?}");
     let span = diags[1].span.unwrap();
-    assert_eq!((span.line, span.column), (2, 13));
+    assert_eq!((span.line, span.column), (2, 10));
 }
 
 #[test]

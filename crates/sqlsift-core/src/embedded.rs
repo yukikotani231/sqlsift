@@ -31,8 +31,8 @@
 //!   name is expected (after FROM, JOIN, INTO, UPDATE, TABLE); name diagnostics
 //!   reported on such an identifier are dropped, as for psql's `:"var"`.
 //! - postgres.js helpers are rows and assignments of unknown columns:
-//!   `INSERT INTO t ${sql(row)}` becomes `INSERT INTO t SELECT*FROM <identifier>`,
-//!   `VALUES ${sql(rows)}` becomes `SELECT *FROM <identifier>`, and
+//!   `INSERT INTO t ${sql(row)}` becomes `INSERT INTO t (SELECT*)`,
+//!   `VALUES ${sql(rows)}` becomes `TABLE  _.<identifier>`, and
 //!   `SET ${sql(patch)}` becomes `SET <identifier>=$1`.
 //! - `${expr}` after a value or a name (`WHERE a = 1 ${filter}`,
 //!   `FROM users ${where}`) is a query fragment between clauses, and is dropped.
@@ -892,8 +892,8 @@ fn placeholder(
         write(out, name_end, &format!("={parameter}"));
         return Interpolation::Identifier((start, name_end));
     }
-    // Rows of unknown columns are `TABLE <schema>.<name>` (sqlparser 0.53 reads a
-    // `TABLE` query as three tokens, so the name is qualified)
+    // Rows of unknown columns are `TABLE <schema>.<name>` (sqlparser reads a `TABLE`
+    // query as three tokens, so the name is qualified)
     if word.eq_ignore_ascii_case("values") && width >= "_.x".len() {
         // `VALUES ${sql(rows)}`: `TABLE  _.<identifier>`
         write(out, word_start, "TABLE ");
@@ -904,11 +904,14 @@ fn placeholder(
         && width >= "TABLE _.x".len()
         && follows_insert_into(out, word_end)
     {
-        // `INSERT INTO users ${sql(user)}`: `INSERT INTO users TABLE _.<identifier>`
-        write(out, start, "TABLE ");
-        let name_start = start + "TABLE ".len();
-        write_qualified_identifier(chars, out, name_start, first_line_end);
-        return Interpolation::Identifier((name_start, first_line_end));
+        // `INSERT INTO users ${sql(user)}`: `INSERT INTO users (SELECT*)`, rows of
+        // unknown columns (sqlparser reads a `TABLE` right after the table name as
+        // its alias, and an unparenthesized `SELECT*` takes a following `ON` as a
+        // column alias). The `SELECT*` is the rewrite's, not the query's:
+        // diagnostics on it are dropped as on an identifier.
+        out[start..first_line_end].fill(' ');
+        write(out, start, "(SELECT*)");
+        return Interpolation::Identifier((start, first_line_end));
     }
 
     // After a value or a name, an interpolation is a fragment between clauses
@@ -1146,14 +1149,14 @@ mod tests {
         );
         assert_eq!(
             extracted.text,
-            "   ;INSERT INTO users TABLE _._r___a___; \n\
+            "   ;INSERT INTO users (SELECT*)        ; \n\
              \x20  ;INSERT INTO t (a) TABLE  _._ql_rows__; \n\
              \x20  ;UPDATE t SET __sql_patc=$1 WHERE id = $1   ; \n\
-             \x20  ;INSERT INTO \"t\" TABLE _._; "
+             \x20  ;INSERT INTO \"t\" (SELECT*); "
         );
         assert_eq!(
             extracted.identifiers,
-            vec![(1, 29, 40), (2, 30, 42), (3, 18, 28), (4, 27, 30)]
+            vec![(1, 23, 40), (2, 30, 42), (3, 18, 28), (4, 21, 30)]
         );
     }
 

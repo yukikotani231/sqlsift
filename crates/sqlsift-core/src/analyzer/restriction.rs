@@ -11,6 +11,7 @@ use sqlparser::ast::{
     TableWithJoins,
 };
 
+use crate::ast_ext::{insert_table, name_last, ObjectNamePartExt};
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 
 use super::resolver::Resolver;
@@ -18,12 +19,8 @@ use super::resolver::Resolver;
 impl Resolver<'_> {
     pub(super) fn check_restrictions(&mut self, stmt: &Statement) {
         match stmt {
-            Statement::Update {
-                table,
-                selection: None,
-                ..
-            } => {
-                let span = table_span(std::slice::from_ref(table));
+            Statement::Update(update) if update.selection.is_none() => {
+                let span = table_span(std::slice::from_ref(&update.table));
                 self.push_restriction(
                     DiagnosticKind::UnfilteredWrite,
                     "UPDATE without WHERE changes every row of the table",
@@ -42,10 +39,8 @@ impl Resolver<'_> {
             Statement::Insert(insert) => {
                 if let (true, Some(source)) = (insert.columns.is_empty(), &insert.source) {
                     // `INSERT INTO t DEFAULT VALUES` has no source
-                    let span = insert
-                        .table_name
-                        .0
-                        .last()
+                    let span = insert_table(insert)
+                        .and_then(name_last)
                         .map(|i| Span::from_sqlparser(&i.span));
                     self.push_restriction(
                         DiagnosticKind::InsertWithoutColumns,
@@ -115,7 +110,7 @@ fn table_span(tables: &[TableWithJoins]) -> Option<Span> {
 }
 
 fn name_span(name: &ObjectName) -> Option<Span> {
-    name.0.last().map(|i| Span::from_sqlparser(&i.span))
+    name.0.last().map(|i| Span::from_sqlparser(&i.ident().span))
 }
 
 fn delete_span(delete: &Delete) -> Option<Span> {

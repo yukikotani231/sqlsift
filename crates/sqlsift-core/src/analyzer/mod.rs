@@ -278,7 +278,11 @@ impl<'a> Analyzer<'a> {
 
         // Parse the SQL
         let lines = LineIndex::new(text);
-        let (statements, mut skipped) = self.parse_statements(text, &lines);
+        let (mut statements, mut skipped) = self.parse_statements(text, &lines);
+        // MySQL's INSERT ... SET, checked as INSERT ... VALUES
+        for (statement, _) in &mut statements {
+            mysql::insert_set_as_values(statement);
+        }
         // Applied in source order, before the statements that follow them
         skipped.reverse();
 
@@ -419,12 +423,14 @@ impl<'a> Analyzer<'a> {
                 };
                 // A table or column name interpolated by psql (`FROM :"tbl"`), a
                 // template (`FROM {{ ref('tbl') }}`) or a template literal
-                // (`FROM ${tbl}`) is unknown
+                // (`FROM ${tbl}`) is unknown; the `SELECT*` a template literal
+                // became is not the query's
                 let substituted = matches!(
                     d.kind,
                     DiagnosticKind::TableNotFound
                         | DiagnosticKind::ColumnNotFound
                         | DiagnosticKind::AmbiguousColumn
+                        | DiagnosticKind::SelectStar
                 ) && (source.is_substituted(span.line, span.column)
                     || template.masked.is_substituted(span.line, span.column)
                     || psql::is_within(substituted, span.line, span.column)
@@ -490,15 +496,7 @@ impl<'a> Analyzer<'a> {
             let (line, column) = lines.line_column(range.start);
             let origin = Origin { line, column };
             let text = &sql[range.clone()];
-            let parsed = Parser::parse_sql(dialect.as_ref(), text).or_else(|error| {
-                // MySQL's INSERT ... SET, which sqlparser doesn't support
-                match self.dialect {
-                    SqlDialect::MySQL => mysql::parse_insert_set(dialect.as_ref(), text)
-                        .map_or(Err(error), |parsed| parsed.map(|s| vec![s])),
-                    _ => Err(error),
-                }
-            });
-            let error = match parsed {
+            let error = match Parser::parse_sql(dialect.as_ref(), text) {
                 Ok(parsed) => {
                     statements.extend(parsed.into_iter().map(|s| (s, origin)));
                     continue;

@@ -150,14 +150,16 @@ pub(super) fn mask_table_attributes(
                             _ => None,
                         }
                     }
-                    // MAP<K, V> / STRUCT<a: T, ...> column types: the type arguments
-                    Some("MAP" | "STRUCT")
+                    // STRUCT<a: T, ...> column types: the type arguments. sqlparser
+                    // parses MAP<K, V> (a bare MAP doesn't), so it is kept whole
+                    Some(kw @ ("MAP" | "STRUCT"))
                         if n < columns_end && sig.get(next) == Some(&&Token::Lt) =>
                     {
                         let close = matching_angle(tokens, significant, next, offset);
-                        if let (Some(start), Some(stop)) = (
+                        if let (Some(start), Some(stop), "STRUCT") = (
                             offset(&tokens[significant[next]]),
                             close.as_ref().map(|c| c.1),
+                            kw,
                         ) {
                             edits.push(Edit {
                                 range: start..stop + 1,

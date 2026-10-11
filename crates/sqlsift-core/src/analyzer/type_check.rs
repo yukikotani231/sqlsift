@@ -15,9 +15,10 @@
 
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Insert, SetExpr, Spanned, Value,
+    Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan,
 };
 
+use crate::ast_ext::{column_ident, insert_table, name_last, ObjectNamePartExt};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 #[cfg(test)]
@@ -373,13 +374,17 @@ impl Resolver<'_> {
         &mut self,
         insert: &Insert,
         table_def: &TableDef,
-        rows: &[Vec<Expr>],
+        rows: &[Parens<Vec<Expr>>],
     ) {
         // Without a column list, values are positional over all table columns
         let target_columns: Vec<&str> = if insert.columns.is_empty() {
             self.positional_columns(table_def)
         } else {
-            insert.columns.iter().map(|c| c.value.as_str()).collect()
+            insert
+                .columns
+                .iter()
+                .map(|c| column_ident(c).value.as_str())
+                .collect()
         };
 
         for row in rows {
@@ -403,7 +408,13 @@ impl Resolver<'_> {
                 if !col_def.nullable
                     && !generates_key
                     && !table_def.before_insert_trigger
-                    && matches!(value_expr, Expr::Value(Value::Null))
+                    && matches!(
+                        value_expr,
+                        Expr::Value(ValueWithSpan {
+                            value: Value::Null,
+                            ..
+                        })
+                    )
                 {
                     // NULL literals carry no source location: point at the
                     // target column, or the table name without a column list
@@ -411,8 +422,8 @@ impl Resolver<'_> {
                         &insert
                             .columns
                             .get(i)
-                            .map(|c| c.span)
-                            .or_else(|| insert.table_name.0.last().map(|t| t.span))
+                            .map(|c| column_ident(c).span)
+                            .or_else(|| insert_table(insert).and_then(name_last).map(|t| t.span))
                             .unwrap_or_else(|| value_expr.span()),
                     );
                     self.diagnostics.push(not_null_violation(col_name, span));
@@ -421,7 +432,10 @@ impl Resolver<'_> {
 
                 let value_type = self.infer_expr_type(value_expr);
                 let column_type = ExpressionType::of_column(&col_def.data_type);
-                let column_span = insert.columns.get(i).map(|c| Span::from_sqlparser(&c.span));
+                let column_span = insert
+                    .columns
+                    .get(i)
+                    .map(|c| Span::from_sqlparser(&column_ident(c).span));
                 let column = format!("{}.{}", table_def.name, col_def.name);
                 if self.report_enum_literal(&column_type, &value_type, Some(column), column_span) {
                     continue;
@@ -434,10 +448,8 @@ impl Resolver<'_> {
                     continue;
                 }
                 let fallback = column_span.or_else(|| {
-                    insert
-                        .table_name
-                        .0
-                        .last()
+                    insert_table(insert)
+                        .and_then(name_last)
                         .map(|t| Span::from_sqlparser(&t.span))
                 });
                 self.check_value_range(&table_def.name, col_def, value_expr, fallback);
@@ -458,18 +470,24 @@ impl Resolver<'_> {
             let Some(target) = name.0.last() else {
                 continue;
             };
-            let Some(col_def) = table_def.get_column(&target.value) else {
+            let Some(col_def) = table_def.get_column(&target.ident().value) else {
                 continue; // Column not found - already reported
             };
-            let target_span = Span::from_sqlparser(&target.span);
+            let target_span = Span::from_sqlparser(&target.ident().span);
 
             if !col_def.nullable
                 && !table_def.before_update_trigger
-                && matches!(&assignment.value, Expr::Value(Value::Null))
+                && matches!(
+                    &assignment.value,
+                    Expr::Value(ValueWithSpan {
+                        value: Value::Null,
+                        ..
+                    })
+                )
             {
                 // NULL literals carry no source location: point at the target column
                 self.diagnostics
-                    .push(not_null_violation(&target.value, target_span));
+                    .push(not_null_violation(&target.ident().value, target_span));
                 continue;
             }
 
@@ -481,7 +499,7 @@ impl Resolver<'_> {
                 continue;
             }
             if let Some((expected, actual)) = self.type_conflict(&column_type, &value_type) {
-                let mut diag = assignment_mismatch(&target.value, &expected, &actual);
+                let mut diag = assignment_mismatch(&target.ident().value, &expected, &actual);
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
                 self.diagnostics.push(diag);
@@ -503,7 +521,7 @@ impl Resolver<'_> {
     /// Infer the type of an expression in the current scope
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> ExpressionType {
         match expr {
-            Expr::Value(value) => infer_literal_type(value),
+            Expr::Value(value) => infer_literal_type(&value.value),
             Expr::Identifier(ident) => match self.scope.column(&ident.value, self.dialect) {
                 ColumnLookup::Found(ty) => ty.clone(),
                 _ => ExpressionType::Unknown,
@@ -529,16 +547,20 @@ impl Resolver<'_> {
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
             Expr::Case {
-                results,
+                conditions,
                 else_result,
                 ..
             } => {
-                let branches: Vec<&Expr> = results.iter().chain(else_result.as_deref()).collect();
+                let branches: Vec<&Expr> = conditions
+                    .iter()
+                    .map(|c| &c.result)
+                    .chain(else_result.as_deref())
+                    .collect();
                 self.infer_case_type(&branches)
             }
             // Typed literals such as DATE '2024-01-01'
-            Expr::TypedString { data_type, .. } => {
-                ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
+            Expr::TypedString(typed) => {
+                ExpressionType::of_column(&SqlType::from_ast_in(&typed.data_type, self.dialect))
             }
             // Scalar subquery: the type of its single column
             Expr::Subquery(query) => match self
@@ -931,9 +953,14 @@ fn assignment_mismatch(column: &str, expected: &str, actual: &str) -> Diagnostic
     .with_help("Value type is not compatible with the column type. Consider using explicit CAST.")
 }
 
-/// Source span of an expression, or `None` if the parser recorded no location
-/// (sqlparser 0.53 doesn't track spans of literal values)
+/// Source span of an expression, or `None` if the parser recorded no location.
+/// A literal value counts as unlocated, so that its diagnostics point at the
+/// column it is compared with or assigned to (as before sqlparser tracked the
+/// spans of literals).
 pub(super) fn located_span(expr: &Expr) -> Option<Span> {
+    if matches!(expr, Expr::Value(_)) {
+        return None;
+    }
     let span = expr.span();
     (span.start.line > 0).then(|| Span::from_sqlparser(&span))
 }

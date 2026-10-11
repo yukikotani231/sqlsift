@@ -1294,7 +1294,7 @@ fn multiple_errors_reported() {
 fn parse_error_reported() {
     let catalog = catalog();
     for sql in [
-        "SELECT FROM WHERE",
+        "SELECT 1 1 FROM t",
         "SELEC id FROM users",
         "SELECT id FROM users WHERE (",
     ] {

@@ -642,4 +642,11 @@ fn syntax_sqlparser_does_not_parse_is_rewritten() {
     );
     // Strings and comments are left alone
     assert_clean("SELECT 'f(x).* << ARRAY<STRING>[]' AS s -- f(x).y\nFROM analytics.orders");
+    // A field name starting with `_` after a subscript or call, and a column after it
+    // keeps its location
+    let found = assert_reports(
+        "SELECT items[0]._sku, f(status)._v, nope FROM analytics.orders",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+    assert_eq!(found[0].span.expect("span").column, 37);
 }

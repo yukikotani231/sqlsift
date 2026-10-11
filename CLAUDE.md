@@ -139,7 +139,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 ## Dependencies
 
-- **sqlparser** (0.53): SQL parsing (PostgreSQL, MySQL, SQLite; Snowflake, BigQuery, Redshift, Databricks in alpha)
+- **sqlparser** (0.63): SQL parsing (PostgreSQL, MySQL, SQLite; Snowflake, BigQuery, Redshift, Databricks in alpha)
 - **clap** (4.5): CLI argument parsing with derive macros
 - **miette** (7.4): Diagnostic rendering with fancy formatting
 - **thiserror** (2.0): Error type derivation

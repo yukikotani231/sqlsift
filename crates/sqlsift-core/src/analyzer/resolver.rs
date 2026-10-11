@@ -6,18 +6,24 @@
 //! them. The type checks themselves live in `type_check.rs`.
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem, Expr,
-    FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert, JoinConstraint,
-    JoinOperator, NamedWindowDefinition, NamedWindowExpr, ObjectName, OnConflictAction, OnInsert,
-    Query, RenameSelectItem, Select, SelectItem, SetExpr, Statement, Subscript, TableAlias,
-    TableFactor, TableWithJoins, Values, WildcardAdditionalOptions,
+    AccessExpr, Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem,
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert,
+    JoinConstraint, JoinOperator, NamedWindowDefinition, NamedWindowExpr, ObjectName,
+    ObjectNamePart, OnConflictAction, OnInsert, Query, RenameSelectItem, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias, TableFactor,
+    TableWithJoins, UpdateTableFromKind, ValueWithSpan, Values, WildcardAdditionalOptions,
 };
 use std::collections::HashMap;
 
+use crate::ast_ext::{
+    column_ident, insert_table, name_last, order_by_exprs, query_limit, query_offset,
+    ObjectNamePartExt,
+};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{
-    split_dotted_idents, Catalog, ColumnDef, FormerColumn, QualifiedName, SourceLocation, TableDef,
+    split_dotted_idents, split_name, Catalog, ColumnDef, FormerColumn, QualifiedName,
+    SourceLocation, TableDef,
 };
 use crate::suggest::{find_most_similar, find_similar_name};
 use crate::types::SqlType;
@@ -119,17 +125,21 @@ impl<'a> Resolver<'a> {
                 self.scope.pop();
                 columns
             }
-            Statement::Update {
-                table,
-                assignments,
-                from,
-                selection,
-                returning,
-                ..
-            } => {
+            Statement::Update(update) => {
                 self.scope.push(false);
-                self.update(table, assignments, from.as_ref(), selection.as_ref());
-                let columns = self.returning(returning.as_deref());
+                let from = match &update.from {
+                    Some(
+                        UpdateTableFromKind::BeforeSet(from) | UpdateTableFromKind::AfterSet(from),
+                    ) => from.as_slice(),
+                    None => &[],
+                };
+                self.update(
+                    &update.table,
+                    &update.assignments,
+                    from,
+                    update.selection.as_ref(),
+                );
+                let columns = self.returning(update.returning.as_deref());
                 self.scope.pop();
                 columns
             }
@@ -147,8 +157,8 @@ impl<'a> Resolver<'a> {
                 }
                 None
             }
-            Statement::CreateView { query, .. } => {
-                self.query(query, false);
+            Statement::CreateView(view) => {
+                self.query(&view.query, false);
                 None
             }
             _ => None,
@@ -161,17 +171,22 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an INSERT statement in the current (statement) frame
     fn insert(&mut self, insert: &Insert) -> Option<Vec<Column>> {
-        let table_name = self.catalog.qualified_name(&insert.table_name);
-        let table_span = insert
-            .table_name
-            .0
-            .last()
-            .map(|id| Span::from_sqlparser(&id.span));
+        let Some(insert_name) = insert_table(insert) else {
+            if let Some(source) = &insert.source {
+                self.insert_source(source);
+            }
+            return None;
+        };
+        let table_name = self.catalog.qualified_name(insert_name);
+        let table_span = name_last(insert_name).map(|id| Span::from_sqlparser(&id.span));
+        let insert_columns: Vec<Ident> = insert
+            .columns
+            .iter()
+            .map(|c| column_ident(c).clone())
+            .collect();
 
         // BigQuery: a table of a project the schema doesn't describe is unknown
-        if self.dialect == SqlDialect::BigQuery
-            && !self.catalog.database_is_known(&insert.table_name)
-        {
+        if self.dialect == SqlDialect::BigQuery && !self.catalog.database_is_known(insert_name) {
             if let Some(source) = &insert.source {
                 self.insert_source(source);
             }
@@ -182,7 +197,7 @@ impl<'a> Resolver<'a> {
             if let Some(view) = self.catalog.get_view(&table_name) {
                 // Simple views are insertable: check the column list against the view
                 if !view.columns.is_empty() {
-                    for col_ident in &insert.columns {
+                    for col_ident in &insert_columns {
                         if !view
                             .columns
                             .iter()
@@ -213,10 +228,10 @@ impl<'a> Resolver<'a> {
             return None;
         };
 
-        self.check_duplicate_insert_columns(&insert.columns);
+        self.check_duplicate_insert_columns(&insert_columns);
 
         // Check if specified columns exist
-        for col_ident in &insert.columns {
+        for col_ident in &insert_columns {
             if let Some(column) = table_def.case_mismatched_column(col_ident) {
                 let owner = format!("table '{table_name}'");
                 self.diagnostics
@@ -266,7 +281,7 @@ impl<'a> Resolver<'a> {
         let positional: Option<Vec<String>> = match (fills_trailing, values) {
             (true, Some(rows)) => rows
                 .iter()
-                .map(Vec::len)
+                .map(|row| row.len())
                 .max()
                 .filter(|&n| n <= expected_count)
                 .map(|n| {
@@ -289,7 +304,7 @@ impl<'a> Resolver<'a> {
         let default_values = insert.source.is_none() && insert.columns.is_empty();
         let given: Vec<String> = positional
             .clone()
-            .unwrap_or_else(|| insert.columns.iter().map(|c| c.value.clone()).collect());
+            .unwrap_or_else(|| insert_columns.iter().map(|c| c.value.clone()).collect());
         let columns_valid = given.iter().all(|c| table_def.column_exists(c));
         let arity_valid = match (values, &selected) {
             (Some(rows), _) => rows.iter().all(|row| row.len() == given.len()),
@@ -337,7 +352,7 @@ impl<'a> Resolver<'a> {
                     diag.span = table_span;
                     self.diagnostics.push(diag);
                 }
-                for expr in row {
+                for expr in row.iter() {
                     self.expr(expr);
                     self.check_aggregates_in(expr, Clause::Values);
                 }
@@ -368,7 +383,7 @@ impl<'a> Resolver<'a> {
         let key = insert
             .table_alias
             .as_ref()
-            .map_or_else(|| table_name.name.clone(), |a| a.value.clone());
+            .map_or_else(|| table_name.name.clone(), |a| a.alias.value.clone());
         self.scope.current().relations.insert(key, target.clone());
         if let Some(on) = &insert.on {
             // MySQL row alias: INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE c = new.c
@@ -376,7 +391,7 @@ impl<'a> Resolver<'a> {
                 .insert_alias
                 .as_ref()
                 .and_then(|a| a.row_alias.0.last())
-                .map(|a| a.value.clone());
+                .map(|a| a.ident().value.clone());
             if let Some(row_alias) = &row_alias {
                 self.scope
                     .current()
@@ -482,7 +497,7 @@ impl<'a> Resolver<'a> {
         };
         for assignment in assignments {
             if let AssignmentTarget::ColumnName(name) = &assignment.target {
-                if let Some(col) = name.0.last() {
+                if let Some(col) = name_last(name) {
                     self.check_target_column(table_def, table_name, col);
                 }
             }
@@ -534,12 +549,12 @@ impl<'a> Resolver<'a> {
         &mut self,
         table: &TableWithJoins,
         assignments: &[Assignment],
-        from: Option<&TableWithJoins>,
+        from: &[TableWithJoins],
         selection: Option<&Expr>,
     ) {
         self.table_with_joins(table);
         // PostgreSQL: UPDATE ... FROM ...
-        if let Some(from_table) = from {
+        for from_table in from {
             self.table_with_joins(from_table);
         }
 
@@ -557,20 +572,20 @@ impl<'a> Resolver<'a> {
             match &assignment.target {
                 AssignmentTarget::ColumnName(col_name) if col_name.0.len() >= 2 => {
                     // `SET alias.col = ...` (MySQL multi-table UPDATE)
-                    let parts = split_dotted_idents(&col_name.0);
+                    let parts = split_name(col_name);
                     if let Some((schema, table, column)) = split_column_ref(&parts) {
                         self.column(Some((schema, table)), column);
                     }
                 }
                 AssignmentTarget::ColumnName(col_name) if !table.joins.is_empty() => {
                     // Unqualified target in a multi-table UPDATE: any joined table
-                    if let Some(col_ident) = col_name.0.last() {
+                    if let Some(col_ident) = name_last(col_name) {
                         self.column(None, col_ident);
                     }
                 }
                 AssignmentTarget::ColumnName(col_name) => {
                     if let (Some(col_ident), Some(def), Some(name)) =
-                        (col_name.0.last(), table_def, &table_name)
+                        (name_last(col_name), table_def, &table_name)
                     {
                         self.check_target_column(def, name, col_ident);
                     }
@@ -617,7 +632,7 @@ impl<'a> Resolver<'a> {
                 && matches!(&table.relation, TableFactor::Table { name, alias: None, .. }
                 if name.0.len() == 1
                     && self.scope.current_ref().is_some_and(|frame| {
-                        lookup_ignore_case(&frame.relations, &name.0[0].value).is_some()
+                        lookup_ignore_case(&frame.relations, &name.0[0].ident().value).is_some()
                     }));
             if !is_using_alias {
                 self.table_with_joins(table);
@@ -685,7 +700,7 @@ impl<'a> Resolver<'a> {
                     String::new(),
                     Relation::new(RelationKind::Subquery, "", columns.clone()),
                 );
-                self.query_tail(query);
+                self.query_tail(query, &[]);
                 self.scope.pop();
                 if let Some(columns) = &columns {
                     self.check_order_by_positions(query, columns.len(), None);
@@ -703,7 +718,7 @@ impl<'a> Resolver<'a> {
         let name = self.catalog.ident_name(&cte.alias.name);
         let found =
             sqlparser::ast::visit_relations(&cte.query, |relation| match relation.0.as_slice() {
-                [ident] if self.catalog.ident_name(ident) == name => {
+                [ident] if self.catalog.ident_name(ident.ident()) == name => {
                     std::ops::ControlFlow::Break(())
                 }
                 _ => std::ops::ControlFlow::Continue(()),
@@ -747,15 +762,29 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve ORDER BY / LIMIT / OFFSET of a query in the current frame
-    fn query_tail(&mut self, query: &Query) {
-        if let Some(limit) = &query.limit {
+    /// LIMIT, OFFSET and ORDER BY of a query whose SELECT list is `projection`
+    fn query_tail(&mut self, query: &Query, projection: &[SelectItem]) {
+        if let Some(limit) = query_limit(query) {
             self.expr(limit);
         }
-        if let Some(offset) = &query.offset {
-            self.expr(&offset.value);
+        if let Some(offset) = query_offset(query) {
+            self.expr(offset);
         }
         if let Some(order_by) = &query.order_by {
-            for ob in &order_by.exprs {
+            for ob in order_by_exprs(order_by) {
+                // A bare name of exactly one output column is that column, even
+                // when several input columns have it (`SELECT a.id ... ORDER BY id`)
+                if let Expr::Identifier(ident) = &ob.expr {
+                    let outputs = projection
+                        .iter()
+                        .filter(|item| {
+                            output_name(item).is_some_and(|n| n.eq_ignore_ascii_case(&ident.value))
+                        })
+                        .count();
+                    if outputs == 1 {
+                        continue;
+                    }
+                }
                 self.expr(&ob.expr);
             }
         }
@@ -772,8 +801,10 @@ impl<'a> Resolver<'a> {
                 self.set_operation(left_columns, right_columns, right)
             }
             SetExpr::Values(values) => self.values(values),
-            SetExpr::Insert(stmt) | SetExpr::Update(stmt) => self.statement(stmt),
-            SetExpr::Table(_) => None,
+            SetExpr::Insert(stmt) | SetExpr::Update(stmt) | SetExpr::Delete(stmt) => {
+                self.statement(stmt)
+            }
+            SetExpr::Merge(_) | SetExpr::Table(_) => None,
         }
     }
 
@@ -805,7 +836,7 @@ impl<'a> Resolver<'a> {
     /// Resolve a VALUES list used as a query; its columns are `column1`, `column2`, ...
     fn values(&mut self, values: &Values) -> Option<Vec<Column>> {
         for row in &values.rows {
-            for expr in row {
+            for expr in row.iter() {
                 self.expr(expr);
             }
         }
@@ -848,7 +879,7 @@ impl<'a> Resolver<'a> {
                 .lateral_view_name
                 .0
                 .last()
-                .map_or_else(|| format!("?lateral_view{i}"), |n| n.value.clone());
+                .map_or_else(|| format!("?lateral_view{i}"), |n| n.ident().value.clone());
             let names: Vec<String> = view
                 .lateral_col_alias
                 .iter()
@@ -947,7 +978,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(query) = query {
             self.scope.current().select_aliases = aliases;
-            self.query_tail(query);
+            self.query_tail(query, &select.projection);
             self.check_distinct_order_by(select, query);
             if let Some(columns) = &columns {
                 self.check_order_by_positions(query, columns.len(), Some(select_span));
@@ -983,8 +1014,9 @@ impl<'a> Resolver<'a> {
                     columns.push(Column::new(name, self.infer_expr_type(expr)));
                 }
                 // BigQuery `f(x).*`: the fields of a STRUCT, which aren't modeled
-                SelectItem::UnnamedExpr(Expr::CompositeAccess { key, .. })
-                    if key.value == super::bigquery::STRUCT_STAR_FIELD =>
+                SelectItem::UnnamedExpr(Expr::CompoundFieldAccess { access_chain, .. })
+                    if last_field(access_chain)
+                        .is_some_and(|key| key.value == super::bigquery::STRUCT_STAR_FIELD) =>
                 {
                     return None;
                 }
@@ -1016,9 +1048,15 @@ impl<'a> Resolver<'a> {
                     }
                     columns.extend(self.apply_wildcard_options(star, options)?);
                 }
-                SelectItem::QualifiedWildcard(name, options) => {
-                    let parts = split_dotted_idents(&name.0);
-                    let [.., table] = parts.as_ref() else {
+                // `(expr).*`: the fields of a composite value, which aren't modeled
+                SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::Expr(_), _)
+                | SelectItem::ExprWithAliases { .. } => return None,
+                SelectItem::QualifiedWildcard(
+                    SelectItemQualifiedWildcardKind::ObjectName(name),
+                    options,
+                ) => {
+                    let parts = split_name(name);
+                    let [.., table] = parts.as_slice() else {
                         return None;
                     };
                     let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
@@ -1128,7 +1166,8 @@ impl<'a> Resolver<'a> {
             Inner(c) | LeftOuter(c) | RightOuter(c) | FullOuter(c) | Semi(c) | LeftSemi(c)
             | RightSemi(c) | Anti(c) | LeftAnti(c) | RightAnti(c) => c,
             AsOf { constraint, .. } => constraint,
-            CrossJoin | CrossApply | OuterApply => return,
+            Join(c) | Left(c) | Right(c) | CrossJoin(c) | StraightJoin(c) => c,
+            CrossApply | OuterApply | ArrayJoin | LeftArrayJoin | InnerArrayJoin => return,
         };
 
         let right_key = relation_key(relation);
@@ -1141,6 +1180,7 @@ impl<'a> Resolver<'a> {
                 // USING columns exist in both sides by definition and are merged
                 // into a single unqualified column, so only check they exist
                 for col in columns {
+                    let col = column_ident(col);
                     let frame = self.scope.current();
                     let (right, left): (Vec<_>, Vec<_>) = frame
                         .relations
@@ -1214,12 +1254,21 @@ impl<'a> Resolver<'a> {
                     .collect();
 
                 // Table-valued function call (e.g., generate_series(...)): columns are
-                // known only from an alias column list
-                if let Some(table_args) = args {
+                // known only from an alias column list. Snowflake's `IDENTIFIER('t')`
+                // is read as a name made by a function.
+                let name_function_args = match name.0.as_slice() {
+                    [ObjectNamePart::Function(function)] => Some(function.args.as_slice()),
+                    _ => None,
+                };
+                let call_args = args
+                    .as_ref()
+                    .map(|table_args| table_args.args.as_slice())
+                    .or(name_function_args);
+                if let Some(call_args) = call_args {
                     let mut relation = None;
                     let mut columns = None;
                     if self.dialect == SqlDialect::Snowflake {
-                        relation = self.identifier_relation(name, &table_args.args);
+                        relation = self.identifier_relation(name, call_args);
                         if relation.is_none() {
                             columns = self.snowflake_table_function(factor);
                         }
@@ -1231,7 +1280,7 @@ impl<'a> Resolver<'a> {
                         .and_then(|r| r.name.rsplit('.').next().map(str::to_string));
                     if let Some(key) = alias_name
                         .or(table_key)
-                        .or_else(|| name.0.last().map(|i| i.value.clone()))
+                        .or_else(|| name.0.last().map(|i| i.ident().value.clone()))
                     {
                         let mut relation = relation.unwrap_or_else(|| {
                             Relation::new(RelationKind::Function, key.clone(), columns)
@@ -1269,7 +1318,10 @@ impl<'a> Resolver<'a> {
                     view
                 } else {
                     if !is_system_table(self.dialect, &table_name) && !may_exist {
-                        let span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
+                        let span = name
+                            .0
+                            .last()
+                            .map(|id| Span::from_sqlparser(&id.ident().span));
                         let diag = self.table_not_found(&table_name, span);
                         self.diagnostics.push(diag);
                     }
@@ -1306,6 +1358,7 @@ impl<'a> Resolver<'a> {
                 lateral,
                 subquery,
                 alias,
+                ..
             } => {
                 // Non-LATERAL subqueries can't reference the FROM clause they appear in.
                 // LATERAL subqueries can, with lower precedence than their own tables.
@@ -1393,26 +1446,34 @@ impl<'a> Resolver<'a> {
                 name,
                 columns: unpivoted,
                 alias,
+                ..
             } => {
                 let start = self.scope.current().relations.len();
                 self.table_factor(table);
                 for column in unpivoted {
-                    self.column(None, column);
+                    self.expr(&column.expr);
                 }
+                let unpivoted: Vec<&str> = unpivoted
+                    .iter()
+                    .filter_map(|c| match &c.expr {
+                        Expr::Identifier(ident) => Some(ident.value.as_str()),
+                        _ => None,
+                    })
+                    .collect();
                 // The input's columns but the unpivoted ones, then the name and
                 // value columns
                 let (key, columns) = self.take_relations_since(start);
                 let columns = columns.map(|mut columns| {
-                    columns.retain(|c| {
-                        !unpivoted
-                            .iter()
-                            .any(|u| u.value.eq_ignore_ascii_case(&c.name))
-                    });
+                    columns.retain(|c| !unpivoted.iter().any(|u| u.eq_ignore_ascii_case(&c.name)));
                     columns.push(Column::new(
                         name.value.clone(),
                         ExpressionType::Known(SqlType::Text),
                     ));
-                    columns.push(Column::new(value.value.clone(), ExpressionType::Unknown));
+                    let value = match value {
+                        Expr::Identifier(ident) => ident.value.clone(),
+                        value => value.to_string(),
+                    };
+                    columns.push(Column::new(value, ExpressionType::Unknown));
                     columns
                 });
                 self.insert_pivot_relation(alias.as_ref(), key, columns);
@@ -1430,7 +1491,7 @@ impl<'a> Resolver<'a> {
                     self.expr(&aggregate.expr);
                 }
                 for column in value_column {
-                    self.column(None, column);
+                    self.expr(column);
                 }
                 // Output columns are named after the pivoted values: unknown
                 let (key, _) = self.take_relations_since(start);
@@ -1489,10 +1550,18 @@ impl<'a> Resolver<'a> {
             SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
                 self.expr(expr);
             }
-            SelectItem::QualifiedWildcard(name, options) => {
+            SelectItem::ExprWithAliases { expr, .. } => self.expr(expr),
+            // `(expr).*`
+            SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::Expr(expr), _) => {
+                self.expr(expr);
+            }
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(name),
+                options,
+            ) => {
                 // [[database.]schema.]table.*
-                let parts = split_dotted_idents(&name.0);
-                if let [.., table] = parts.as_ref() {
+                let parts = split_name(name);
+                if let [.., table] = parts.as_slice() {
                     let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
                     let in_scope = self.scope.current_ref().is_some_and(|f| {
                         f.qualified_relation(self.catalog, schema, table).is_some()
@@ -1543,6 +1612,14 @@ impl<'a> Resolver<'a> {
             Expr::CompoundIdentifier(idents) if self.dialect.struct_field_paths() => {
                 self.bigquery_path(idents);
             }
+            // Snowflake `t.$1`: a column of staged data, by position
+            Expr::CompoundIdentifier(idents)
+                if self.dialect == SqlDialect::Snowflake
+                    && idents.last().is_some_and(|i| {
+                        i.value.len() > 1
+                            && i.value.starts_with('$')
+                            && i.value[1..].bytes().all(|b| b.is_ascii_digit())
+                    }) => {}
             Expr::CompoundIdentifier(idents) => {
                 // [[database.]schema.]table.column
                 let parts = split_dotted_idents(idents);
@@ -1670,23 +1747,27 @@ impl<'a> Resolver<'a> {
             Expr::Case {
                 operand,
                 conditions,
-                results,
                 else_result,
+                ..
             } => {
                 if let Some(op) = operand {
                     self.expr(op);
                     self.check_case_when_null(op, conditions);
                 }
-                for cond in conditions {
-                    self.expr(cond);
+                for when in conditions {
+                    self.expr(&when.condition);
                 }
-                for result in results {
-                    self.expr(result);
+                for when in conditions {
+                    self.expr(&when.result);
                 }
                 if let Some(else_r) = else_result {
                     self.expr(else_r);
                 }
-                let branches: Vec<&Expr> = results.iter().chain(else_result.as_deref()).collect();
+                let branches: Vec<&Expr> = conditions
+                    .iter()
+                    .map(|when| &when.result)
+                    .chain(else_result.as_deref())
+                    .collect();
                 self.check_case_branches(&branches);
             }
             Expr::Substring {
@@ -1768,27 +1849,40 @@ impl<'a> Resolver<'a> {
                     self.expr(e);
                 }
             }
-            Expr::Subscript { expr, subscript } => {
-                self.expr(expr);
-                match subscript.as_ref() {
-                    Subscript::Index { index } => self.expr(index),
-                    Subscript::Slice {
-                        lower_bound,
-                        upper_bound,
-                        stride,
-                    } => {
-                        for e in [lower_bound, upper_bound, stride].into_iter().flatten() {
-                            self.expr(e);
-                        }
+            // `col[1]`, `(expr).field` (BigQuery `f(x).field`, rewritten),
+            // `expr.method()`: fields aren't modeled
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                // `t.col[1]`: the leading identifiers name the column
+                let path = access_chain
+                    .iter()
+                    .take_while(|a| matches!(a, AccessExpr::Dot(Expr::Identifier(_))))
+                    .count();
+                match root.as_ref() {
+                    Expr::Identifier(ident) if path > 0 => {
+                        let mut idents = vec![ident.clone()];
+                        idents.extend(access_chain[..path].iter().filter_map(|a| match a {
+                            AccessExpr::Dot(Expr::Identifier(i)) => Some(i.clone()),
+                            _ => None,
+                        }));
+                        self.expr(&Expr::CompoundIdentifier(idents));
                     }
+                    root => self.expr(root),
                 }
-            }
-            // `(expr).field` (BigQuery `f(x).field`, rewritten): fields aren't modeled
-            Expr::CompositeAccess { expr, .. } => self.expr(expr),
-            Expr::Method(method) => {
-                self.expr(&method.expr);
-                for func in &method.method_chain {
-                    self.function_args(&func.args);
+                for access in access_chain {
+                    match access {
+                        AccessExpr::Subscript(Subscript::Index { index }) => self.expr(index),
+                        AccessExpr::Subscript(Subscript::Slice {
+                            lower_bound,
+                            upper_bound,
+                            stride,
+                        }) => {
+                            for e in [lower_bound, upper_bound, stride].into_iter().flatten() {
+                                self.expr(e);
+                            }
+                        }
+                        AccessExpr::Dot(Expr::Function(func)) => self.function_args(&func.args),
+                        AccessExpr::Dot(_) => {}
+                    }
                 }
             }
             Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
@@ -1855,7 +1949,7 @@ impl<'a> Resolver<'a> {
             SqlDialect::Redshift => is_redshift_date_part,
             _ => return None,
         };
-        let name = func.name.0.last()?.value.to_ascii_uppercase();
+        let name = func.name.0.last()?.ident().value.to_ascii_uppercase();
         let index = match (name.as_str(), self.dialect) {
             (
                 "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
@@ -1911,17 +2005,19 @@ impl<'a> Resolver<'a> {
         let is_flatten = name
             .0
             .last()
-            .is_some_and(|f| f.value.eq_ignore_ascii_case("FLATTEN"));
+            .is_some_and(|f| f.ident().value.eq_ignore_ascii_case("FLATTEN"));
         is_flatten.then(flatten_columns)
     }
 
     /// `IDENTIFIER('name')` in FROM (Snowflake): the table or view it names, if it is
     /// in the catalog
     fn identifier_relation(&self, name: &ObjectName, args: &[FunctionArg]) -> Option<Relation> {
-        let is_identifier = name.0.len() == 1 && name.0[0].value.eq_ignore_ascii_case("IDENTIFIER");
-        let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-            sqlparser::ast::Value::SingleQuotedString(literal),
-        )))] = args
+        let is_identifier =
+            name.0.len() == 1 && name.0[0].ident().value.eq_ignore_ascii_case("IDENTIFIER");
+        let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+            value: sqlparser::ast::Value::SingleQuotedString(literal),
+            ..
+        })))] = args
         else {
             return None;
         };
@@ -1938,7 +2034,7 @@ impl<'a> Resolver<'a> {
                 }
             })
             .collect();
-        let table_name = self.catalog.qualified_name(&ObjectName(parts));
+        let table_name = self.catalog.qualified_name(&ObjectName::from(parts));
         Relation::table(self.catalog, &table_name)
             .or_else(|| Relation::view(self.catalog, &table_name))
     }
@@ -2352,7 +2448,7 @@ fn relation_key(factor: &TableFactor) -> Option<String> {
         TableFactor::Table { name, alias, .. } => alias
             .as_ref()
             .map(|a| a.name.value.clone())
-            .or_else(|| name.0.last().map(|i| i.value.clone())),
+            .or_else(|| name.0.last().map(|i| i.ident().value.clone())),
         TableFactor::Derived { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
         _ => None,
     }
@@ -2375,6 +2471,19 @@ fn projection_aliases(projection: &[SelectItem], dialect: SqlDialect) -> Vec<Str
             _ => None,
         })
         .collect()
+}
+
+/// Name of the output column of a SELECT item: its alias, or the (last) name of
+/// a column reference
+fn output_name(item: &SelectItem) -> Option<&str> {
+    match item {
+        SelectItem::ExprWithAlias { alias, .. } => Some(&alias.value),
+        SelectItem::UnnamedExpr(Expr::Identifier(ident)) => Some(&ident.value),
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) => {
+            idents.last().map(|i| i.value.as_str())
+        }
+        _ => None,
+    }
 }
 
 /// System catalog tables, whose columns sqlsift doesn't model
@@ -2447,11 +2556,19 @@ fn is_date_part_keyword(name: &str) -> bool {
     )
 }
 
+/// The field a `(expr).field` access ends with
+fn last_field(access_chain: &[AccessExpr]) -> Option<&Ident> {
+    match access_chain.last()? {
+        AccessExpr::Dot(Expr::Identifier(key)) => Some(key),
+        _ => None,
+    }
+}
+
 /// Columns removed by `SELECT * EXCLUDE (...)` (Snowflake) / `EXCEPT (...)` (BigQuery)
 fn wildcard_excluded(options: &WildcardAdditionalOptions) -> Vec<&Ident> {
     let mut names: Vec<&Ident> = match &options.opt_exclude {
-        Some(ExcludeSelectItem::Single(ident)) => vec![ident],
-        Some(ExcludeSelectItem::Multiple(idents)) => idents.iter().collect(),
+        Some(ExcludeSelectItem::Single(name)) => name_last(name).into_iter().collect(),
+        Some(ExcludeSelectItem::Multiple(names)) => names.iter().filter_map(name_last).collect(),
         None => Vec::new(),
     };
     if let Some(except) = &options.opt_except {
@@ -2639,9 +2756,11 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Identifier(ident) => Some(ident.value.clone()),
         Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
-        Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
+        Expr::Function(func) => func.name.0.last().map(|i| i.ident().value.to_lowercase()),
         Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
-        Expr::CompositeAccess { key, .. } => Some(key.value.clone()),
+        Expr::CompoundFieldAccess { access_chain, .. } => {
+            last_field(access_chain).map(|key| key.value.clone())
+        }
         Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }

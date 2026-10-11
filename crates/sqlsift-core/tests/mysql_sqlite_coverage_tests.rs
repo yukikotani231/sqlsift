@@ -2238,11 +2238,12 @@ fn mysql_unparsable_view_is_reported_as_skipped() {
     for ddl in [
         "CREATE TABLE t (a int);\n\
          CREATE ALGORITHM=UNDEFINED VIEW v AS SELECT a FROM t WITH CASCADED CHECK OPTION FOO;",
-        // sqlparser can't even tokenize this one (a quoted user variable)
+        // sqlparser can't even tokenize this one (an unterminated quoted user
+        // variable)
         "CREATE TABLE t (a int);\n\
          /*!50001 CREATE ALGORITHM=UNDEFINED */\n\
          /*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n\
-         /*!50001 VIEW `v` AS select @`x` AS `a` from `t` */;",
+         /*!50001 VIEW `v` AS select @\"x AS `a` from `t` */;",
     ] {
         let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
         if let Err(diags) = builder.parse(ddl) {

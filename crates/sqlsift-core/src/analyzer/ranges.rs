@@ -7,7 +7,7 @@
 //! value instead of truncating it (PostgreSQL, Redshift, MySQL in its default
 //! strict mode). Comparisons such as `WHERE age = 99999` are valid and not checked.
 
-use sqlparser::ast::{Expr, UnaryOperator, Value};
+use sqlparser::ast::{Expr, UnaryOperator, Value, ValueWithSpan};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -72,7 +72,10 @@ fn out_of_range(dialect: SqlDialect, column_type: &SqlType, value: &Expr) -> Opt
             | SqlType::Varchar {
                 length: Some(limit),
             },
-            Expr::Value(Value::SingleQuotedString(s)),
+            Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(s),
+                ..
+            }),
         ) => {
             // Excess trailing spaces are truncated silently
             let length = s.trim_end_matches(' ').chars().count();
@@ -80,11 +83,14 @@ fn out_of_range(dialect: SqlDialect, column_type: &SqlType, value: &Expr) -> Opt
         }
         (
             SqlType::Char { .. } | SqlType::Varchar { .. },
-            Expr::Value(Value::DoubleQuotedString(s)),
+            Expr::Value(ValueWithSpan {
+                value: Value::DoubleQuotedString(s),
+                ..
+            }),
         ) if dialect == SqlDialect::MySQL => out_of_range(
             dialect,
             column_type,
-            &Expr::Value(Value::SingleQuotedString(s.clone())),
+            &Expr::value(Value::SingleQuotedString(s.clone())),
         ),
         _ => {
             let literal = signed_number(value)?;
@@ -120,12 +126,18 @@ fn out_of_range(dialect: SqlDialect, column_type: &SqlType, value: &Expr) -> Opt
 /// A number literal, with its sign if negated (`-5`, `- 5`)
 fn signed_number(value: &Expr) -> Option<String> {
     match value {
-        Expr::Value(Value::Number(n, _)) => Some(n.clone()),
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(n, _),
+            ..
+        }) => Some(n.clone()),
         Expr::UnaryOp {
             op: UnaryOperator::Minus,
             expr,
         } => match expr.as_ref() {
-            Expr::Value(Value::Number(n, _)) => Some(format!("-{n}")),
+            Expr::Value(ValueWithSpan {
+                value: Value::Number(n, _),
+                ..
+            }) => Some(format!("-{n}")),
             _ => None,
         },
         Expr::Nested(inner) => signed_number(inner),

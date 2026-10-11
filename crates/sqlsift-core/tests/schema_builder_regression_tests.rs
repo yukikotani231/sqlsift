@@ -634,7 +634,7 @@ fn unparseable_create_table_warns_with_name_and_location() {
 
 #[test]
 fn parser_location_in_warning_is_relative_to_input() {
-    let schema = "CREATE TABLE p (id int);\nCREATE TABLE c (x int) TABLESPACE fast;";
+    let schema = "CREATE TABLE p (id int);\nCREATE TABLE c (x int) WITHOUT OIDS;";
     let w = single_warning(SqlDialect::PostgreSQL, schema);
     assert!(
         w.message.contains("Line: 2, Column: 24"),
@@ -716,7 +716,7 @@ fn unparseable_view_and_alter_table_warn() {
     let (_, warnings) = build(
         SqlDialect::PostgreSQL,
         "CREATE TABLE t (a int);
-         CREATE VIEW v AS SELECT FROM WHERE;
+         CREATE VIEW v AS SELECT a FROM t WHERE;
          ALTER TABLE t ADD COLUMN;",
     );
     assert_eq!(warnings.len(), 2, "{warnings:#?}");
@@ -729,6 +729,7 @@ fn unsupported_statements_stay_silent() {
     let (c, warnings) = build(
         SqlDialect::PostgreSQL,
         r#"
+        CREATE TABLE t (a int);
         CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public VERSION '1.1' CASCADE;
         CREATE OR REPLACE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;
         CREATE TRIGGER trg BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION f();
@@ -745,7 +746,6 @@ fn unsupported_statements_stay_silent() {
         ALTER TABLE ONLY t ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES p;
         ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (a WITH =);
         ALTER TYPE mood OWNER TO postgres;
-        CREATE TABLE t (a int);
         "#,
     );
     assert!(warnings.is_empty(), "{warnings:#?}");

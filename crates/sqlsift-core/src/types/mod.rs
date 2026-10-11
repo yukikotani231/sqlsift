@@ -1,8 +1,9 @@
 //! SQL type system
 
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::DataType;
+use sqlparser::ast::{DataType, ExactNumberInfo};
 
+use crate::ast_ext::ObjectNamePartExt;
 use crate::dialect::SqlDialect;
 
 /// Internal representation of SQL types
@@ -93,41 +94,49 @@ impl SqlType {
     /// Convert from sqlparser's DataType to our internal SqlType
     pub fn from_ast(data_type: &DataType) -> Self {
         match data_type {
-            DataType::TinyInt(_) | DataType::UnsignedTinyInt(_) => SqlType::TinyInt,
-            DataType::SmallInt(_) | DataType::UnsignedSmallInt(_) => SqlType::SmallInt,
-            DataType::Int2(_) => SqlType::SmallInt,
-            DataType::MediumInt(_) | DataType::UnsignedMediumInt(_) => SqlType::MediumInt,
-            DataType::Integer(_) | DataType::UnsignedInteger(_) => SqlType::Integer,
-            DataType::Int(_) | DataType::UnsignedInt(_) => SqlType::Integer,
-            DataType::Int4(_) => SqlType::Integer,
-            DataType::BigInt(_) | DataType::UnsignedBigInt(_) => SqlType::BigInt,
-            DataType::Int8(_) => SqlType::BigInt,
+            DataType::TinyInt(_) | DataType::TinyIntUnsigned(_) => SqlType::TinyInt,
+            DataType::SmallInt(_) | DataType::SmallIntUnsigned(_) => SqlType::SmallInt,
+            DataType::Int2(_) | DataType::Int2Unsigned(_) => SqlType::SmallInt,
+            DataType::MediumInt(_) | DataType::MediumIntUnsigned(_) => SqlType::MediumInt,
+            DataType::Integer(_) | DataType::IntegerUnsigned(_) => SqlType::Integer,
+            DataType::Int(_) | DataType::IntUnsigned(_) => SqlType::Integer,
+            DataType::Int4(_) | DataType::Int4Unsigned(_) => SqlType::Integer,
+            DataType::BigInt(_) | DataType::BigIntUnsigned(_) => SqlType::BigInt,
+            DataType::Int8(_) | DataType::Int8Unsigned(_) => SqlType::BigInt,
             // BigQuery INT64 (and its aliases INT, INTEGER, BIGINT, ...)
             DataType::Int64 => SqlType::BigInt,
 
-            DataType::Real => SqlType::Real,
+            DataType::Real | DataType::RealUnsigned => SqlType::Real,
             DataType::Float4 => SqlType::Real,
-            DataType::Double => SqlType::DoublePrecision,
-            DataType::DoublePrecision => SqlType::DoublePrecision,
+            DataType::Double(_) | DataType::DoubleUnsigned(_) => SqlType::DoublePrecision,
+            DataType::DoublePrecision | DataType::DoublePrecisionUnsigned => {
+                SqlType::DoublePrecision
+            }
             DataType::Float8 => SqlType::DoublePrecision,
             DataType::Float32 => SqlType::Real,
             DataType::Float64 => SqlType::DoublePrecision,
             // FLOAT(p): 1..=24 is REAL, otherwise DOUBLE PRECISION (plain FLOAT is double)
-            DataType::Float(Some(p)) if *p <= 24 => SqlType::Real,
-            DataType::Float(_) => SqlType::DoublePrecision,
+            DataType::Float(ExactNumberInfo::Precision(p))
+            | DataType::FloatUnsigned(ExactNumberInfo::Precision(p))
+                if *p <= 24 =>
+            {
+                SqlType::Real
+            }
+            DataType::Float(_) | DataType::FloatUnsigned(_) => SqlType::DoublePrecision,
 
             // BigQuery BIGNUMERIC / BIGDECIMAL are wider NUMERICs
             DataType::Decimal(info)
+            | DataType::DecimalUnsigned(info)
             | DataType::Numeric(info)
             | DataType::Dec(info)
+            | DataType::DecUnsigned(info)
             | DataType::BigNumeric(info)
             | DataType::BigDecimal(info) => {
                 let (precision, scale) = match info {
-                    sqlparser::ast::ExactNumberInfo::None => (None, None),
-                    sqlparser::ast::ExactNumberInfo::Precision(p) => (Some(*p), None),
-                    sqlparser::ast::ExactNumberInfo::PrecisionAndScale(p, s) => {
-                        (Some(*p), Some(*s))
-                    }
+                    ExactNumberInfo::None => (None, None),
+                    ExactNumberInfo::Precision(p) => (Some(*p), None),
+                    // A negative scale (PostgreSQL 15+) is not modelled
+                    ExactNumberInfo::PrecisionAndScale(p, s) => (Some(*p), u64::try_from(*s).ok()),
                 };
                 SqlType::Decimal { precision, scale }
             }
@@ -174,7 +183,13 @@ impl SqlType {
                 with_timezone: false,
             },
 
-            DataType::Interval => SqlType::Interval,
+            // Snowflake TIMESTAMP_NTZ (no time zone)
+            DataType::TimestampNtz(precision) => SqlType::Timestamp {
+                precision: *precision,
+                with_timezone: false,
+            },
+
+            DataType::Interval { .. } => SqlType::Interval,
 
             DataType::Boolean | DataType::Bool => SqlType::Boolean,
 
@@ -200,7 +215,8 @@ impl SqlType {
                 sqlparser::ast::ArrayElemTypeDef::SquareBracket(dt, _) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
-                sqlparser::ast::ArrayElemTypeDef::Parenthesis(dt) => {
+                sqlparser::ast::ArrayElemTypeDef::Parenthesis(dt)
+                | sqlparser::ast::ArrayElemTypeDef::Qualified(dt, _) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
                 // A bare `ARRAY` is Snowflake's semi-structured array
@@ -212,12 +228,31 @@ impl SqlType {
             // BigQuery STRUCT<...>: fields aren't modelled, so a struct is a type
             // sqlsift never reports (see `Custom`)
             DataType::Struct(..) => SqlType::Custom(data_type.to_string()),
+            // Databricks MAP<K, V>, likewise
+            DataType::Map(..) => SqlType::Custom("MAP".to_string()),
+
+            // Types sqlparser reads into their own variants but that are user-defined
+            // type names for sqlsift, as other extension types are (see `Custom`)
+            DataType::TsVector
+            | DataType::TsQuery
+            | DataType::GeometricType(_)
+            | DataType::VarBit(_)
+            | DataType::HugeInt
+            | DataType::UHugeInt
+            | DataType::UTinyInt
+            | DataType::USmallInt
+            | DataType::UBigInt
+            | DataType::Signed
+            | DataType::SignedInteger
+            | DataType::Unsigned
+            | DataType::UnsignedInteger
+            | DataType::AnyType => SqlType::Custom(data_type.to_string().to_lowercase()),
 
             DataType::Custom(name, modifiers) => {
                 let type_name = name
                     .0
                     .iter()
-                    .map(|i| i.value.clone())
+                    .map(|i| i.ident().value.clone())
                     .collect::<Vec<_>>()
                     .join(".");
                 let modifier = |i: usize| -> Option<u64> {

@@ -7,6 +7,7 @@ mod warehouse;
 
 pub use builder::SchemaBuilder;
 pub(crate) use builder::{mask_unsupported_clauses, unparsed_definition};
+pub(crate) use catalog::split_name;
 pub use catalog::{
     case_mismatched_column, split_dotted_idents, Catalog, CheckConstraintDef, ColumnDef,
     DefaultValue, DroppedRelation, EnumTypeDef, ForeignKeyDef, FormerColumn, IdentityKind,

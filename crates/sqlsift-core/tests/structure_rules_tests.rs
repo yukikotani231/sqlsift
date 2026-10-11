@@ -389,6 +389,26 @@ fn e0014_unknown_unique_keys_are_not_reported() {
         sql
     )
     .is_empty());
+    // A key made from an index, and an exclusion constraint
+    for constraint in ["PRIMARY KEY USING INDEX i", "UNIQUE USING INDEX i"] {
+        let schema =
+            format!("CREATE TABLE t (x INT, y INT); ALTER TABLE t ADD CONSTRAINT k {constraint};");
+        assert!(conflict_codes(&schema, sql).is_empty(), "{constraint}");
+    }
+    assert!(conflict_codes(
+        "CREATE TABLE t (x INT, y INT); ALTER TABLE t ADD EXCLUDE USING gist (y WITH =);",
+        sql
+    )
+    .is_empty());
+    // ... of another table hides nothing
+    assert_eq!(
+        conflict_codes(
+            "CREATE TABLE t (x INT, y INT); CREATE TABLE u (z INT);
+             ALTER TABLE u ADD CONSTRAINT k PRIMARY KEY USING INDEX i;",
+            sql
+        ),
+        vec!["E0014"]
+    );
 }
 
 // ---------------------------------------------------------------------

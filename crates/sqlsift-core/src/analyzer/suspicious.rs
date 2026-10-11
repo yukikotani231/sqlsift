@@ -14,10 +14,11 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    BinaryOperator, Expr, GroupByExpr, Ident, JoinConstraint, JoinOperator, Select, SelectItem,
-    Spanned, TableFactor, TableWithJoins, Value, Visit, Visitor,
+    BinaryOperator, CaseWhen, Expr, GroupByExpr, Ident, JoinConstraint, JoinOperator, Select,
+    SelectItem, Spanned, TableFactor, TableWithJoins, Value, ValueWithSpan, Visit, Visitor,
 };
 
+use crate::ast_ext::ObjectNamePartExt;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 
 use super::resolver::{is_comparison_operator, Resolver};
@@ -62,8 +63,8 @@ impl Resolver<'_> {
     }
 
     /// Report `CASE x WHEN NULL`, which never matches
-    pub(super) fn check_case_when_null(&mut self, operand: &Expr, conditions: &[Expr]) {
-        if conditions.iter().any(is_null) {
+    pub(super) fn check_case_when_null(&mut self, operand: &Expr, conditions: &[CaseWhen]) {
+        if conditions.iter().any(|when| is_null(&when.condition)) {
             let diag = Diagnostic::warning(
                 DiagnosticKind::NullComparison,
                 "CASE ... WHEN NULL never matches: it compares with '='",
@@ -320,7 +321,10 @@ impl Resolver<'_> {
             };
             reported.insert(group);
             let key = keys.first().cloned().unwrap_or_default();
-            let span = name.0.last().map(|ident| Span::from_sqlparser(&ident.span));
+            let span = name
+                .0
+                .last()
+                .map(|ident| Span::from_sqlparser(&ident.ident().span));
             let mut diag = Diagnostic::warning(
                 DiagnosticKind::MissingJoinCondition,
                 format!(
@@ -513,7 +517,9 @@ impl Resolver<'_> {
 
 fn is_null(expr: &Expr) -> bool {
     match expr {
-        Expr::Value(Value::Null) => true,
+        Expr::Value(ValueWithSpan {
+            value: Value::Null, ..
+        }) => true,
         Expr::Nested(inner) => is_null(inner),
         _ => false,
     }
@@ -565,7 +571,7 @@ fn item_keys(item: &TableWithJoins) -> Vec<String> {
                     alias
                         .as_ref()
                         .map(|a| a.name.value.clone())
-                        .or_else(|| name.0.last().map(|i| i.value.clone())),
+                        .or_else(|| name.0.last().map(|i| i.ident().value.clone())),
                 );
             }
             other => {
@@ -603,7 +609,7 @@ fn factor_references(factor: &TableFactor) -> Vec<Vec<String>> {
             let mut refs = Vec::new();
             // `FROM t, t.items`: an array path (a qualifier and a column)
             if name.0.len() >= 2 {
-                refs.push(name.0.iter().map(|i| i.value.clone()).collect());
+                refs.push(name.0.iter().map(|i| i.ident().value.clone()).collect());
             }
             if let Some(args) = args {
                 let mut collector = References::default();
@@ -628,9 +634,14 @@ fn factor_references(factor: &TableFactor) -> Vec<Vec<String>> {
 
 fn join_condition(op: &JoinOperator) -> Option<&Expr> {
     match op {
-        JoinOperator::Inner(JoinConstraint::On(e))
+        JoinOperator::Join(JoinConstraint::On(e))
+        | JoinOperator::Inner(JoinConstraint::On(e))
+        | JoinOperator::Left(JoinConstraint::On(e))
         | JoinOperator::LeftOuter(JoinConstraint::On(e))
+        | JoinOperator::Right(JoinConstraint::On(e))
         | JoinOperator::RightOuter(JoinConstraint::On(e))
+        | JoinOperator::CrossJoin(JoinConstraint::On(e))
+        | JoinOperator::StraightJoin(JoinConstraint::On(e))
         | JoinOperator::FullOuter(JoinConstraint::On(e))
         | JoinOperator::LeftSemi(JoinConstraint::On(e))
         | JoinOperator::RightSemi(JoinConstraint::On(e))
@@ -649,9 +660,14 @@ fn join_condition(op: &JoinOperator) -> Option<&Expr> {
 /// Whether a join matches columns by name (`USING`, `NATURAL`)
 fn join_uses(op: &JoinOperator) -> bool {
     match op {
-        JoinOperator::Inner(c)
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
         | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
         | JoinOperator::RightOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::StraightJoin(c)
         | JoinOperator::FullOuter(c)
         | JoinOperator::LeftSemi(c)
         | JoinOperator::RightSemi(c)
@@ -785,7 +801,7 @@ fn outer_join_keys(item: &TableWithJoins, nullable: &mut HashSet<String>) -> Vec
             TableFactor::Table { name, alias, .. } => alias
                 .as_ref()
                 .map(|a| a.name.value.clone())
-                .or_else(|| name.0.last().map(|i| i.value.clone()))
+                .or_else(|| name.0.last().map(|i| i.ident().value.clone()))
                 .map(|k| vec![k.to_lowercase()])
                 .unwrap_or_default(),
             other => factor_alias(other)
@@ -797,8 +813,12 @@ fn outer_join_keys(item: &TableWithJoins, nullable: &mut HashSet<String>) -> Vec
     for join in &item.joins {
         let right = factor_keys(&join.relation, nullable);
         match &join.join_operator {
-            JoinOperator::LeftOuter(_) => nullable.extend(right.iter().cloned()),
-            JoinOperator::RightOuter(_) => nullable.extend(keys.iter().cloned()),
+            JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => {
+                nullable.extend(right.iter().cloned());
+            }
+            JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
+                nullable.extend(keys.iter().cloned());
+            }
             JoinOperator::FullOuter(_) => {
                 nullable.extend(keys.iter().cloned());
                 nullable.extend(right.iter().cloned());

@@ -283,7 +283,7 @@ pub(super) fn is_date_part(name: &str) -> bool {
 /// Split `>>` closing two nested type parameter lists (`STRUCT<a STRUCT<b INT64>>`)
 /// into `> >`, outside string literals, quoted identifiers and comments.
 ///
-/// sqlparser 0.53 rejects `>>` that closes a STRUCT nested as the last field of a
+/// sqlparser rejects `>>` that closes a STRUCT nested as the last field of a
 /// STRUCT when a comma follows (as in a column list), so a BigQuery table with such a
 /// column would be skipped. Returns `None` when there is no `>>` to split.
 pub(crate) fn split_closing_angle_brackets(sql: &str) -> Option<String> {
@@ -343,10 +343,10 @@ fn skip_quoted(bytes: &[u8], mut i: usize) -> usize {
 }
 
 /// Field name the analyzer gives `expr.*` (the fields of a STRUCT expression),
-/// which [`rewrite_query`] turns into `(expr).__sqlsift_struct_star__`
-pub(super) const STRUCT_STAR_FIELD: &str = "__sqlsift_struct_star__";
+/// which [`rewrite_query`] turns into `(expr).sqlsift__struct__star__`
+pub(super) const STRUCT_STAR_FIELD: &str = "sqlsift__struct__star__";
 
-/// BigQuery query text rewritten into syntax sqlparser 0.53 parses, with the
+/// BigQuery query text rewritten into syntax sqlparser parses, with the
 /// columns where characters were inserted
 pub(crate) struct Rewritten {
     pub(crate) text: String,
@@ -378,7 +378,7 @@ struct Edit {
     insert: String,
 }
 
-/// Rewrite BigQuery syntax sqlparser 0.53 doesn't parse, outside strings, quoted
+/// Rewrite BigQuery syntax sqlparser doesn't parse, outside strings, quoted
 /// identifiers and comments (`None` if there is none):
 ///
 /// - `ANY TYPE` parameters of temporary functions: `ANY_TYPE`, a type name
@@ -387,8 +387,10 @@ struct Edit {
 ///   leaving an array literal; `>>` closing nested type parameters elsewhere
 ///   (`CAST(x AS ARRAY<STRUCT<a INT64>>)`) becomes `> >`
 /// - field access on a call or subscript result: `f(x).a.b` becomes
-///   `((f(x)).a).b`, and `f(x).*` becomes `(f(x)).__sqlsift_struct_star__`
-///   ([`STRUCT_STAR_FIELD`]) with its `EXCEPT (...)` / `REPLACE (...)` blanked
+///   `((f(x)).a).b`, and `f(x).*` becomes `(f(x)).sqlsift__struct__star__`
+///   ([`STRUCT_STAR_FIELD`]) with its `EXCEPT (...)` / `REPLACE (...)` blanked;
+///   a field name starting with `_` gets a space before it (`x[0]. _a`), which
+///   sqlparser's tokenizer otherwise rejects
 ///
 /// Lines never change; inserted characters are recorded so diagnostics can be
 /// moved back with [`Rewritten::map_span`].
@@ -563,7 +565,17 @@ fn field_access(sql: &str, group: &Group, edits: &mut Vec<Edit>) -> usize {
                 break;
             }
             Some(b'`') => j = skip_quoted(bytes, j + 1),
-            Some(&c) if c.is_ascii_alphabetic() || c == b'_' => j = word_end(bytes, j + 1),
+            Some(&c) if c.is_ascii_alphabetic() || c == b'_' => {
+                // sqlparser's tokenizer rejects `._` after a bracket: `. _a`
+                if c == b'_' {
+                    edits.push(Edit {
+                        at: j + 1,
+                        remove: 0,
+                        insert: " ".into(),
+                    });
+                }
+                j = word_end(bytes, j + 1);
+            }
             _ => break,
         }
         key_ends.push(j);
@@ -773,7 +785,7 @@ mod tests {
         assert_eq!(
             rewritten("`p.ds.f`(x)[OFFSET(0)].* EXCEPT (a)\nREPLACE (b AS c), d").as_deref(),
             Some(
-                "(`p.ds.f`(x)[OFFSET(0)]).__sqlsift_struct_star__           \n                , d"
+                "(`p.ds.f`(x)[OFFSET(0)]).sqlsift__struct__star__           \n                , d"
             )
         );
         assert_eq!(

@@ -1,14 +1,17 @@
 //! Schema builder - converts SQL AST to Catalog
 
 use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
-    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint,
-    TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
+    AlterColumnOperation, AlterTableOperation, AlterType, AlterTypeAddValuePosition,
+    AlterTypeOperation, ColumnOption, ColumnOptionDef, CreateTableLikeKind, DataType, Expr, Ident,
+    IndexColumn, ObjectName, ObjectType, Query, RenameTableNameKind, Set, SetExpr, Statement,
+    TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
+    ValueWithSpan,
 };
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
+use crate::ast_ext::{name_last, ObjectNamePartExt};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql;
@@ -101,12 +104,17 @@ impl SchemaBuilder {
             | Statement::CreateType { .. }
             | Statement::CreateView { .. }
             | Statement::AlterTable { .. }
+            | Statement::AlterType(_)
             | Statement::Drop {
-                object_type: ObjectType::Table | ObjectType::View | ObjectType::Type,
+                object_type:
+                    ObjectType::Table
+                    | ObjectType::View
+                    | ObjectType::MaterializedView
+                    | ObjectType::Type,
                 ..
             } => true,
             Statement::Query(query) => select_into(query).is_some(),
-            Statement::SetVariable { variables, .. } => is_search_path(variables),
+            Statement::Set(set) => search_path_values(set).is_some(),
             Statement::Use(use_stmt) => used_schema(use_stmt).is_some(),
             _ => false,
         }
@@ -639,7 +647,50 @@ impl SchemaBuilder {
     }
 
     /// Apply `ALTER TYPE name ADD VALUE ...` / `RENAME VALUE ...` / `RENAME TO ...`
-    /// (not parsed by sqlparser) to an enum. `tokens` start after `ALTER TYPE`.
+    /// to an enum
+    fn process_alter_type(&mut self, alter: &AlterType) {
+        let enum_name = self.catalog.qualified_name(&alter.name).to_string();
+        if let AlterTypeOperation::Rename(rename) = &alter.operation {
+            let new_name = self.catalog.ident_name(&rename.new_name);
+            if let Some(mut def) = self.catalog.get_enum(&enum_name).cloned() {
+                self.catalog.drop_enum(&enum_name);
+                def.name = new_name;
+                self.catalog.add_enum(def);
+            }
+            return;
+        }
+        let Some(def) = self.catalog.get_enum_mut(&enum_name) else {
+            return;
+        };
+        match &alter.operation {
+            AlterTypeOperation::AddValue(add) => {
+                let value = add.value.value.clone();
+                if def.values.contains(&value) {
+                    return;
+                }
+                let (anchor, insert_after) = match &add.position {
+                    Some(AlterTypeAddValuePosition::Before(a)) => (Some(a), false),
+                    Some(AlterTypeAddValuePosition::After(a)) => (Some(a), true),
+                    None => (None, false),
+                };
+                match anchor.and_then(|a| def.values.iter().position(|v| *v == a.value)) {
+                    Some(pos) if insert_after => def.values.insert(pos + 1, value),
+                    Some(pos) => def.values.insert(pos, value),
+                    None => def.values.push(value),
+                }
+            }
+            AlterTypeOperation::RenameValue(rename) => {
+                if let Some(v) = def.values.iter_mut().find(|v| **v == rename.from.value) {
+                    v.clone_from(&rename.to.value);
+                }
+            }
+            AlterTypeOperation::Rename(_) => {}
+        }
+    }
+
+    /// Apply `ALTER TYPE name ADD VALUE ...` / `RENAME VALUE ...` / `RENAME TO ...`
+    /// (in a statement sqlparser doesn't parse) to an enum. `tokens` start after
+    /// `ALTER TYPE`.
     fn process_alter_type_tokens(&mut self, tokens: &[&Token]) {
         let name_len = object_name_len(tokens);
         let Some(name) = split_object_names(&tokens[..name_len]).into_iter().next() else {
@@ -717,50 +768,45 @@ impl SchemaBuilder {
             }
             Statement::CreateType {
                 name,
-                representation,
+                representation: Some(representation),
             } => {
                 self.process_create_type(name, representation);
             }
-            Statement::CreateView {
-                name,
-                columns,
-                query,
-                materialized,
-                if_not_exists,
-                ..
-            } => {
-                self.catalog.note_database(name);
-                let qualified = self.catalog.qualified_name(name);
-                if *if_not_exists && self.relation_exists(&qualified) {
+            Statement::CreateView(view) => {
+                self.catalog.note_database(&view.name);
+                let qualified = self.catalog.qualified_name(&view.name);
+                if view.if_not_exists && self.relation_exists(&qualified) {
                     return;
                 }
-                self.process_create_view(qualified, columns, query, *materialized);
+                self.process_create_view(qualified, &view.columns, &view.query, view.materialized);
             }
-            Statement::AlterTable {
-                name, operations, ..
-            } => {
-                self.process_alter_table(name, operations);
+            Statement::AlterTable(alter) => {
+                self.process_alter_table(&alter.name, &alter.operations);
             }
-            Statement::CreateTrigger {
-                period: TriggerPeriod::Before | TriggerPeriod::InsteadOf,
-                events,
-                table_name,
-                ..
-            } => {
+            Statement::AlterType(alter) => self.process_alter_type(alter),
+            Statement::CreateTrigger(trigger)
+                if matches!(
+                    trigger.period,
+                    Some(TriggerPeriod::Before | TriggerPeriod::InsteadOf)
+                ) =>
+            {
+                let events = &trigger.events;
                 let insert = events.iter().any(|e| matches!(e, TriggerEvent::Insert));
                 let update = events.iter().any(|e| matches!(e, TriggerEvent::Update(_)));
-                let name = self.catalog.qualified_name(table_name);
+                let name = self.catalog.qualified_name(&trigger.table_name);
                 self.note_before_trigger(&name, insert, update);
             }
             // `SELECT ... INTO [TEMP] t` creates `t`
             Statement::Query(query) => {
                 if let Some(into) = select_into(query) {
-                    self.process_select_into(into, query);
+                    self.process_select_into(&into, query);
                 }
             }
-            Statement::SetVariable {
-                variables, value, ..
-            } if is_search_path(variables) => self.process_search_path(value),
+            Statement::Set(set) => {
+                if let Some(values) = search_path_values(set) {
+                    self.process_search_path(values);
+                }
+            }
             // MySQL `USE db` / `USE SCHEMA s`: unqualified names are in that
             // database for the rest of the file
             Statement::Use(use_stmt) => {
@@ -775,6 +821,10 @@ impl SchemaBuilder {
                 for name in names {
                     match object_type {
                         ObjectType::Table => self.process_drop_table(name),
+                        ObjectType::MaterializedView => {
+                            let name = self.catalog.qualified_name(name);
+                            self.catalog.drop_view(&name);
+                        }
                         ObjectType::View => {
                             let location = self.name_location(name);
                             let name = self.catalog.qualified_name(name);
@@ -802,7 +852,7 @@ impl SchemaBuilder {
         let columns: Option<Vec<String>> = index
             .columns
             .iter()
-            .map(|c| match &c.expr {
+            .map(|c| match &c.column.expr {
                 Expr::Identifier(ident) => Some(ident.value.clone()),
                 _ => None,
             })
@@ -857,15 +907,17 @@ impl SchemaBuilder {
         self.location(
             name.0
                 .first()
-                .map_or(sqlparser::tokenizer::Span::empty(), |ident| ident.span),
+                .map_or(sqlparser::tokenizer::Span::empty(), |ident| {
+                    ident.ident().span
+                }),
         )
     }
 
     /// Span in the input of an object name, for schema warnings (with a line and
     /// column but no byte offset)
     fn name_span(&self, name: &ObjectName) -> Option<Span> {
-        let start = name.0.first()?.span.start;
-        let end = name.0.last()?.span.end;
+        let start = name.0.first()?.ident().span.start;
+        let end = name.0.last()?.ident().span.end;
         if start.line == 0 {
             return None;
         }
@@ -893,7 +945,12 @@ impl SchemaBuilder {
         let mut table = TableDef::new(name.clone());
 
         // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
-        if let Some(like) = create.like.as_ref().or(create.clone.as_ref()) {
+        let like = create.like.as_ref().map(|like| match like {
+            CreateTableLikeKind::Parenthesized(like) | CreateTableLikeKind::Plain(like) => {
+                &like.name
+            }
+        });
+        if let Some(like) = like.or(create.clone.as_ref()) {
             let source = self.catalog.qualified_name(like);
             match self.catalog.get_table(&source) {
                 Some(source_table) => {
@@ -949,6 +1006,49 @@ impl SchemaBuilder {
             self.process_table_constraint(&mut table, constraint);
         }
 
+        // `CREATE TABLE p1 PARTITION OF p ...`: the parent's columns
+        if let Some(parent) = &create.partition_of {
+            self.add_partition(table, parent);
+            return;
+        }
+
+        self.catalog.add_table(table);
+        // PostgreSQL `INHERITS (parent [, ...])`
+        if let Some(parents) = &create.inherits {
+            self.inherit_columns(&name, parents);
+        }
+    }
+
+    /// Add a partition (`CREATE TABLE p1 PARTITION OF p ...`) with the columns,
+    /// primary key and CHECK constraints of its parent. A partition of a table the
+    /// schema doesn't define is skipped with a warning.
+    fn add_partition(&mut self, mut table: TableDef, parent: &ObjectName) {
+        let parent_name = self.catalog.qualified_name(parent);
+        let Some(parent_table) = self.catalog.get_table(&parent_name) else {
+            self.diagnostics.push(
+                Diagnostic::warning(
+                    DiagnosticKind::ParseError,
+                    format!(
+                        "Skipped CREATE TABLE statement for '{}': it is a partition of table '{parent_name}' which was not found in schema",
+                        table.name
+                    ),
+                )
+                .with_help("Ensure the parent table is created before its partitions"),
+            );
+            self.catalog.skipped_definitions.push(SkippedDefinition {
+                kind: "CREATE TABLE".to_string(),
+                name: Some(table.name.to_string()),
+                line: self.statement_line,
+            });
+            return;
+        };
+        table.columns.clone_from(&parent_table.columns);
+        table.primary_key.clone_from(&parent_table.primary_key);
+        // A unique index of the parent is also an index of the partition
+        table.unknown_unique_keys = true;
+        table
+            .check_constraints
+            .clone_from(&parent_table.check_constraints);
         self.catalog.add_table(table);
     }
 
@@ -992,8 +1092,8 @@ impl SchemaBuilder {
 
     /// `SELECT ... INTO [TEMP | UNLOGGED] [TABLE] t`: create `t` with the query's
     /// output columns
-    fn process_select_into(&mut self, into: &SelectInto, query: &Query) {
-        let name = self.catalog.qualified_name(&into.name);
+    fn process_select_into(&mut self, into: &ObjectName, query: &Query) {
+        let name = self.catalog.qualified_name(into);
         let mut table = TableDef::new(name);
         if self.add_query_columns(&mut table, query, "SELECT ... INTO") {
             self.catalog.add_table(table);
@@ -1007,7 +1107,10 @@ impl SchemaBuilder {
         for value in values {
             match value {
                 Expr::Identifier(ident) => path.push(self.catalog.ident_name(ident)),
-                Expr::Value(Value::SingleQuotedString(list)) => {
+                Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(list),
+                    ..
+                }) => {
                     for part in list.split(',').map(str::trim) {
                         match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
                             Some(quoted) => path.push(quoted.to_string()),
@@ -1114,7 +1217,7 @@ impl SchemaBuilder {
                     | AlterTableOperation::DropColumn { .. }
                     | AlterTableOperation::RenameColumn { .. }
                     | AlterTableOperation::RenameTable { .. }
-                    | AlterTableOperation::AddConstraint(_)
+                    | AlterTableOperation::AddConstraint { .. }
                     | AlterTableOperation::AlterColumn { .. }
                     | AlterTableOperation::ChangeColumn { .. }
                     | AlterTableOperation::ModifyColumn { .. }
@@ -1159,12 +1262,14 @@ impl SchemaBuilder {
                         table.columns.insert(col.name.clone(), col);
                     }
                 }
-                AlterTableOperation::DropColumn { column_name, .. } => {
-                    let location = self.location(column_name.span);
-                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        if let Some(index) = column_index(table, &column_name.value) {
-                            if let Some((name, _)) = table.columns.shift_remove_index(index) {
-                                table.record_column_drop(&name, location);
+                AlterTableOperation::DropColumn { column_names, .. } => {
+                    for column_name in column_names {
+                        let location = self.location(column_name.span);
+                        if let Some(table) = self.catalog.get_table_mut(&table_name) {
+                            if let Some(index) = column_index(table, &column_name.value) {
+                                if let Some((name, _)) = table.columns.shift_remove_index(index) {
+                                    table.record_column_drop(&name, location);
+                                }
                             }
                         }
                     }
@@ -1238,7 +1343,8 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::RenameTable {
-                    table_name: new_name,
+                    table_name:
+                        RenameTableNameKind::As(new_name) | RenameTableNameKind::To(new_name),
                 } => {
                     let location = self.name_location(new_name);
                     let new_qualified = self.catalog.qualified_name(new_name);
@@ -1252,7 +1358,7 @@ impl SchemaBuilder {
                     self.catalog
                         .record_renamed_relation(old_name, &new_qualified.name, location);
                 }
-                AlterTableOperation::AddConstraint(constraint) => {
+                AlterTableOperation::AddConstraint { constraint, .. } => {
                     let mut constraints = TableDef::new(table_name.clone());
                     self.process_table_constraint(&mut constraints, constraint);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
@@ -1318,10 +1424,10 @@ impl SchemaBuilder {
     /// Process a table constraint (PRIMARY KEY, FOREIGN KEY, UNIQUE)
     fn process_table_constraint(&mut self, table: &mut TableDef, constraint: &TableConstraint) {
         match constraint {
-            TableConstraint::PrimaryKey { columns, name, .. } => {
+            TableConstraint::PrimaryKey(pk) => {
                 let pk = PrimaryKeyDef {
-                    name: name.as_ref().map(|n| n.value.clone()),
-                    columns: columns.iter().map(|c| c.value.clone()).collect(),
+                    name: pk.name.as_ref().map(|n| n.value.clone()),
+                    columns: pk.columns.iter().map(index_column_name).collect(),
                 };
                 // Mark columns as primary key
                 for col_name in &pk.columns {
@@ -1333,35 +1439,38 @@ impl SchemaBuilder {
                 }
                 table.primary_key = Some(pk);
             }
-            TableConstraint::ForeignKey {
-                columns,
-                foreign_table,
-                referred_columns,
-                name,
-                ..
-            } => {
+            TableConstraint::ForeignKey(fk) => {
                 let fk = ForeignKeyDef {
-                    name: name.as_ref().map(|n| n.value.clone()),
-                    columns: columns.iter().map(|c| c.value.clone()).collect(),
-                    references_table: self.catalog.qualified_name(foreign_table),
-                    references_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                    name: fk.name.as_ref().map(|n| n.value.clone()),
+                    columns: fk.columns.iter().map(|c| c.value.clone()).collect(),
+                    references_table: self.catalog.qualified_name(&fk.foreign_table),
+                    references_columns: fk
+                        .referred_columns
+                        .iter()
+                        .map(|c| c.value.clone())
+                        .collect(),
                 };
                 table.foreign_keys.push(fk);
             }
-            TableConstraint::Unique { columns, name, .. } => {
+            TableConstraint::Unique(unique) => {
                 let unique = UniqueConstraintDef {
-                    name: name.as_ref().map(|n| n.value.clone()),
-                    columns: columns.iter().map(|c| c.value.clone()).collect(),
+                    name: unique.name.as_ref().map(|n| n.value.clone()),
+                    columns: unique.columns.iter().map(index_column_name).collect(),
                 };
                 table.unique_constraints.push(unique);
             }
-            TableConstraint::Check { name, expr, .. } => {
+            TableConstraint::Check(check) => {
                 let check = CheckConstraintDef {
-                    name: name.as_ref().map(|n| n.value.clone()),
-                    expression: expr.to_string(),
+                    name: check.name.as_ref().map(|n| n.value.clone()),
+                    expression: check.expr.to_string(),
                 };
                 table.check_constraints.push(check);
             }
+            // `PRIMARY KEY USING INDEX i` / `UNIQUE USING INDEX i` (the key is the
+            // index's columns) and exclusion constraints: unique keys aren't all known
+            TableConstraint::PrimaryKeyUsingIndex(_)
+            | TableConstraint::UniqueUsingIndex(_)
+            | TableConstraint::Exclude(_) => table.unknown_unique_keys = true,
             _ => {}
         }
     }
@@ -1403,37 +1512,36 @@ fn build_column(
             ColumnOption::Null => col.nullable = true,
             ColumnOption::NotNull => col.nullable = false,
             ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
-            ColumnOption::Unique { is_primary, .. } => {
-                if *is_primary {
-                    col.is_primary_key = true;
-                    col.nullable = false;
-                    constraints.primary_key = Some(PrimaryKeyDef {
-                        name: constraint_name,
-                        columns: vec![col_name.to_string()],
-                    });
-                } else {
-                    constraints.unique_constraints.push(UniqueConstraintDef {
-                        name: constraint_name,
-                        columns: vec![col_name.to_string()],
-                    });
-                }
+            ColumnOption::PrimaryKey(_) => {
+                col.is_primary_key = true;
+                col.nullable = false;
+                constraints.primary_key = Some(PrimaryKeyDef {
+                    name: constraint_name,
+                    columns: vec![col_name.to_string()],
+                });
             }
-            ColumnOption::ForeignKey {
-                foreign_table,
-                referred_columns,
-                ..
-            } => {
+            ColumnOption::Unique(_) => {
+                constraints.unique_constraints.push(UniqueConstraintDef {
+                    name: constraint_name,
+                    columns: vec![col_name.to_string()],
+                });
+            }
+            ColumnOption::ForeignKey(fk) => {
                 constraints.foreign_keys.push(ForeignKeyDef {
                     name: constraint_name,
                     columns: vec![col_name.to_string()],
-                    references_table: catalog.qualified_name(foreign_table),
-                    references_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                    references_table: catalog.qualified_name(&fk.foreign_table),
+                    references_columns: fk
+                        .referred_columns
+                        .iter()
+                        .map(|c| c.value.clone())
+                        .collect(),
                 });
             }
-            ColumnOption::Check(expr) => {
+            ColumnOption::Check(check) => {
                 constraints.check_constraints.push(CheckConstraintDef {
                     name: constraint_name,
-                    expression: expr.to_string(),
+                    expression: check.expr.to_string(),
                 });
             }
             ColumnOption::Generated {
@@ -1486,10 +1594,23 @@ fn build_column(
 }
 
 /// The `INTO` target of a `SELECT ... INTO t` query
-fn select_into(query: &Query) -> Option<&SelectInto> {
-    match query.body.as_ref() {
-        SetExpr::Select(select) => select.into.as_ref(),
+fn select_into(query: &Query) -> Option<ObjectName> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    match select.into.as_ref()?.targets.as_slice() {
+        [Expr::Identifier(ident)] => Some(ObjectName::from(vec![ident.clone()])),
+        [Expr::CompoundIdentifier(idents)] => Some(ObjectName::from(idents.clone())),
         _ => None,
+    }
+}
+
+/// The name of an index or key column (`PRIMARY KEY (a, b)`); an expression part
+/// is kept as written
+fn index_column_name(column: &IndexColumn) -> String {
+    match &column.column.expr {
+        Expr::Identifier(ident) => ident.value.clone(),
+        expr => expr.to_string(),
     }
 }
 
@@ -1497,14 +1618,21 @@ fn select_into(query: &Query) -> Option<&SelectInto> {
 /// `USE db` / `USE SCHEMA db.schema`
 fn used_schema(use_stmt: &Use) -> Option<&Ident> {
     match use_stmt {
-        Use::Object(name) | Use::Schema(name) => name.0.last(),
+        Use::Object(name) | Use::Schema(name) => name_last(name),
         _ => None,
     }
 }
 
-/// Whether a SET statement sets `search_path`
-fn is_search_path(variables: &[ObjectName]) -> bool {
-    matches!(variables, [name] if name.0.last().is_some_and(|i| i.value.eq_ignore_ascii_case("search_path")))
+/// The values a SET statement gives `search_path`, if it sets it
+fn search_path_values(set: &Set) -> Option<&[Expr]> {
+    match set {
+        Set::SingleAssignment {
+            variable, values, ..
+        } if name_last(variable).is_some_and(|i| i.value.eq_ignore_ascii_case("search_path")) => {
+            Some(values)
+        }
+        _ => None,
+    }
 }
 
 /// Whether a data type is one of PostgreSQL's serial pseudo-types
@@ -1512,7 +1640,10 @@ fn is_serial_type(data_type: &DataType) -> bool {
     match data_type {
         DataType::Custom(name, modifiers) if modifiers.is_empty() => {
             matches!(
-                name.0.last().map(|i| i.value.to_lowercase()).as_deref(),
+                name.0
+                    .last()
+                    .map(|i| i.ident().value.to_lowercase())
+                    .as_deref(),
                 Some("serial" | "serial2" | "serial4" | "serial8" | "smallserial" | "bigserial")
             )
         }
@@ -1532,6 +1663,7 @@ fn merge_constraints(table: &mut TableDef, constraints: TableDef) {
     table
         .check_constraints
         .extend(constraints.check_constraints);
+    table.unknown_unique_keys |= constraints.unknown_unique_keys;
 }
 
 /// Apply an `ALTER TABLE ... ALTER COLUMN` operation to a column
@@ -1594,11 +1726,15 @@ fn replace_column(table: &mut TableDef, index: usize, col: ColumnDef) {
     }
 }
 
-/// If `column` is the pseudo-column sqlparser produces for `LIKE p` inside a
-/// CREATE TABLE column list, return the source table name
+/// Column name [`mask_unsupported_clauses`] writes over the `LIKE` of a `LIKE p`
+/// element (same length), so the element parses as a column of type `p`
+const LIKE_COLUMN: &str = "_lk_";
+
+/// If `column` is the pseudo-column for `LIKE p` inside a CREATE TABLE column list
+/// (see [`LIKE_COLUMN`]), return the source table name
 fn like_pseudo_column(column: &sqlparser::ast::ColumnDef) -> Option<&ObjectName> {
     if column.name.quote_style.is_some()
-        || !column.name.value.eq_ignore_ascii_case("LIKE")
+        || !(column.name.value.eq_ignore_ascii_case("LIKE") || column.name.value == LIKE_COLUMN)
         || !column.options.is_empty()
     {
         return None;
@@ -1769,6 +1905,8 @@ pub(crate) fn mask_unsupported_clauses(
 /// Mark for dropping the parts of a CREATE TABLE's column and constraint list that
 /// sqlparser can't parse and that don't change its columns:
 ///
+/// - a `LIKE p` element, which sqlparser only parses as the whole list (written
+///   over by [`LIKE_COLUMN`])
 /// - PostgreSQL exclusion constraints (`[CONSTRAINT name] EXCLUDE USING gist (...)`),
 ///   with the comma before them, a foreign key's `MATCH SIMPLE | FULL | PARTIAL`, a
 ///   constraint's `NOT VALID`, and the SQL-standard array type suffix
@@ -1873,6 +2011,17 @@ fn mask_table_elements(
             }
         }
         let kind = word(n);
+        // `LIKE p` with other elements (or options) after it, which sqlparser only
+        // parses as the whole list: the column [`like_pseudo_column`] recognizes
+        if kind == "LIKE" && n == first {
+            if let Some(start) = offset(&tokens[significant[n]]) {
+                edits.push(super::warehouse::Edit {
+                    range: start..start + "LIKE".len(),
+                    text: LIKE_COLUMN,
+                });
+            }
+            continue;
+        }
         if dialect.is_psql() {
             if kind == "EXCLUDE" {
                 // With the comma before it
@@ -2012,7 +2161,7 @@ fn split_object_names(tokens: &[&Token]) -> Vec<ObjectName> {
         if len == 0 {
             break;
         }
-        let parts = rest[..len]
+        let parts: Vec<Ident> = rest[..len]
             .iter()
             .filter_map(|t| match t {
                 Token::Word(w) => Some(match w.quote_style {
@@ -2022,7 +2171,7 @@ fn split_object_names(tokens: &[&Token]) -> Vec<ObjectName> {
                 _ => None,
             })
             .collect();
-        names.push(ObjectName(parts));
+        names.push(ObjectName::from(parts));
         match rest.get(len) {
             Some(Token::Comma) => rest = &rest[len + 1..],
             _ => break,
@@ -2093,7 +2242,7 @@ fn relocate_parser_message(message: &str, base: (usize, usize)) -> String {
 /// Convert expression to DefaultValue
 fn expr_to_default(expr: &sqlparser::ast::Expr) -> DefaultValue {
     match expr {
-        sqlparser::ast::Expr::Value(v) => match v {
+        sqlparser::ast::Expr::Value(v) => match &v.value {
             sqlparser::ast::Value::Null => DefaultValue::Null,
             _ => DefaultValue::Literal(v.to_string()),
         },

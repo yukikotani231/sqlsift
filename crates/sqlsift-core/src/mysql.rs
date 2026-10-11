@@ -18,18 +18,13 @@
 //! Every rewritten character becomes one character, so lines and character columns
 //! are kept (byte lengths are kept too unless a blanked name has non-ASCII characters).
 //!
-//! `INSERT ... SET col = value, ...` is parsed by [`parse_insert_set`] into the
+//! `INSERT ... SET col = value, ...` is turned by [`insert_set_as_values`] into the
 //! equivalent `INSERT ... (col, ...) VALUES (value, ...)`.
 
 use std::borrow::Cow;
 
-use sqlparser::ast::{
-    AssignmentTarget, Insert, InsertAliases, MysqlInsertPriority, OnInsert, Query, SetExpr,
-    Statement, Values,
-};
-use sqlparser::dialect::{Dialect, MySqlDialect};
-use sqlparser::keywords::Keyword;
-use sqlparser::parser::{IsOptional, Parser, ParserError};
+use sqlparser::ast::{AssignmentTarget, Parens, Query, SetExpr, Statement, Values};
+use sqlparser::dialect::MySqlDialect;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::psql::Preprocessed;
@@ -377,113 +372,49 @@ fn rewrite_tokens(sql: &str) -> Option<String> {
     Some(out)
 }
 
-/// Parse MySQL's `INSERT ... SET col = value, ...` (or `REPLACE ... SET`) as the
-/// equivalent `INSERT ... (col, ...) VALUES (value, ...)`.
+/// Turn MySQL's `INSERT ... SET col = value, ...` (or `REPLACE ... SET`), which
+/// sqlparser parses into [`sqlparser::ast::Insert::assignments`], into the equivalent
+/// `INSERT ... (col, ...) VALUES (value, ...)`, so INSERT checks see one shape.
 ///
-/// Returns `None` if `sql` isn't such a statement (and so the parser's own error
-/// stands), or the error of a statement that is one.
-pub(crate) fn parse_insert_set(
-    dialect: &dyn Dialect,
-    sql: &str,
-) -> Option<Result<Statement, ParserError>> {
-    let mut parser = Parser::new(dialect).try_with_sql(sql).ok()?;
-    let replace_into =
-        parser.parse_one_of_keywords(&[Keyword::INSERT, Keyword::REPLACE])? == Keyword::REPLACE;
-    let priority = if parser.parse_keyword(Keyword::LOW_PRIORITY) {
-        Some(MysqlInsertPriority::LowPriority)
-    } else if parser.parse_keyword(Keyword::DELAYED) {
-        Some(MysqlInsertPriority::Delayed)
-    } else if parser.parse_keyword(Keyword::HIGH_PRIORITY) {
-        Some(MysqlInsertPriority::HighPriority)
-    } else {
-        None
+/// An assignment to a tuple of columns isn't valid there and leaves the statement
+/// as parsed.
+pub(crate) fn insert_set_as_values(statement: &mut Statement) {
+    let Statement::Insert(insert) = statement else {
+        return;
     };
-    let ignore = parser.parse_keyword(Keyword::IGNORE);
-    let into = parser.parse_keyword(Keyword::INTO);
-    let table_name = parser.parse_object_name(false).ok()?;
-    let partitioned = parser.parse_insert_partition().ok()?;
-    if !parser.parse_keyword(Keyword::SET) {
-        return None;
+    if insert.assignments.is_empty()
+        || insert.source.is_some()
+        || !insert.columns.is_empty()
+        || insert
+            .assignments
+            .iter()
+            .any(|a| !matches!(a.target, AssignmentTarget::ColumnName(_)))
+    {
+        return;
     }
-    Some(insert_set_rest(
-        &mut parser,
-        Insert {
-            or: None,
-            ignore,
-            into,
-            table_name,
-            table_alias: None,
-            columns: Vec::new(),
-            overwrite: false,
-            source: None,
-            partitioned,
-            after_columns: Vec::new(),
-            table: false,
-            on: None,
-            returning: None,
-            replace_into,
-            priority,
-            insert_alias: None,
-        },
-    ))
-}
-
-/// The assignments, row alias and ON DUPLICATE KEY UPDATE clause after `SET`
-fn insert_set_rest(parser: &mut Parser, mut insert: Insert) -> Result<Statement, ParserError> {
-    let assignments = parser.parse_comma_separated(Parser::parse_assignment)?;
-    let mut row = Vec::with_capacity(assignments.len());
-    for assignment in assignments {
-        let AssignmentTarget::ColumnName(name) = assignment.target else {
-            return Err(ParserError::ParserError(
-                "Expected: a column name in INSERT ... SET".to_string(),
-            ));
-        };
-        let Some(column) = name.0.into_iter().last() else {
-            return Err(ParserError::ParserError(
-                "Expected: a column name in INSERT ... SET".to_string(),
-            ));
-        };
-        insert.columns.push(column);
-        row.push(assignment.value);
+    let mut row = Vec::with_capacity(insert.assignments.len());
+    for assignment in std::mem::take(&mut insert.assignments) {
+        if let AssignmentTarget::ColumnName(name) = assignment.target {
+            insert.columns.push(name);
+            row.push(assignment.value);
+        }
     }
     insert.source = Some(Box::new(Query {
         with: None,
         body: Box::new(SetExpr::Values(Values {
             explicit_row: false,
-            rows: vec![row],
+            value_keyword: false,
+            rows: vec![Parens::with_empty_span(row)],
         })),
         order_by: None,
-        limit: None,
-        limit_by: Vec::new(),
-        offset: None,
+        limit_clause: None,
         fetch: None,
         locks: Vec::new(),
         for_clause: None,
         settings: None,
         format_clause: None,
+        pipe_operators: Vec::new(),
     }));
-
-    if parser.parse_keyword(Keyword::AS) {
-        let row_alias = parser.parse_object_name(false)?;
-        let col_aliases =
-            Some(parser.parse_parenthesized_column_list(IsOptional::Optional, false)?);
-        insert.insert_alias = Some(InsertAliases {
-            row_alias,
-            col_aliases,
-        });
-    }
-    if parser.parse_keyword(Keyword::ON) {
-        parser.expect_keywords(&[Keyword::DUPLICATE, Keyword::KEY, Keyword::UPDATE])?;
-        insert.on = Some(OnInsert::DuplicateKeyUpdate(
-            parser.parse_comma_separated(Parser::parse_assignment)?,
-        ));
-    }
-    while parser.consume_token(&Token::SemiColon) {}
-    let next = parser.peek_token();
-    if next.token != Token::EOF {
-        return parser.expected("end of statement", next);
-    }
-    Ok(Statement::Insert(insert))
 }
 
 #[cfg(test)]
@@ -542,16 +473,19 @@ mod tests {
 
     #[test]
     fn insert_set_becomes_values() {
-        let Some(Ok(stmt)) =
-            parse_insert_set(&MySqlDialect {}, "INSERT INTO t SET a = 1, b = 'x';")
-        else {
-            panic!("should parse");
+        let parse = |sql: &str| {
+            let mut statements =
+                sqlparser::parser::Parser::parse_sql(&MySqlDialect {}, sql).expect("parses");
+            insert_set_as_values(&mut statements[0]);
+            statements.remove(0).to_string()
         };
-        assert_eq!(stmt.to_string(), "INSERT INTO t (a, b) VALUES (1, 'x')");
-        assert!(parse_insert_set(&MySqlDialect {}, "INSERT INTO t VALUES (1)").is_none());
-        assert!(matches!(
-            parse_insert_set(&MySqlDialect {}, "INSERT INTO t SET a = 1 b"),
-            Some(Err(_))
-        ));
+        assert_eq!(
+            parse("INSERT INTO t SET a = 1, b = 'x';"),
+            "INSERT INTO t (a, b) VALUES (1, 'x')"
+        );
+        assert_eq!(
+            parse("INSERT INTO t VALUES (1)"),
+            "INSERT INTO t VALUES (1)"
+        );
     }
 }

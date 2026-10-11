@@ -10,6 +10,7 @@
 
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments};
 
+use crate::ast_ext::ObjectNamePartExt;
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind};
 use crate::types::SqlType;
@@ -78,13 +79,13 @@ impl Resolver<'_> {
         // not the built-in one
         let name = match func.name.0.as_slice() {
             [name] => name,
-            [schema, name] if schema.value.eq_ignore_ascii_case("pg_catalog") => name,
+            [schema, name] if schema.ident().value.eq_ignore_ascii_case("pg_catalog") => name,
             _ => return,
         };
-        if name.quote_style.is_some() {
+        if name.ident().quote_style.is_some() {
             return;
         }
-        let name = name.value.to_lowercase();
+        let name = name.ident().value.to_lowercase();
         let Some(accepts) = builtin(&name) else {
             return;
         };

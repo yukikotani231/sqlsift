@@ -314,7 +314,13 @@ impl Masker {
         if start > line_start {
             self.out[start - 1] = b';';
         } else if matches!(self.out.get(start + 2), Some(b' ' | b'\t')) {
-            self.out[start..start + 3].copy_from_slice(b";--");
+            // MySQL's `--` starts a comment only before whitespace: use `#` there
+            let replacement = if self.dialect == SqlDialect::MySQL {
+                b";# "
+            } else {
+                b";--"
+            };
+            self.out[start..start + 3].copy_from_slice(replacement);
         }
     }
 
@@ -564,7 +570,7 @@ mod tests {
                 "-- :name q :! :n\ninsert into t (a, b) values :t*:rows",
                 SqlDialect::MySQL
             ),
-            ";--:name q :! :n\ninsert into t (a, b) TABLE  _.__rows"
+            ";# :name q :! :n\ninsert into t (a, b) TABLE  _.__rows"
         );
     }
 

@@ -13,9 +13,10 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, GroupByExpr, Ident, Query, Select, SelectItem, TableFactor, Value, Visitor,
+    Expr, GroupByExpr, Ident, Query, Select, SelectItem, TableFactor, Value, ValueWithSpan, Visitor,
 };
 
+use crate::ast_ext::{order_by_exprs, ObjectNamePartExt};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 
@@ -51,7 +52,7 @@ impl Resolver<'_> {
         }
         let order_by: Vec<&Expr> = query
             .and_then(|q| q.order_by.as_ref())
-            .map(|o| o.exprs.iter().map(|e| &e.expr).collect())
+            .map(|o| order_by_exprs(o).iter().map(|e| &e.expr).collect())
             .unwrap_or_default();
         let projection: Vec<&Expr> = select
             .projection
@@ -92,7 +93,10 @@ impl Resolver<'_> {
         for expr in group_by {
             let expr = match expr {
                 // A position in the select list
-                Expr::Value(Value::Number(n, _)) => {
+                Expr::Value(ValueWithSpan {
+                    value: Value::Number(n, _),
+                    ..
+                }) => {
                     match n
                         .parse::<usize>()
                         .ok()
@@ -268,7 +272,7 @@ impl Resolver<'_> {
                     let key = alias
                         .as_ref()
                         .map(|a| a.name.value.clone())
-                        .or_else(|| name.0.last().map(|i| i.value.clone()));
+                        .or_else(|| name.0.last().map(|i| i.ident().value.clone()));
                     if let Some(key) = key {
                         out.push((key.to_lowercase(), resolver.catalog.qualified_name(name)));
                     }
@@ -414,7 +418,10 @@ impl UngroupedRefs<'_> {
             Expr::Function(f) => {
                 let known = f.over.is_none()
                     && f.name.0.len() == 1
-                    && f.name.0.first().is_some_and(|n| is_known_scalar(&n.value));
+                    && f.name
+                        .0
+                        .first()
+                        .is_some_and(|n| is_known_scalar(&n.ident().value));
                 is_aggregate(f, self.dialect) && f.over.is_none() || !known
             }
             _ => {

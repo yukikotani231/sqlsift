@@ -7,6 +7,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod analyzer;
+mod ast_ext;
 pub mod baseline;
 pub mod dbt;
 pub mod dialect;

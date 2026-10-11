@@ -14,8 +14,14 @@ CREATE TABLE posts (id INT PRIMARY KEY, user_id INT);
 ";
 
 fn codes_in(dialect: SqlDialect, sql: &str) -> Vec<&'static str> {
+    // `INT[]` is PostgreSQL's array type
+    let schema = match dialect {
+        SqlDialect::BigQuery => SCHEMA.replace("INT[]", "ARRAY<INT64>"),
+        SqlDialect::MySQL => SCHEMA.replace("INT[]", "JSON"),
+        _ => SCHEMA.to_string(),
+    };
     let mut builder = SchemaBuilder::with_dialect(dialect);
-    builder.parse(SCHEMA).expect("schema parses");
+    builder.parse(&schema).expect("schema parses");
     let catalog = builder.build().0;
     Analyzer::with_dialect(&catalog, dialect)
         .analyze(sql)

@@ -218,7 +218,7 @@ fn file_local_tables_work_with_statement_by_statement_parsing() {
     // A syntax error elsewhere makes the file parse statement by statement
     let diagnostics = analyze(
         "CREATE TEMP TABLE scratch (id INTEGER);
-         SELECT FROM WHERE;
+         SELECT 1 1 FROM t;
          SELECT id FROM scratch;",
     );
     assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ParseError]);
@@ -513,7 +513,7 @@ SELECT id FROM t;";
 fn dropped_table_help_with_earlier_parse_error() {
     let catalog = catalog("CREATE TABLE t (id INTEGER);", SqlDialect::PostgreSQL);
 
-    let sql = "SELECT FROM WHERE;
+    let sql = "SELECT 1 1 FROM t;
 
 DROP TABLE t;
 

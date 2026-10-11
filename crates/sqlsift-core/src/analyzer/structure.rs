@@ -18,9 +18,11 @@ use std::ops::ControlFlow;
 
 use sqlparser::ast::{
     Assignment, AssignmentTarget, Expr, Function, FunctionArguments, GroupByExpr, Ident, Insert,
-    Query, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Value, Visit, Visitor,
+    Parens, Query, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Value, ValueWithSpan,
+    Visit, Visitor,
 };
 
+use crate::ast_ext::{column_ident, insert_table, name_last, order_by_exprs, ObjectNamePartExt};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{ColumnDef, IdentityKind, QualifiedName, TableDef};
@@ -141,7 +143,7 @@ impl Resolver<'_> {
                 alias,
                 args: None,
                 ..
-            } => match (alias, name.0.last()) {
+            } => match (alias, name_last(name)) {
                 (Some(alias), _) => names.push(FromName {
                     name: alias.name.clone(),
                     table: None,
@@ -258,7 +260,7 @@ impl Resolver<'_> {
         let targets: Vec<&Ident> = assignments
             .iter()
             .filter_map(|a| match &a.target {
-                AssignmentTarget::ColumnName(name) if name.0.len() == 1 => name.0.first(),
+                AssignmentTarget::ColumnName(name) if name.0.len() == 1 => name_last(name),
                 _ => None,
             })
             .collect();
@@ -296,7 +298,7 @@ impl Resolver<'_> {
         let Some(order_by) = &query.order_by else {
             return;
         };
-        for item in &order_by.exprs {
+        for item in order_by_exprs(order_by) {
             self.check_position(&item.expr, count, "ORDER BY", at);
         }
     }
@@ -315,7 +317,11 @@ impl Resolver<'_> {
     }
 
     fn check_position(&mut self, expr: &Expr, count: usize, clause: &str, at: Option<Span>) {
-        let Expr::Value(Value::Number(n, _)) = expr else {
+        let Expr::Value(ValueWithSpan {
+            value: Value::Number(n, _),
+            ..
+        }) = expr
+        else {
             return;
         };
         let Ok(position) = n.parse::<usize>() else {
@@ -439,7 +445,7 @@ impl Resolver<'_> {
         &mut self,
         insert: &Insert,
         table: &TableDef,
-        rows: Option<&[Vec<Expr>]>,
+        rows: Option<&[Parens<Vec<Expr>>]>,
     ) {
         let targets: Vec<(&str, Option<Span>)> = if insert.columns.is_empty() {
             self.positional_columns(table)
@@ -450,13 +456,12 @@ impl Resolver<'_> {
             insert
                 .columns
                 .iter()
+                .map(column_ident)
                 .map(|c| (c.value.as_str(), Some(Span::from_sqlparser(&c.span))))
                 .collect()
         };
-        let table_span = insert
-            .table_name
-            .0
-            .last()
+        let table_span = insert_table(insert)
+            .and_then(name_last)
             .map(|id| Span::from_sqlparser(&id.span));
         for (i, (name, span)) in targets.iter().enumerate() {
             let Some(column) = table.get_column(name) else {
@@ -495,7 +500,7 @@ impl Resolver<'_> {
             let [ident] = name.0.as_slice() else {
                 continue;
             };
-            let Some(column) = table.get_column(&ident.value) else {
+            let Some(column) = table.get_column(&ident.ident().value) else {
                 continue;
             };
             let Some(kind) = self.generated_kind(column) else {
@@ -512,7 +517,7 @@ impl Resolver<'_> {
                         column.name
                     ),
                 )
-                .with_span(Span::from_sqlparser(&ident.span))
+                .with_span(Span::from_sqlparser(&ident.ident().span))
                 .with_help("Update the columns it is computed from instead"),
             );
         }
@@ -816,7 +821,9 @@ impl Resolver<'_> {
                 let mut selected: Vec<String> = Vec::new();
                 for item in &select.projection {
                     match item {
-                        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => return,
+                        SelectItem::Wildcard(_)
+                        | SelectItem::QualifiedWildcard(..)
+                        | SelectItem::ExprWithAliases { .. } => return,
                         SelectItem::ExprWithAlias { expr, alias } => {
                             selected.push(alias.value.to_lowercase());
                             if let Some(name) = column_ref_name(expr) {
@@ -830,7 +837,7 @@ impl Resolver<'_> {
                         }
                     }
                 }
-                for item in &order_by.exprs {
+                for item in order_by_exprs(order_by) {
                     let Some(name) = column_ref_name(&item.expr) else {
                         continue;
                     };
@@ -853,7 +860,7 @@ impl Resolver<'_> {
                     return;
                 };
                 let mut covered: Vec<&String> = Vec::new();
-                for item in &order_by.exprs {
+                for item in order_by_exprs(order_by) {
                     if on_names.iter().all(|n| covered.contains(&n)) {
                         break;
                     }
@@ -965,7 +972,7 @@ impl Visitor for FunctionFinder {
         if self.query_depth > 0 {
             return ControlFlow::Continue(());
         }
-        let Some(name) = func.name.0.last() else {
+        let Some(name) = name_last(&func.name) else {
             return ControlFlow::Continue(());
         };
         if func.over.is_some() {
@@ -1007,7 +1014,7 @@ pub(super) fn is_aggregate(func: &Function, dialect: SqlDialect) -> bool {
     let [name] = func.name.0.as_slice() else {
         return false;
     };
-    if name.quote_style.is_some() {
+    if name.ident().quote_style.is_some() {
         return false;
     }
     let args = match &func.args {
@@ -1019,7 +1026,7 @@ pub(super) fn is_aggregate(func: &Function, dialect: SqlDialect) -> bool {
     if func.filter.is_some() || !func.within_group.is_empty() {
         return true;
     }
-    match name.value.to_ascii_lowercase().as_str() {
+    match name.ident().value.to_ascii_lowercase().as_str() {
         // SQLite's (and MySQL's) min/max with several arguments are scalar
         "min" | "max" => args == 1,
         "count" | "sum" | "avg" | "array_agg" | "string_agg" | "bool_and" | "bool_or" | "every"

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Ident, ObjectName};
 use std::borrow::Cow;
 
+use crate::ast_ext::name_idents;
 use crate::types::SqlType;
 
 /// Schema catalog - holds all table/view information
@@ -317,7 +318,7 @@ impl Catalog {
     /// and is ignored. A backtick-quoted identifier containing dots
     /// (`` `project.dataset.table` ``) is split into its parts.
     pub fn qualified_name(&self, name: &ObjectName) -> QualifiedName {
-        match split_dotted_idents(&name.0).as_ref() {
+        match split_name(name).as_slice() {
             [table] => QualifiedName::new(self.ident_name(table)),
             [schema, table] | [_, schema, table] => {
                 QualifiedName::with_schema(self.ident_name(schema), self.ident_name(table))
@@ -328,7 +329,7 @@ impl Catalog {
 
     /// Record the database (BigQuery project) of a three-part table or view name
     pub fn note_database(&mut self, name: &ObjectName) {
-        if let [database, _, _] = split_dotted_idents(&name.0).as_ref() {
+        if let [database, _, _] = split_name(name).as_slice() {
             let database = self.ident_name(database);
             if !self
                 .databases
@@ -344,7 +345,7 @@ impl Catalog {
     /// one that is named by a table or view of the schema, or any database when the
     /// schema names none. Names with fewer parts always may.
     pub fn database_is_known(&self, name: &ObjectName) -> bool {
-        match split_dotted_idents(&name.0).as_ref() {
+        match split_name(name).as_slice() {
             [database, _, _] => {
                 self.databases.is_empty()
                     || self
@@ -648,6 +649,12 @@ pub fn split_dotted_idents(parts: &[Ident]) -> Cow<'_, [Ident]> {
         }
     }
     Cow::Owned(split)
+}
+
+/// The identifiers of an object name, with backtick-quoted dotted parts split
+/// (see [`split_dotted_idents`])
+pub(crate) fn split_name(name: &ObjectName) -> Vec<Ident> {
+    split_dotted_idents(&name_idents(name)).into_owned()
 }
 
 /// Index of `key` in `map`, matching exactly first and then ignoring ASCII case
