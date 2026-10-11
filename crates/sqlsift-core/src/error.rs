@@ -211,6 +211,8 @@ pub enum DiagnosticKind {
     /// E0030: JOIN condition that swaps a column of the foreign key between the
     /// tables for another key column
     ForeignKeyJoinMismatch,
+    /// E0031: Aggregate over a table whose rows another one-to-many join multiplies
+    JoinFanOut,
     /// Parse error
     ParseError,
 }

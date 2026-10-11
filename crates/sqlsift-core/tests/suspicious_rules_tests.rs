@@ -392,3 +392,68 @@ fn e0030_silent_when_constraints_may_be_missing() {
     .collect();
     assert!(codes.is_empty(), "{codes:?}");
 }
+
+// ---------------------------------------------------------------------
+// E0031 join-fan-out
+// ---------------------------------------------------------------------
+
+const FAN_OUT_SCHEMA: &str = "
+CREATE TABLE orders (id INT PRIMARY KEY, total NUMERIC);
+CREATE TABLE order_items (id INT PRIMARY KEY, order_id INT REFERENCES orders(id), price NUMERIC);
+CREATE TABLE payments (id INT PRIMARY KEY, order_id INT REFERENCES orders(id), amount NUMERIC);
+CREATE TABLE invoices (id INT PRIMARY KEY, order_id INT UNIQUE, amount NUMERIC);
+";
+
+fn fan_out_codes(sql: &str) -> Vec<&'static str> {
+    fk_diagnostics(FAN_OUT_SCHEMA, sql)
+        .iter()
+        .map(sqlsift_core::Diagnostic::code)
+        .collect()
+}
+
+#[test]
+fn e0031_aggregate_multiplied_by_another_child() {
+    let diagnostics = fk_diagnostics(
+        FAN_OUT_SCHEMA,
+        "SELECT o.id, sum(i.price) FROM orders o \
+         JOIN order_items i ON i.order_id = o.id \
+         JOIN payments p ON p.order_id = o.id GROUP BY o.id",
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code(), "E0031");
+    assert_eq!(
+        diagnostics[0].message,
+        "sum() over 'i' counts each of its rows once per matching row of 'p': both are \
+         joined one-to-many to 'o'"
+    );
+    for sql in [
+        // Both sums, LEFT JOINs, count and avg of a column, HAVING
+        "SELECT sum(i.price), sum(p.amount) FROM orders o JOIN order_items i ON i.order_id = o.id JOIN payments p ON p.order_id = o.id",
+        "SELECT o.id FROM orders o LEFT JOIN order_items i ON o.id = i.order_id LEFT JOIN payments p ON o.id = p.order_id GROUP BY o.id HAVING avg(i.price * 2) > 1",
+        "SELECT count(p.id) FROM orders o JOIN order_items i ON i.order_id = o.id JOIN payments p ON p.order_id = o.id",
+    ] {
+        assert!(fan_out_codes(sql).iter().all(|c| *c == "E0031"), "{sql}");
+        assert!(!fan_out_codes(sql).is_empty(), "{sql}");
+    }
+}
+
+#[test]
+fn e0031_joins_that_do_not_multiply() {
+    for sql in [
+        // One child only
+        "SELECT o.id, sum(i.price) FROM orders o JOIN order_items i ON i.order_id = o.id GROUP BY o.id",
+        // The other side is unique (one invoice per order)
+        "SELECT sum(i.price) FROM orders o JOIN order_items i ON i.order_id = o.id JOIN invoices v ON v.order_id = o.id",
+        // max / min / DISTINCT / count(*) / window functions
+        "SELECT max(i.price), count(DISTINCT p.id), count(*) FROM orders o JOIN order_items i ON i.order_id = o.id JOIN payments p ON p.order_id = o.id",
+        "SELECT sum(i.price) OVER () FROM orders o JOIN order_items i ON i.order_id = o.id JOIN payments p ON p.order_id = o.id",
+        // A filter in the join condition may make a side unique
+        "SELECT sum(i.price) FROM orders o JOIN order_items i ON i.order_id = o.id JOIN payments p ON p.order_id = o.id AND p.id = 1",
+        // Children pre-aggregated in subqueries
+        "SELECT o.id, i.total, p.paid FROM orders o \
+         JOIN (SELECT order_id, sum(price) AS total FROM order_items GROUP BY order_id) i ON i.order_id = o.id \
+         JOIN (SELECT order_id, sum(amount) AS paid FROM payments GROUP BY order_id) p ON p.order_id = o.id",
+    ] {
+        assert_eq!(fan_out_codes(sql), Vec::<&str>::new(), "{sql}");
+    }
+}

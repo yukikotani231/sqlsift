@@ -59,6 +59,7 @@
   - [E0028 limit-without-order-by](rules/E0028.md)
   - [E0029 implicit-conversion](rules/E0029.md)
   - [E0030 foreign-key-join-mismatch](rules/E0030.md)
+  - [E0031 join-fan-out](rules/E0031.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

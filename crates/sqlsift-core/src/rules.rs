@@ -359,6 +359,13 @@ pub const RULES: &[Rule] = &[
         summary: "JOIN condition doesn't follow the foreign key between the tables",
     },
     Rule {
+        kind: DiagnosticKind::JoinFanOut,
+        code: "E0031",
+        name: "join-fan-out",
+        category: RuleCategory::Suspicious,
+        summary: "Aggregate over rows that another one-to-many join multiplies",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

@@ -3,6 +3,7 @@
 pub(crate) mod bigquery;
 mod comment_directives;
 mod describe;
+mod fan_out;
 mod grouping;
 mod nullability;
 mod parameters;

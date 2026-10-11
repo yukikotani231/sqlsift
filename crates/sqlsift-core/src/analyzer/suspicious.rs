@@ -766,7 +766,7 @@ fn factor_references(factor: &TableFactor) -> Vec<Vec<String>> {
     }
 }
 
-fn join_condition(op: &JoinOperator) -> Option<&Expr> {
+pub(super) fn join_condition(op: &JoinOperator) -> Option<&Expr> {
     match op {
         JoinOperator::Join(JoinConstraint::On(e))
         | JoinOperator::Inner(JoinConstraint::On(e))

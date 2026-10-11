@@ -211,8 +211,9 @@ The action is also listed on the [GitHub Marketplace](https://github.com/marketp
 | [E0028](https://sqlsift.dev/docs/rules/E0028.html) | limit-without-order-by | LIMIT or OFFSET without ORDER BY |
 | [E0029](https://sqlsift.dev/docs/rules/E0029.html) | implicit-conversion | Type mismatch MySQL or SQLite converts implicitly |
 | [E0030](https://sqlsift.dev/docs/rules/E0030.html) | foreign-key-join-mismatch | JOIN condition doesn't follow the foreign key between the tables |
+| [E0031](https://sqlsift.dev/docs/rules/E0031.html) | join-fan-out | Aggregate over rows that another one-to-many join multiplies |
 
-E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023, E0029 and E0030 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) are off until enabled (`-W restriction`).
+E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 and E0029-E0031 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 and E0028 (`restriction`) are off until enabled (`-W restriction`).
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://sqlsift.dev/docs/guide/rules.html) and [Suppressing diagnostics](https://sqlsift.dev/docs/guide/suppression.html).
 

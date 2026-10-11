@@ -1138,6 +1138,7 @@ impl<'a> Resolver<'a> {
         self.check_grouping(select, query);
         self.check_join_conditions(select);
         self.check_foreign_key_joins(select);
+        self.check_join_fan_out(select);
         self.check_where_conditions(select);
         if let Some(role) = in_subquery {
             self.check_in_subquery_select(select, role);

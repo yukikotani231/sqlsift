@@ -37,6 +37,7 @@ E0027  wrong-argument-type       correctness  error    Function or operator give
 E0028  limit-without-order-by    restriction  off      LIMIT or OFFSET without ORDER BY
 E0029  implicit-conversion       suspicious   warn     Type mismatch MySQL or SQLite converts implicitly
 E0030  foreign-key-join-mismatch suspicious   warn     JOIN condition doesn't follow the foreign key between the tables
+E0031  join-fan-out              suspicious   warn     Aggregate over rows that another one-to-many join multiplies
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
