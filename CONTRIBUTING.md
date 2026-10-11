@@ -55,7 +55,7 @@ cargo test --all-targets
 | `editors/vscode` | VS Code extension (LSP client) |
 | `site` | Browser playground, deployed to GitHub Pages |
 | `docs` | User guide ([mdBook](https://rust-lang.github.io/mdBook/)), deployed to GitHub Pages under `/docs/` |
-| `tests/fixtures` | SQL fixtures, including real-world schemas (Chinook, Pagila, Northwind) |
+| `tests/fixtures` | SQL fixtures (the real-world corpus harness is in `tests/corpus`) |
 
 The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) and turned into an in-memory `Catalog` by `SchemaBuilder`; each query is then walked once by the `Resolver`, which resolves names through `Scope` and infers types, emitting diagnostics. [`CLAUDE.md`](CLAUDE.md) has a more detailed architecture overview and the current list of limitations.
 

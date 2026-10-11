@@ -41,12 +41,12 @@ sqlsift/
 ├── docs/                  # User guide (mdBook), published to GitHub Pages at /sqlsift/docs/
 ├── site/                  # Browser playground (GitHub Pages root)
 ├── tests/fixtures/        # Test SQL files
-│   └── real-world/        # Real-world schema test fixtures (Chinook, Pagila, Northwind)
+│   └── real-world/        # Pagila schema (used by tests)
 ├── scripts/
 │   └── release.sh         # Release automation script
 ├── dist-workspace.toml    # cargo-dist configuration for releases
 ├── sqlsift.toml          # Sample configuration file
-├── CHANGELOG.md           # Version history
+├── CHANGELOG.md           # Links to the per-crate changelogs (crates/*/CHANGELOG.md)
 └── PUBLISHING.md          # Release guide
 ```
 
@@ -150,7 +150,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 
 - Unit tests are colocated with modules (`#[cfg(test)] mod tests`)
 - Integration tests use SQL fixtures in `tests/fixtures/`
-- Real-world schema tests in `tests/fixtures/real-world/` (Chinook, Pagila, Northwind) with valid and invalid query files
+- Real-world SQL: the Pagila schema in `tests/fixtures/real-world/`, and the corpus harness in `tests/corpus/` (public dbt projects and warehouse SQL; not run in CI, its findings become tests in `corpus_regression_tests.rs`)
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
 - Comprehensive test coverage across unit, integration, doc, and LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and all three dialects (PostgreSQL, MySQL, SQLite)
 - Test-driven development (TDD) approach: write failing tests first, then implement features

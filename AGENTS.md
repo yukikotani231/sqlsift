@@ -1,16 +1,17 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a Rust workspace for `sqlsift`, with three primary crates under `crates/`:
+This repository is a Rust workspace for `sqlsift`, with four crates under `crates/`:
 - `sqlsift-core`: SQL schema catalog + static analysis engine.
 - `sqlsift-cli`: command-line interface (`sqlsift`).
 - `sqlsift-lsp`: Language Server Protocol backend.
+- `sqlsift-wasm`: WebAssembly bindings for the browser playground in `site/`.
 
-VS Code integration lives in `editors/vscode/` (TypeScript client extension). SQL test inputs are in `tests/fixtures/` and `tests/fixtures/real-world/`. Release tooling and automation configs are at the root (`release-plz.toml`, `dist-workspace.toml`, `scripts/release.sh`).
+VS Code integration lives in `editors/vscode/` (TypeScript client extension). The user guide (mdBook) is in `docs/`. SQL test inputs are in `tests/fixtures/`; `tests/corpus/` is a harness that runs sqlsift over public real-world projects (not part of CI). Release tooling and automation configs are at the root (`release-plz.toml`, `dist-workspace.toml`, `scripts/release.sh`). `CLAUDE.md` has a detailed architecture overview and the steps for adding rules, types and options.
 
 ## Build, Test, and Development Commands
 - `cargo build --all-targets`: Build all crates and targets in the workspace.
-- `cargo test --all-targets`: Run unit, integration, and doc tests.
+- `cargo test --all-targets` and `cargo test --doc`: Run unit, integration, and doc tests.
 - `cargo fmt --all -- --check`: Verify formatting (CI-enforced).
 - `cargo clippy --all-targets -- -D warnings`: Lint with warnings treated as errors.
 - `cargo run -- check --schema tests/fixtures/schema.sql tests/fixtures/valid_query.sql`: Run CLI on sample inputs.
