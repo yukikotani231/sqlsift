@@ -39,8 +39,8 @@ sqlsift/
 │       ├── src/extension.ts
 │       └── package.json
 │
-├── docs/                  # User guide (mdBook), published to GitHub Pages at /sqlsift/docs/
-├── site/                  # Browser playground (GitHub Pages root)
+├── docs/                  # User guide (mdBook), published to GitHub Pages at https://sqlsift.dev/docs/
+├── site/                  # Browser playground (GitHub Pages root, https://sqlsift.dev/)
 ├── examples/              # Example projects per stack (sqlc, Prisma, aiosql, postgres.js, sqlx, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Pagila schema (used by tests)

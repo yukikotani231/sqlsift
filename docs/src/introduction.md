@@ -45,7 +45,7 @@ error[E0003]: Type mismatch: cannot compare integer with text
 Found 3 error(s), 0 warning(s) in 1 file(s)
 ```
 
-Want to see it first? The [playground](https://yukikotani231.github.io/sqlsift/) runs sqlsift in your browser via WebAssembly; your SQL never leaves the page.
+Want to see it first? The [playground](https://sqlsift.dev/) runs sqlsift in your browser via WebAssembly; your SQL never leaves the page.
 
 ## Why sqlsift?
 

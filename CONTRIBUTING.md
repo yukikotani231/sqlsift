@@ -12,7 +12,7 @@ The most valuable contribution right now is **SQL that sqlsift gets wrong**:
 
 Please [open an issue](https://github.com/yukikotani231/sqlsift/issues/new/choose) with:
 
-1. A minimal schema (`CREATE TABLE ...`) and query that reproduce it. The [playground](https://yukikotani231.github.io/sqlsift/) is a quick way to cut it down.
+1. A minimal schema (`CREATE TABLE ...`) and query that reproduce it. The [playground](https://sqlsift.dev/) is a quick way to cut it down.
 2. The dialect (`postgresql`, `mysql` or `sqlite`) and the sqlsift version (`sqlsift --version`).
 3. What you expected and what sqlsift reported.
 

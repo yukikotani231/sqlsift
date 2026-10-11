@@ -3,14 +3,14 @@
 [![CI](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml/badge.svg)](https://github.com/yukikotani231/sqlsift/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/sqlsift-cli.svg)](https://www.npmjs.com/package/sqlsift-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Playground](https://img.shields.io/badge/try_it-playground-2ea44f.svg)](https://yukikotani231.github.io/sqlsift/)
-[![Docs](https://img.shields.io/badge/docs-user_guide-0f766e.svg)](https://yukikotani231.github.io/sqlsift/docs/)
+[![Playground](https://img.shields.io/badge/try_it-playground-2ea44f.svg)](https://sqlsift.dev/)
+[![Docs](https://img.shields.io/badge/docs-user_guide-0f766e.svg)](https://sqlsift.dev/docs/)
 
 **Schema-aware static analysis for SQL. No database needed.**
 
 Think of it as a type checker for your SQL: sqlsift replays your migrations into an in-memory schema and checks every query against it — in `.sql` files, sqlc and aiosql query files, and `` sql`...` `` templates in TypeScript / JavaScript. It runs offline in milliseconds, so it fits in your editor, pre-commit hooks and CI.
 
-**▶ [Try it in your browser](https://yukikotani231.github.io/sqlsift/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://yukikotani231.github.io/sqlsift/docs/)** for everything else.
+**▶ [Try it in your browser](https://sqlsift.dev/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://sqlsift.dev/docs/)** for everything else.
 
 <p align="center"><img src="https://raw.githubusercontent.com/yukikotani231/sqlsift/main/.github/assets/demo.gif" alt="A migration renames page_views.site_id to website_id; sqlsift init detects the project and sqlsift check reports the query that still uses site_id, an ON CONFLICT target with no unique key, and a WHERE clause that turns a LEFT JOIN into an inner join" width="900"></p>
 
@@ -86,7 +86,7 @@ npx sqlsift-cli check --schema schema.sql queries/*.sql
 cargo install --git https://github.com/yukikotani231/sqlsift sqlsift-cli
 ```
 
-Prebuilt binaries are also available on the [Releases](https://github.com/yukikotani231/sqlsift/releases) page, or try it without installing in the [Playground](https://yukikotani231.github.io/sqlsift/).
+Prebuilt binaries are also available on the [Releases](https://github.com/yukikotani231/sqlsift/releases) page, or try it without installing in the [Playground](https://sqlsift.dev/).
 
 ## Quick Start
 
@@ -96,7 +96,7 @@ In an existing project, start with:
 sqlsift init
 ```
 
-It finds your schema (sqlc config, Prisma / Supabase / Drizzle / Flyway / golang-migrate / goose / dbmate migrations, `structure.sql` or `schema.sql` dumps, dbt), your queries (`.sql` files, Prisma TypedSQL, dbt models, `` sql`...` `` templates in TypeScript / JavaScript) and the dialect, writes a commented `sqlsift.toml`, runs a first check and prints the next steps. It never overwrites an existing `sqlsift.toml` without `--force`; `--dry-run` only prints the configuration. See [`sqlsift init`](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html#sqlsift-init).
+It finds your schema (sqlc config, Prisma / Supabase / Drizzle / Flyway / golang-migrate / goose / dbmate migrations, `structure.sql` or `schema.sql` dumps, dbt), your queries (`.sql` files, Prisma TypedSQL, dbt models, `` sql`...` `` templates in TypeScript / JavaScript) and the dialect, writes a commented `sqlsift.toml`, runs a first check and prints the next steps. It never overwrites an existing `sqlsift.toml` without `--force`; `--dry-run` only prints the configuration. See [`sqlsift init`](https://sqlsift.dev/docs/reference/cli.html#sqlsift-init).
 
 Or pass everything on the command line:
 
@@ -134,7 +134,7 @@ dialect = "postgresql"
 ambiguous-column = "warn"        # report, but don't fail the check
 ```
 
-Then just run `sqlsift check`. See the [configuration reference](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) for every key, and `sqlsift schema` to [inspect what sqlsift loaded](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html#inspecting-the-loaded-schema) from your schema.
+Then just run `sqlsift check`. See the [configuration reference](https://sqlsift.dev/docs/reference/config.html) for every key, and `sqlsift schema` to [inspect what sqlsift loaded](https://sqlsift.dev/docs/guide/schema.html#inspecting-the-loaded-schema) from your schema.
 
 ## Use It With Your Stack
 
@@ -150,13 +150,13 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **aiosql / HugSQL** (named queries in `.sql` files) | `sqlsift check --schema-dir migrations queries/*.sql` (`:param` placeholders; diagnostics name the `-- name:` / `-- :name` query) |
 | **dbt** (Postgres, MySQL, SQLite; Snowflake, BigQuery, Redshift, Databricks in alpha) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`; after `dbt docs generate`, `ref()` / `source()` columns come from `target/catalog.json` and `--schema` is optional — alpha) |
 
-Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
+Rollback migrations are skipped automatically; see [Loading your schema](https://sqlsift.dev/docs/guide/schema.html).
 
 **Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [aiosql (Python)](examples/aiosql), [postgres.js](examples/postgres-js), [sqlx (Rust)](examples/sqlx), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
 
 ## Editor Integration
 
-sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type. Install the **sqlsift** VS Code extension (`sqlsift.sqlsift`), which bundles the server, or [set it up in Neovim, Helix and other editors](https://yukikotani231.github.io/sqlsift/docs/integrations/editors.html).
+sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type. Install the **sqlsift** VS Code extension (`sqlsift.sqlsift`), which bundles the server, or [set it up in Neovim, Helix and other editors](https://sqlsift.dev/docs/integrations/editors.html).
 
 ## CI Integration
 
@@ -175,52 +175,52 @@ jobs:
           files: queries/**/*.sql
 ```
 
-Errors are shown as annotations on the pull request diff. Add `diff-base: ${{ github.base_ref }}` to report only the diagnostics a pull request introduces (the action checks the base commit too, so no baseline file is needed). The [CI guide](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html) covers the action's inputs, re-checking every query when the schema changes, GitHub Code Scanning (SARIF), `--format github` / `json` for other setups, `--max-warnings` for rolling out a rule gradually, and a baseline for adopting sqlsift on an existing codebase (`sqlsift check --write-baseline` records the current diagnostics in `sqlsift-baseline.json`; with `baseline = "sqlsift-baseline.json"` in `sqlsift.toml` only new ones are reported). There is also a [pre-commit recipe](https://yukikotani231.github.io/sqlsift/docs/integrations/pre-commit.html).
+Errors are shown as annotations on the pull request diff. Add `diff-base: ${{ github.base_ref }}` to report only the diagnostics a pull request introduces (the action checks the base commit too, so no baseline file is needed). The [CI guide](https://sqlsift.dev/docs/integrations/ci.html) covers the action's inputs, re-checking every query when the schema changes, GitHub Code Scanning (SARIF), `--format github` / `json` for other setups, `--max-warnings` for rolling out a rule gradually, and a baseline for adopting sqlsift on an existing codebase (`sqlsift check --write-baseline` records the current diagnostics in `sqlsift-baseline.json`; with `baseline = "sqlsift-baseline.json"` in `sqlsift.toml` only new ones are reported). There is also a [pre-commit recipe](https://sqlsift.dev/docs/integrations/pre-commit.html).
 
 ## Diagnostic Rules
 
 | Code | Name | Description |
 |------|------|-------------|
-| [E0001](https://yukikotani231.github.io/sqlsift/docs/rules/E0001.html) | table-not-found | Referenced table does not exist in schema |
-| [E0002](https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html) | column-not-found | Referenced column does not exist in table |
-| [E0003](https://yukikotani231.github.io/sqlsift/docs/rules/E0003.html) | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic, INSERT/UPDATE values, enums) |
-| [E0004](https://yukikotani231.github.io/sqlsift/docs/rules/E0004.html) | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) |
-| [E0005](https://yukikotani231.github.io/sqlsift/docs/rules/E0005.html) | column-count-mismatch | Column count doesn't match (INSERT values, column alias lists, subqueries, row comparisons) |
-| [E0006](https://yukikotani231.github.io/sqlsift/docs/rules/E0006.html) | ambiguous-column | Column reference is ambiguous across tables |
-| [E0007](https://yukikotani231.github.io/sqlsift/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
-| [E0008](https://yukikotani231.github.io/sqlsift/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
-| [E0009](https://yukikotani231.github.io/sqlsift/docs/rules/E0009.html) | duplicate-name | Table alias or CTE name given twice in one query |
-| [E0010](https://yukikotani231.github.io/sqlsift/docs/rules/E0010.html) | duplicate-target-column | Column given twice in an INSERT column list or UPDATE SET |
-| [E0011](https://yukikotani231.github.io/sqlsift/docs/rules/E0011.html) | position-out-of-range | ORDER BY / GROUP BY position is not in the select list |
-| [E0012](https://yukikotani231.github.io/sqlsift/docs/rules/E0012.html) | misplaced-aggregate | Aggregate or window function where it is not allowed |
-| [E0013](https://yukikotani231.github.io/sqlsift/docs/rules/E0013.html) | generated-column-write | INSERT or UPDATE gives a value to a generated column |
-| [E0014](https://yukikotani231.github.io/sqlsift/docs/rules/E0014.html) | unmatched-conflict-target | ON CONFLICT columns match no unique constraint |
-| [E0015](https://yukikotani231.github.io/sqlsift/docs/rules/E0015.html) | distinct-order-by | SELECT DISTINCT ordered by a column it doesn't select |
-| [E0016](https://yukikotani231.github.io/sqlsift/docs/rules/E0016.html) | grouping-error | Column must appear in GROUP BY or be used in an aggregate |
-| [E0017](https://yukikotani231.github.io/sqlsift/docs/rules/E0017.html) | value-out-of-range | Literal too long or out of range for the column type |
-| [E0018](https://yukikotani231.github.io/sqlsift/docs/rules/E0018.html) | null-comparison | Comparison with NULL using = or <> is never true |
-| [E0019](https://yukikotani231.github.io/sqlsift/docs/rules/E0019.html) | not-in-with-nulls | NOT IN over a nullable subquery column |
-| [E0020](https://yukikotani231.github.io/sqlsift/docs/rules/E0020.html) | outer-column-in-subquery | IN subquery selects a column of the outer query |
-| [E0021](https://yukikotani231.github.io/sqlsift/docs/rules/E0021.html) | missing-join-condition | Tables in FROM with no condition linking them |
-| [E0022](https://yukikotani231.github.io/sqlsift/docs/rules/E0022.html) | constant-condition | Condition that is always or never true from the schema |
-| [E0023](https://yukikotani231.github.io/sqlsift/docs/rules/E0023.html) | outer-join-filtered | WHERE condition turns an outer join into an inner join |
-| [E0024](https://yukikotani231.github.io/sqlsift/docs/rules/E0024.html) | unfiltered-write | UPDATE or DELETE without WHERE |
-| [E0025](https://yukikotani231.github.io/sqlsift/docs/rules/E0025.html) | insert-without-columns | INSERT without a column list |
-| [E0026](https://yukikotani231.github.io/sqlsift/docs/rules/E0026.html) | select-star | SELECT * in a query's result columns |
-| [E0027](https://yukikotani231.github.io/sqlsift/docs/rules/E0027.html) | wrong-argument-type | Function or operator given an argument type it doesn't take |
+| [E0001](https://sqlsift.dev/docs/rules/E0001.html) | table-not-found | Referenced table does not exist in schema |
+| [E0002](https://sqlsift.dev/docs/rules/E0002.html) | column-not-found | Referenced column does not exist in table |
+| [E0003](https://sqlsift.dev/docs/rules/E0003.html) | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic, INSERT/UPDATE values, enums) |
+| [E0004](https://sqlsift.dev/docs/rules/E0004.html) | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) |
+| [E0005](https://sqlsift.dev/docs/rules/E0005.html) | column-count-mismatch | Column count doesn't match (INSERT values, column alias lists, subqueries, row comparisons) |
+| [E0006](https://sqlsift.dev/docs/rules/E0006.html) | ambiguous-column | Column reference is ambiguous across tables |
+| [E0007](https://sqlsift.dev/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
+| [E0008](https://sqlsift.dev/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
+| [E0009](https://sqlsift.dev/docs/rules/E0009.html) | duplicate-name | Table alias or CTE name given twice in one query |
+| [E0010](https://sqlsift.dev/docs/rules/E0010.html) | duplicate-target-column | Column given twice in an INSERT column list or UPDATE SET |
+| [E0011](https://sqlsift.dev/docs/rules/E0011.html) | position-out-of-range | ORDER BY / GROUP BY position is not in the select list |
+| [E0012](https://sqlsift.dev/docs/rules/E0012.html) | misplaced-aggregate | Aggregate or window function where it is not allowed |
+| [E0013](https://sqlsift.dev/docs/rules/E0013.html) | generated-column-write | INSERT or UPDATE gives a value to a generated column |
+| [E0014](https://sqlsift.dev/docs/rules/E0014.html) | unmatched-conflict-target | ON CONFLICT columns match no unique constraint |
+| [E0015](https://sqlsift.dev/docs/rules/E0015.html) | distinct-order-by | SELECT DISTINCT ordered by a column it doesn't select |
+| [E0016](https://sqlsift.dev/docs/rules/E0016.html) | grouping-error | Column must appear in GROUP BY or be used in an aggregate |
+| [E0017](https://sqlsift.dev/docs/rules/E0017.html) | value-out-of-range | Literal too long or out of range for the column type |
+| [E0018](https://sqlsift.dev/docs/rules/E0018.html) | null-comparison | Comparison with NULL using = or <> is never true |
+| [E0019](https://sqlsift.dev/docs/rules/E0019.html) | not-in-with-nulls | NOT IN over a nullable subquery column |
+| [E0020](https://sqlsift.dev/docs/rules/E0020.html) | outer-column-in-subquery | IN subquery selects a column of the outer query |
+| [E0021](https://sqlsift.dev/docs/rules/E0021.html) | missing-join-condition | Tables in FROM with no condition linking them |
+| [E0022](https://sqlsift.dev/docs/rules/E0022.html) | constant-condition | Condition that is always or never true from the schema |
+| [E0023](https://sqlsift.dev/docs/rules/E0023.html) | outer-join-filtered | WHERE condition turns an outer join into an inner join |
+| [E0024](https://sqlsift.dev/docs/rules/E0024.html) | unfiltered-write | UPDATE or DELETE without WHERE |
+| [E0025](https://sqlsift.dev/docs/rules/E0025.html) | insert-without-columns | INSERT without a column list |
+| [E0026](https://sqlsift.dev/docs/rules/E0026.html) | select-star | SELECT * in a query's result columns |
+| [E0027](https://sqlsift.dev/docs/rules/E0027.html) | wrong-argument-type | Function or operator given an argument type it doesn't take |
 
 E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 (`restriction`) are off until enabled (`-W restriction`).
 
-Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
+Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://sqlsift.dev/docs/guide/rules.html) and [Suppressing diagnostics](https://sqlsift.dev/docs/guide/suppression.html).
 
 ## Documentation
 
-The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
+The [user guide](https://sqlsift.dev/docs/) covers:
 
-- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc, aiosql and HugSQL query files with named parameters, and SQL in TypeScript tagged templates)
-- [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
-- [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
-- [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)
+- [Loading your schema](https://sqlsift.dev/docs/guide/schema.html) and [checking queries](https://sqlsift.dev/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc, aiosql and HugSQL query files with named parameters, and SQL in TypeScript tagged templates)
+- [Dialects and SQL support](https://sqlsift.dev/docs/guide/sql-support.html), including what type checking covers
+- [Command line](https://sqlsift.dev/docs/reference/cli.html), [configuration file](https://sqlsift.dev/docs/reference/config.html) and [output formats](https://sqlsift.dev/docs/reference/output-formats.html) reference
+- [Troubleshooting](https://sqlsift.dev/docs/guide/troubleshooting.html)
 
 ## Roadmap
 

@@ -37,4 +37,4 @@ cargo install --git https://github.com/yukikotani231/sqlsift sqlsift-lsp
 
 ## Try it without installing
 
-The [playground](https://yukikotani231.github.io/sqlsift/) runs sqlsift in your browser.
+The [playground](https://sqlsift.dev/) runs sqlsift in your browser.

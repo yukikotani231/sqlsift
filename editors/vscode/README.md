@@ -44,7 +44,7 @@ Then open `editors/vscode/` in VS Code and press F5.
 
 ## Setup
 
-Run `sqlsift init` in your project root to detect the schema, queries and dialect and write a `sqlsift.toml` ([details](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html#sqlsift-init)), or create one by hand:
+Run `sqlsift init` in your project root to detect the schema, queries and dialect and write a `sqlsift.toml` ([details](https://sqlsift.dev/docs/reference/cli.html#sqlsift-init)), or create one by hand:
 
 ```toml
 # Schema file paths (glob patterns supported)

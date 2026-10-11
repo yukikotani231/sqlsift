@@ -11,7 +11,7 @@ build-dir = "book"
 [output.html]
 git-repository-url = "https://github.com/yukikotani231/sqlsift"
 edit-url-template = "https://github.com/yukikotani231/sqlsift/edit/main/docs/{path}"
-site-url = "/sqlsift/docs/"
+site-url = "/docs/"
 no-section-label = true
 
 [output.html.playground]

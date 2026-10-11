@@ -15,7 +15,7 @@ pub use detect::{detect, Detection};
 /// The configuration file `sqlsift init` writes
 pub const CONFIG_FILE: &str = "sqlsift.toml";
 
-const DOCS: &str = "https://yukikotani231.github.io/sqlsift/docs";
+const DOCS: &str = "https://sqlsift.dev/docs";
 
 /// Options of `sqlsift init`
 pub struct InitOptions {

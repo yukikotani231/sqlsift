@@ -17,4 +17,4 @@ Glob patterns are relative to the current directory on the command line, and to 
 
 ## Valid SQL reported as an error
 
-That's a bug. Suppress it for now with a [`sqlsift:disable`](suppression.md) comment, and please [open an issue](https://github.com/yukikotani231/sqlsift/issues/new/choose) with a minimal schema and query. The [playground](https://yukikotani231.github.io/sqlsift/) is handy for cutting the example down.
+That's a bug. Suppress it for now with a [`sqlsift:disable`](suppression.md) comment, and please [open an issue](https://github.com/yukikotani231/sqlsift/issues/new/choose) with a minimal schema and query. The [playground](https://sqlsift.dev/) is handy for cutting the example down.

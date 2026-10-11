@@ -52,6 +52,6 @@ error[E0002]: Column 'name' not found in table 'customers'
 Found 2 error(s), 0 warning(s) in 1 file(s)
 ```
 
-In a pull request that only adds the migration, the [GitHub Action](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html) reports this as an annotation on the query when it checks every query file, as in the CI guide's setup ([Re-check everything when the schema changes](https://yukikotani231.github.io/sqlsift/docs/integrations/ci.html#re-check-everything-when-the-schema-changes)).
+In a pull request that only adds the migration, the [GitHub Action](https://sqlsift.dev/docs/integrations/ci.html) reports this as an annotation on the query when it checks every query file, as in the CI guide's setup ([Re-check everything when the schema changes](https://sqlsift.dev/docs/integrations/ci.html#re-check-everything-when-the-schema-changes)).
 
 CI checks both commands on every change to sqlsift (`scripts/check-examples.sh`, against `expected-diagnostics.txt`).
