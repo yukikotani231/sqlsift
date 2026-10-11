@@ -75,7 +75,7 @@ fn e0009_cte_name_given_twice() {
 fn e0009_distinct_names_are_fine() {
     assert_clean("SELECT a.id, b.id FROM users a JOIN users b ON a.id = b.org_id");
     // Two tables both named `users`, in different schemas
-    assert_clean("SELECT 1 FROM auth.users, public.users");
+    assert_clean("SELECT 1 FROM auth.users CROSS JOIN public.users");
     // The same name in different query blocks
     assert_clean("SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM orgs u WHERE u.id = 1)");
     assert_clean(
@@ -86,7 +86,7 @@ fn e0009_distinct_names_are_fine() {
 #[test]
 fn e0009_dialects() {
     // SQLite accepts a table alias given twice, but not a CTE name
-    assert!(codes_in(SqlDialect::SQLite, "SELECT 1 FROM users, users").is_empty());
+    assert!(codes_in(SqlDialect::SQLite, "SELECT 1 FROM users CROSS JOIN users").is_empty());
     assert_eq!(
         codes_in(
             SqlDialect::SQLite,
@@ -95,9 +95,9 @@ fn e0009_dialects() {
         vec!["E0009"]
     );
     // MySQL aliases are case sensitive
-    assert!(codes_in(SqlDialect::MySQL, "SELECT 1 FROM users U, orgs u").is_empty());
+    assert!(codes_in(SqlDialect::MySQL, "SELECT 1 FROM users U CROSS JOIN orgs u").is_empty());
     assert_eq!(
-        codes_in(SqlDialect::MySQL, "SELECT 1 FROM users u, orgs u"),
+        codes_in(SqlDialect::MySQL, "SELECT 1 FROM users u CROSS JOIN orgs u"),
         vec!["E0009"]
     );
 }

@@ -45,6 +45,10 @@
   - [E0015 distinct-order-by](rules/E0015.md)
   - [E0016 grouping-error](rules/E0016.md)
   - [E0017 value-out-of-range](rules/E0017.md)
+  - [E0018 null-comparison](rules/E0018.md)
+  - [E0019 not-in-with-nulls](rules/E0019.md)
+  - [E0020 outer-column-in-subquery](rules/E0020.md)
+  - [E0021 missing-join-condition](rules/E0021.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

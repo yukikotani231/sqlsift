@@ -576,8 +576,9 @@ mod tests {
         let errors = state.rebuild_catalog();
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(state.schema_files.len(), 3, "{:?}", state.schema_files);
-        let diagnostics =
-            state.analyze_document("SELECT u.id, o.id, i.id FROM users u, orders o, items i");
+        let diagnostics = state.analyze_document(
+            "SELECT u.id, o.id, i.id FROM users u CROSS JOIN orders o CROSS JOIN items i",
+        );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
         let _ = std::fs::remove_dir_all(&root);

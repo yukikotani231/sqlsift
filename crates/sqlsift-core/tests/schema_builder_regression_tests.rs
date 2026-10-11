@@ -865,7 +865,7 @@ fn dbmate_up_after_down_is_applied_again() {
          CREATE TABLE gone (id INT);\n\
          -- migrate:up\n\
          CREATE TABLE b (id INT);\n");
-    assert_clean(&c, "SELECT a.id, b.id FROM a, b;");
+    assert_clean(&c, "SELECT a.id, b.id FROM a CROSS JOIN b;");
     assert_codes(
         &c,
         SqlDialect::PostgreSQL,

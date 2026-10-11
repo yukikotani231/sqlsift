@@ -24,6 +24,10 @@ E0014  unmatched-conflict-target correctness  error    ON CONFLICT columns match
 E0015  distinct-order-by         correctness  error    SELECT DISTINCT ordered by a column it doesn't select
 E0016  grouping-error            correctness  error    Column must appear in GROUP BY or be used in an aggregate
 E0017  value-out-of-range        correctness  error    Literal too long or out of range for the column type
+E0018  null-comparison           suspicious   warn     Comparison with NULL using = or <> is never true
+E0019  not-in-with-nulls         suspicious   warn     NOT IN over a nullable subquery column
+E0020  outer-column-in-subquery  suspicious   warn     IN subquery selects a column of the outer query
+E0021  missing-join-condition    suspicious   warn     Tables in FROM with no condition linking them
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
@@ -49,7 +53,7 @@ Like [oxlint](https://oxc.rs/docs/guide/usage/linter.html), every rule belongs t
 | `style` | off | Conventions and readability |
 | `restriction` | off | Bans on features some codebases don't want |
 
-All current rules are in `correctness`.
+Current rules are in `correctness` (errors) and `suspicious` (warnings), as `sqlsift rules` shows above.
 
 ## Changing levels
 

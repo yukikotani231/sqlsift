@@ -1190,7 +1190,9 @@ mod tests {
 
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
-            diagnostics.is_empty(),
+            diagnostics
+                .iter()
+                .all(|d| d.kind == DiagnosticKind::NullComparison),
             "NULL comparison should not produce type errors: {diagnostics:?}"
         );
 
@@ -1203,7 +1205,9 @@ mod tests {
 
         let diagnostics = check(&catalog, &statements[0]);
         assert!(
-            diagnostics.is_empty(),
+            diagnostics
+                .iter()
+                .all(|d| d.kind == DiagnosticKind::NullComparison),
             "NULL with TEXT should not produce type errors: {diagnostics:?}"
         );
     }

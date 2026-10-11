@@ -347,7 +347,7 @@ fn duplicate_columns_of_a_star_over_a_join_are_ambiguous() {
         "SELECT id FROM (SELECT * FROM users CROSS JOIN orders) AS j",
         "WITH j AS (SELECT * FROM users CROSS JOIN orders) SELECT j.id FROM j",
         "WITH j AS (SELECT * FROM users CROSS JOIN orders) SELECT 1 FROM j WHERE id = 1",
-        "WITH j AS (SELECT u.id, o.id FROM users u, orders o) SELECT id FROM j",
+        "WITH j AS (SELECT u.id, o.id FROM users u CROSS JOIN orders o) SELECT id FROM j",
         "WITH j AS (SELECT * FROM users CROSS JOIN users AS u2) SELECT name FROM j",
     ] {
         assert_single(
@@ -370,8 +370,12 @@ fn star_columns_that_are_not_duplicated_resolve() {
     assert_valid(
         "WITH j AS (SELECT * FROM users NATURAL JOIN user_copy) SELECT id, name, email FROM j",
     );
-    assert_valid("WITH j(a, b) AS (SELECT u.id, o.id FROM users u, orders o) SELECT a, b FROM j");
-    assert_valid("WITH j AS (SELECT users.*, orders.total FROM users, orders) SELECT id FROM j");
+    assert_valid(
+        "WITH j(a, b) AS (SELECT u.id, o.id FROM users u CROSS JOIN orders o) SELECT a, b FROM j",
+    );
+    assert_valid(
+        "WITH j AS (SELECT users.*, orders.total FROM users CROSS JOIN orders) SELECT id FROM j",
+    );
     assert_valid("SELECT * FROM (SELECT * FROM users CROSS JOIN orders) AS j");
     // Names guessed from expressions differ between dialects: not compared
     assert_valid("WITH j AS (SELECT max(id), max(name) FROM users) SELECT max FROM j");

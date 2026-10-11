@@ -552,7 +552,7 @@ fn valid_functions() {
             "SELECT array_to_string(tags, ',') FROM users",
             "SELECT string_to_array('a,b', ',')",
             "SELECT jsonb_build_object('id', id) FROM users",
-            "SELECT jsonb_typeof(settings), jsonb_array_length(payload) FROM users, events",
+            "SELECT jsonb_typeof(settings), jsonb_array_length(payload) FROM users CROSS JOIN events",
             "SELECT pg_typeof(id) FROM users",
         ],
     );

@@ -2429,7 +2429,10 @@ fn suppress_where_comparison_type_mismatch() {
 #[test]
 fn suppress_ambiguous_and_join_mismatch() {
     let c = diag_catalog();
-    assert_clean(&c, "SELECT id FROM users, orders -- sqlsift:disable E0006");
+    assert_clean(
+        &c,
+        "SELECT id FROM users CROSS JOIN orders -- sqlsift:disable E0006",
+    );
     assert_clean(
         &c,
         "SELECT u.id FROM users u\n  -- sqlsift:disable E0007\n  JOIN orders o ON u.name = o.user_id",

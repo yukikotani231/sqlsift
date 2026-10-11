@@ -8,6 +8,7 @@ mod resolver;
 mod scope;
 mod snowflake;
 mod structure;
+mod suspicious;
 mod type_check;
 
 use std::ops::Range;

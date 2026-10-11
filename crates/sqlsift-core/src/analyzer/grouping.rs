@@ -249,7 +249,7 @@ impl Resolver<'_> {
     }
 
     /// Catalog tables of a FROM clause with the (lowercase) key they are known by
-    fn catalog_tables_in(
+    pub(super) fn catalog_tables_in(
         &self,
         from: &[sqlparser::ast::TableWithJoins],
     ) -> Vec<(String, crate::schema::QualifiedName)> {

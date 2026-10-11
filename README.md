@@ -189,6 +189,12 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0015](https://yukikotani231.github.io/sqlsift/docs/rules/E0015.html) | distinct-order-by | SELECT DISTINCT ordered by a column it doesn't select |
 | [E0016](https://yukikotani231.github.io/sqlsift/docs/rules/E0016.html) | grouping-error | Column must appear in GROUP BY or be used in an aggregate |
 | [E0017](https://yukikotani231.github.io/sqlsift/docs/rules/E0017.html) | value-out-of-range | Literal too long or out of range for the column type |
+| [E0018](https://yukikotani231.github.io/sqlsift/docs/rules/E0018.html) | null-comparison | Comparison with NULL using = or <> is never true |
+| [E0019](https://yukikotani231.github.io/sqlsift/docs/rules/E0019.html) | not-in-with-nulls | NOT IN over a nullable subquery column |
+| [E0020](https://yukikotani231.github.io/sqlsift/docs/rules/E0020.html) | outer-column-in-subquery | IN subquery selects a column of the outer query |
+| [E0021](https://yukikotani231.github.io/sqlsift/docs/rules/E0021.html) | missing-join-condition | Tables in FROM with no condition linking them |
+
+E0001-E0017 report queries the database rejects and are errors by default; E0018-E0021 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default.
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

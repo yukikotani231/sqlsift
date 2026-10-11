@@ -1,6 +1,6 @@
 # Rules
 
-Every rule has a code, a name and a category. All current rules are in the `correctness` category and are errors by default. See [Rules and levels](../guide/rules.md) to change their levels and [Suppressing diagnostics](../guide/suppression.md) for exceptions.
+Every rule has a code, a name and a category. Rules in the `correctness` category report queries the database rejects (or that fail at run time) and are errors by default; rules in the `suspicious` category report valid queries that almost certainly don't do what was meant, and are warnings by default. See [Rules and levels](../guide/rules.md) to change their levels and [Suppressing diagnostics](../guide/suppression.md) for exceptions.
 
 The `E` in a rule code is sqlsift's prefix, not a severity: a rule's level comes from its category and your configuration, so a warning can carry an `E` code too. Codes are assigned in order as rules are added and never change or get reused, so they are safe to keep in config files, suppression comments and baselines. Names are easier to read in config and comments; codes are shorter.
 
@@ -19,6 +19,10 @@ CREATE TABLE orders (
   user_id INTEGER NOT NULL REFERENCES users(id),
   status order_status NOT NULL DEFAULT 'open',
   total NUMERIC(10, 2) NOT NULL
+);
+CREATE TABLE coupons (
+  code TEXT PRIMARY KEY,
+  order_id INTEGER REFERENCES orders(id)
 );
 ```
 
@@ -41,4 +45,8 @@ CREATE TABLE orders (
 | [E0015](E0015.md) | `distinct-order-by` | SELECT DISTINCT ordered by a column it doesn't select |
 | [E0016](E0016.md) | `grouping-error` | Column must appear in GROUP BY or be used in an aggregate |
 | [E0017](E0017.md) | `value-out-of-range` | Literal too long or out of range for the column type |
+| [E0018](E0018.md) | `null-comparison` | Comparison with NULL using = or <> is never true |
+| [E0019](E0019.md) | `not-in-with-nulls` | NOT IN over a nullable subquery column |
+| [E0020](E0020.md) | `outer-column-in-subquery` | IN subquery selects a column of the outer query |
+| [E0021](E0021.md) | `missing-join-condition` | Tables in FROM with no condition linking them |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

@@ -184,6 +184,14 @@ pub enum DiagnosticKind {
     GroupingError,
     /// E0017: A literal the target column's type can't hold
     ValueOutOfRange,
+    /// E0018: Comparison with NULL using `=`, `<>`, ... (never true)
+    NullComparison,
+    /// E0019: NOT IN over a subquery whose column may be NULL
+    NotInWithNulls,
+    /// E0020: Column of an IN subquery's select list that is the outer query's
+    OuterColumnInSubquery,
+    /// E0021: Comma-separated FROM tables with no condition linking them
+    MissingJoinCondition,
     /// Parse error
     ParseError,
 }

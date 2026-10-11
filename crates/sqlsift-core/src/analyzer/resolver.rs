@@ -27,6 +27,7 @@ use super::scope::{
     Relation, RelationKind, Scope, UNNAMED_COLUMN,
 };
 use super::structure::Clause;
+use super::suspicious::InSubquery;
 
 /// Resolves names and checks types in SQL statements
 pub(super) struct Resolver<'a> {
@@ -53,6 +54,8 @@ pub(super) struct Resolver<'a> {
     /// Subqueries compared with or assigned to a row, by address (they may return
     /// several columns)
     pub(super) row_subqueries: Vec<usize>,
+    /// The SELECT of the `IN` subquery being resolved (E0019, E0020)
+    pub(super) in_subquery: Option<InSubquery>,
 }
 
 impl<'a> Resolver<'a> {
@@ -69,6 +72,7 @@ impl<'a> Resolver<'a> {
             duplicate_names: Vec::new(),
             templated_statement: false,
             row_subqueries: Vec::new(),
+            in_subquery: None,
         }
     }
 
@@ -799,6 +803,11 @@ impl<'a> Resolver<'a> {
     /// Resolve a SELECT in a new query block. With `query`, also resolves the query's
     /// ORDER BY / LIMIT, which see the SELECT's FROM clause and output aliases.
     fn select(&mut self, select: &Select, query: Option<&Query>) -> Option<Vec<Column>> {
+        let address = select as *const Select as usize;
+        let in_subquery = match self.in_subquery {
+            Some(s) if s.select == address => self.in_subquery.take(),
+            _ => None,
+        };
         self.scope.push(false);
 
         // FROM first: it builds the scope for every other clause
@@ -925,6 +934,10 @@ impl<'a> Resolver<'a> {
         }
 
         self.check_grouping(select, query);
+        self.check_join_conditions(select);
+        if let Some(role) = in_subquery {
+            self.check_in_subquery_select(select, role);
+        }
         self.scope.pop();
         columns
     }
@@ -1532,6 +1545,7 @@ impl<'a> Resolver<'a> {
                 let mut left_type = None;
                 for (left, op, right) in chain.into_iter().rev() {
                     self.expr(right);
+                    self.check_null_comparison(left, op, right);
                     self.check_row_comparison(left, right);
                     left_type = self.check_binary_op(left, op, right, left_type);
                 }
@@ -1597,9 +1611,21 @@ impl<'a> Resolver<'a> {
                     self.expr(e);
                 }
             }
-            Expr::InSubquery { expr, subquery, .. } => {
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
                 self.expr(expr);
+                let outer = self.in_subquery.take();
+                if let SetExpr::Select(select) = subquery.body.as_ref() {
+                    self.in_subquery = Some(InSubquery {
+                        select: std::ptr::addr_of!(**select) as usize,
+                        negated: *negated,
+                    });
+                }
                 let columns = self.subquery(subquery);
+                self.in_subquery = outer;
                 self.check_in_subquery_shape(expr, columns.as_ref().map(Vec::len));
                 self.check_in_subquery(expr, columns.as_deref());
             }
@@ -1625,6 +1651,7 @@ impl<'a> Resolver<'a> {
             } => {
                 if let Some(op) = operand {
                     self.expr(op);
+                    self.check_case_when_null(op, conditions);
                 }
                 for cond in conditions {
                     self.expr(cond);

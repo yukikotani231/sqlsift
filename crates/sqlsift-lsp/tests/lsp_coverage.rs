@@ -782,7 +782,10 @@ fn schema_with_unparseable_statements_still_loads_the_rest() {
     let mut lsp = Lsp::spawn();
     lsp.start(Some(&t.root_uri()));
     let uri = t.uri("q.sql");
-    lsp.open(&uri, "SELECT u.name, o.id FROM users u, orders o;");
+    lsp.open(
+        &uri,
+        "SELECT u.name, o.id FROM users u CROSS JOIN orders o;",
+    );
     assert!(lsp.diagnostics_for(&uri).is_empty());
 }
 

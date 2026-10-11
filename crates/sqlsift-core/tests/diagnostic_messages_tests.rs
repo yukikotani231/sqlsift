@@ -112,7 +112,7 @@ fn unqualified_column_names_the_only_relation() {
 #[test]
 fn unqualified_column_with_several_relations_names_none() {
     let c = pg(POSTS);
-    let d = single_pg(&c, "SELECT title FROM posts, authors");
+    let d = single_pg(&c, "SELECT title FROM posts CROSS JOIN authors");
     assert_eq!(d.message, "Column 'title' not found");
 
     // A correlated subquery also sees the outer query's relations
