@@ -94,6 +94,16 @@ Prebuilt binaries are also available on the [Releases](https://github.com/yukiko
 
 ## Quick Start
 
+In an existing project, start with:
+
+```bash
+sqlsift init
+```
+
+It finds your schema (sqlc config, Prisma / Supabase / Drizzle / Flyway / golang-migrate / goose / dbmate migrations, `structure.sql` or `schema.sql` dumps, dbt), your queries (`.sql` files, Prisma TypedSQL, dbt models, `` sql`...` `` templates in TypeScript / JavaScript) and the dialect, writes a commented `sqlsift.toml`, runs a first check and prints the next steps. It never overwrites an existing `sqlsift.toml` without `--force`; `--dry-run` only prints the configuration. See [`sqlsift init`](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html#sqlsift-init).
+
+Or pass everything on the command line:
+
 ```bash
 # Validate queries against a schema file
 sqlsift check --schema schema.sql queries/*.sql
@@ -138,7 +148,7 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 |-------|---------------|
 | **Prisma** | `sqlsift check --schema-dir prisma/migrations queries/*.sql` |
 | **Rails** (`schema_format = :sql`) | `sqlsift check --schema db/structure.sql queries/*.sql` |
-| **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
+| **sqlx / golang-migrate / goose / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
 | **dbt** (Postgres, MySQL, SQLite) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`; after `dbt docs generate`, `ref()` / `source()` columns come from `target/catalog.json` and `--schema` is optional — alpha) |

@@ -2,6 +2,34 @@
 
 This page walks through a first check, then saves the options in a configuration file so later runs are just `sqlsift check`.
 
+## The fast way: `sqlsift init`
+
+In an existing project, let sqlsift find the schema, the queries and the dialect:
+
+```console
+$ cd my-app
+$ sqlsift init
+Detected:
+  schema    Prisma migrations: prisma/migrations (12 SQL files)
+  dialect   postgresql (detected from prisma/schema.prisma: provider = "postgresql")
+  queries   Prisma TypedSQL: prisma/sql/**/*.sql (8 files)
+            sql`...` / $queryRaw`...` templates in .ts: src/**/*.ts (5 files)
+
+Wrote sqlsift.toml
+
+Running a first check...
+  2 error(s), 0 warning(s) in 2 of 31 file(s)
+    E0002 column-not-found           2
+
+Next steps:
+  - Run `sqlsift check` to see each diagnostic
+  ...
+```
+
+`init` recognizes sqlc configurations, Prisma, Supabase, Drizzle, Flyway, golang-migrate, sqlx, goose and dbmate migrations, Rails `structure.sql` and other schema dumps, dbt projects, plain `.sql` query files and SQL in TypeScript / JavaScript tagged templates. It writes a commented `sqlsift.toml` (never over an existing one unless you pass `--force`; `--dry-run` only prints it) and runs a first check. Review the file, then use `sqlsift check` from now on. See [`sqlsift init`](reference/cli.md#sqlsift-init) for what is detected and how.
+
+The rest of this page does the same by hand.
+
 ## 1. Point sqlsift at your schema and queries
 
 sqlsift needs two things: the SQL that defines your schema, and the query files to check.

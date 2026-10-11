@@ -4,6 +4,7 @@
 sqlsift [OPTIONS] <COMMAND>
 
 Commands:
+  init    Detect the project layout and write sqlsift.toml
   check   Check SQL files against schema definitions
   rules   List all rules with their category and default level
   schema  Display the schema sqlsift loaded (tables, views, enum types)
@@ -15,6 +16,40 @@ Global options:
   -h, --help      Print help
   -V, --version   Print version
 ```
+
+## `sqlsift init`
+
+```
+sqlsift init [OPTIONS] [DIR]
+
+Arguments:
+  [DIR]                  Project directory [default: current directory]
+
+Options:
+      --force            Overwrite an existing sqlsift.toml
+  -d, --dialect <NAME>   SQL dialect to write instead of the detected one
+      --no-check         Don't run a first check after writing sqlsift.toml
+      --dry-run          Print the configuration to stdout instead of writing sqlsift.toml
+```
+
+Looks at the project, writes a commented `sqlsift.toml` in `DIR`, runs a first `sqlsift check` with it and prints a summary (diagnostics per rule) and the next steps. It never asks questions, so it also works in scripts. An existing `sqlsift.toml` is left alone unless `--force` is given. Directories of dependencies and build output (`node_modules`, `target`, `vendor`, `dist`, ...) and hidden directories are not searched.
+
+| Found | Written |
+|-------|---------|
+| `sqlc.yaml` / `sqlc.yml` / `sqlc.json` | `schema` / `schema_dir` and `files` from its `schema` and `queries`, `dialect` from `engine` |
+| `prisma/migrations/`, `schema.prisma` | `schema_dir = "prisma/migrations"`, `dialect` from the datasource `provider` |
+| `prisma/sql/` (TypedSQL) | `files` |
+| `supabase/migrations/` | `schema_dir`, `dialect = "postgresql"` |
+| Drizzle output (`drizzle/`, `out` of `drizzle.config.*`) | `schema_dir`, `dialect` from the config's `dialect` |
+| Flyway (`V1__name.sql`), golang-migrate / sqlx (`*.up.sql`), goose, dbmate or plain SQL migrations in a `migrations/` / `migration/` / `migrate/` directory | `schema_dir` |
+| `db/structure.sql` (Rails), `schema.sql`, `*_schema.sql` dumps, `schema/` directories of DDL | `schema` / `schema_dir`; for Rails, `dialect` from `config/database.yml` |
+| `dbt_project.yml` | `files` for the models (`model-paths`); the dialect from `profiles.yml` in the project or the `dbt-<adapter>` requirement |
+| Other `.sql` files | `files`, grouped by directory and kept clear of the schema files (with `ignore` where needed) |
+| `.ts` / `.js` / `.vue` / `.svelte` files with `` sql`...` `` or Prisma `` $queryRaw`...` `` templates | `files`, and `embedded_sql_tags` for `$queryRaw` / `$executeRaw` |
+
+When several schema sources are found, the most specific one is used and the others are written as comments. The dialect comes from the most specific source: the tool's own configuration first, then `DATABASE_URL` in `.env.example` / `.env.sample` / `.env`, database images in `docker-compose.yml`, database drivers in `package.json`, `go.mod`, `Gemfile`, Python requirements or `Cargo.toml`, and finally the syntax of the schema files; otherwise PostgreSQL. Disagreeing hints are printed. When the first check reports many diagnostics, `init` suggests [a baseline](../guide/suppression.md#an-existing-backlog-baseline).
+
+Exit codes: `0` when the configuration was written (whatever the first check found), `2` when `sqlsift.toml` already exists (without `--force`) or the options are invalid.
 
 ## `sqlsift check`
 

@@ -886,6 +886,20 @@ fn dbmate_down_section_in_unparseable_file_is_ignored() {
 }
 
 #[test]
+fn goose_down_sections_are_ignored() {
+    let c = pg("-- +goose Up\n\
+         -- +goose StatementBegin\n\
+         CREATE TABLE users (id INT, name TEXT);\n\
+         -- +goose StatementEnd\n\
+         \n\
+         -- +goose Down\n\
+         -- +goose StatementBegin\n\
+         DROP TABLE users;\n\
+         -- +goose StatementEnd\n");
+    assert_clean(&c, "SELECT id, name FROM users;");
+}
+
+#[test]
 fn strip_down_migrations_keeps_offsets() {
     use sqlsift_core::schema::strip_down_migrations;
     let sql = "-- migrate:up\nCREATE TABLE t (id INT);\n-- migrate:down\nDROP TABLE t;\n";

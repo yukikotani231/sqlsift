@@ -3,6 +3,7 @@
 mod args;
 mod config;
 mod dbt;
+mod init;
 mod output;
 
 use std::collections::HashSet;
@@ -910,6 +911,20 @@ fn run(args: Args) -> Result<bool> {
 
             Ok(total_errors > 0 || too_many_warnings.is_some())
         }
+
+        Command::Init {
+            dir,
+            force,
+            dialect,
+            no_check,
+            dry_run,
+        } => init::run(&init::InitOptions {
+            dir: dir.unwrap_or_else(|| PathBuf::from(".")),
+            force,
+            dialect,
+            no_check,
+            dry_run,
+        }),
 
         Command::Rules => {
             print_rules();

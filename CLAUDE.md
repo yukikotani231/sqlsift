@@ -23,6 +23,7 @@ sqlsift/
 │   ├── sqlsift-cli/      # CLI binary
 │   │   ├── args.rs        # CLI argument definitions (clap)
 │   │   ├── config.rs      # Configuration file (sqlsift.toml) support
+│   │   ├── init/          # `sqlsift init`: project layout detection (detect.rs, sqlc_config.rs), sqlsift.toml rendering
 │   │   ├── output/        # Output formatters (human, JSON, SARIF, GitHub Actions)
 │   │   └── main.rs        # Entry point
 │   │
@@ -216,7 +217,8 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ DDL in query files (CREATE [TEMP] TABLE, CTAS, CREATE VIEW, ALTER TABLE, DROP) is applied by `Analyzer::analyze` to a file-local copy of the catalog via `SchemaBuilder::from_catalog`, visible to later statements of that file only
 - ✅ psql scripts (PostgreSQL only, `psql.rs`): meta-commands blanked out, `\g`/`\gset` end a query, `:var`/`:'var'` → `$1`, `:"var"` → identifier whose name diagnostics are dropped; the rewrite keeps every byte offset
 - ✅ Schema-qualified names: tables, views and enums are keyed by schema; `table`, `schema.table`, `db.schema.table` (database part ignored) and column references up to `db.schema.table.column` (`split_column_ref`, `Scope::qualified_relation`); backtick-quoted dotted names are split (`split_dotted_idents`). PostgreSQL catalogs are `strict_schemas` (search_path only, E0001 help for a table off the path); MySQL/SQLite catalogs fall back to the default schema / any schema since the current database is chosen at run time; `USE db` sets the database of unqualified names
-- ✅ Configuration file (sqlsift.toml)
+- ✅ Configuration file (sqlsift.toml), written for an existing project by `sqlsift init` (`sqlsift-cli/src/init/`: detects sqlc, Prisma, Supabase, Drizzle, Flyway, golang-migrate, goose, dbmate, schema dumps, dbt, `.sql` queries and SQL tagged templates, and the dialect; runs a first check as a subprocess with `--format json`)
+- ✅ goose `-- +goose Down` and dbmate `-- migrate:down` sections are skipped when loading the schema (`schema/migrations.rs`)
 - ✅ dbt / Jinja templates in query files (`templating.rs`: tags are masked keeping locations; `--templating`, `templating = "jinja"`, auto-detected from `dbt_project.yml`)
 - ✅ SQL in application code: sqlc `-- name:` query names on diagnostics (`sqlc.rs`), SQL in TypeScript/JavaScript tagged templates (`embedded.rs`, `Analyzer::analyze_embedded`, `embedded_sql_tags`)
 - ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
