@@ -45,7 +45,7 @@ When reading migrations, sqlsift applies only the "up" direction:
 - `COPY ... FROM stdin` data blocks in `pg_dump` output are skipped
 - `ALTER TABLE`: `ADD` / `DROP` / `RENAME COLUMN`, `ADD CONSTRAINT`, `RENAME TO`
 
-Statements sqlsift doesn't model (functions, triggers, domains, grants, …) are skipped, and the rest of the file is still loaded. Problems while loading the schema (such as an `ALTER TABLE` on a table that doesn't exist) are reported as warnings on stderr by both `check` and `schema`.
+Statements sqlsift doesn't model (functions, triggers, domains, grants, …) are skipped, and the rest of the file is still loaded. A `CREATE TABLE` or `CREATE VIEW` that can't be parsed (for example syntax newer than the parser, such as PostgreSQL 18 `VIRTUAL` generated columns) is skipped with a warning; its table still counts as existing, so queries that use it are not reported, but their columns are not checked. Problems while loading the schema (such as an `ALTER TABLE` on a table that doesn't exist) are reported as warnings on stderr by both `check` and `schema`.
 
 ## Inspecting the loaded schema
 

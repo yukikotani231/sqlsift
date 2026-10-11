@@ -246,8 +246,9 @@ impl<'a> Resolver<'a> {
                 if let Some(source) = &insert.source {
                     self.insert_source(source);
                 }
-            } else if !(self.dialect == SqlDialect::BigQuery
-                && self.bigquery_table_may_exist(&table_name))
+            } else if (self.dialect != SqlDialect::BigQuery
+                || !self.bigquery_table_may_exist(&table_name))
+                && !self.definition_was_skipped(&table_name)
             {
                 let diag = self.table_not_found(&table_name, table_span);
                 self.diagnostics.push(diag);
@@ -1412,7 +1413,10 @@ impl<'a> Resolver<'a> {
                 } else if let Some(view) = Relation::view(self.catalog, &table_name) {
                     view
                 } else {
-                    if !is_system_table(self.dialect, &table_name) && !may_exist {
+                    if !is_system_table(self.dialect, &table_name)
+                        && !may_exist
+                        && !self.definition_was_skipped(&table_name)
+                    {
                         let span = name
                             .0
                             .last()
@@ -2419,12 +2423,11 @@ impl<'a> Resolver<'a> {
         let help = match (
             self.dropped_table_hint(table_name),
             self.off_search_path_hint(table_name),
-            self.skipped_definition_hint(table_name),
             self.similar_table(table_name),
         ) {
-            (Some(hint), _, _, _) | (None, Some(hint), _, _) | (None, None, Some(hint), _) => hint,
+            (Some(hint), _, _) | (None, Some(hint), _) => hint,
             // PostgreSQL: `post` (or `"post"`) doesn't match a table created as `"Post"`
-            (None, None, None, Some(suggestion))
+            (None, None, Some(suggestion))
                 if self.catalog.case_sensitive_names
                     && !suggestion.contains('.')
                     && suggestion.eq_ignore_ascii_case(&table_name.to_string()) =>
@@ -2433,8 +2436,8 @@ impl<'a> Resolver<'a> {
                     "Table names are case-sensitive when quoted; did you mean \"{suggestion}\"?"
                 )
             }
-            (None, None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
-            (None, None, None, None) => self.missing_table_hint(table_name),
+            (None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
+            (None, None, None) => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
@@ -2522,23 +2525,17 @@ impl<'a> Resolver<'a> {
         ))
     }
 
-    /// Why a table is missing when an earlier statement of the query file that
-    /// defines it could not be parsed
-    fn skipped_definition_hint(&self, table_name: &QualifiedName) -> Option<String> {
-        let def = self.catalog.skipped_definitions.iter().rev().find(|d| {
-            d.line.is_some()
-                && d.name.as_deref().is_some_and(|name| {
-                    let last = name.rsplit('.').next().unwrap_or(name);
-                    last.trim_matches('"')
-                        .eq_ignore_ascii_case(&table_name.name)
-                })
-        })?;
-        Some(format!(
-            "The {} statement for '{}' on line {} could not be parsed (see the parse error there), so the table is unknown",
-            def.kind,
-            def.name.as_deref().unwrap_or_default(),
-            def.line.unwrap_or_default()
-        ))
+    /// Whether a CREATE TABLE / CREATE VIEW statement for `table_name` could not be
+    /// parsed and was skipped: the table exists but its columns are unknown, so it
+    /// is not reported as missing (a definition using syntax newer than the parser,
+    /// such as PostgreSQL 18 `VIRTUAL` generated columns)
+    fn definition_was_skipped(&self, table_name: &QualifiedName) -> bool {
+        self.catalog.skipped_definitions.iter().any(|d| {
+            matches!(d.kind.as_str(), "CREATE TABLE" | "CREATE VIEW")
+                && d.name
+                    .as_deref()
+                    .is_some_and(|n| defines_name(n, table_name))
+        })
     }
 
     /// Why a table that has no similarly named one may be missing
@@ -2546,19 +2543,11 @@ impl<'a> Resolver<'a> {
         const LIST_TABLES: &str =
             "run `sqlsift schema <schema files>` to list the tables that were loaded";
         let skipped = &self.catalog.skipped_definitions;
-        let defines_table = |name: &str| {
-            let unquote = |part: &str| {
-                part.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
-                    .to_string()
-            };
-            name.rsplit('.')
-                .next()
-                .is_some_and(|last| unquote(last).eq_ignore_ascii_case(&table_name.name))
-        };
-        if let Some(def) = skipped
-            .iter()
-            .find(|d| d.name.as_deref().is_some_and(defines_table))
-        {
+        if let Some(def) = skipped.iter().find(|d| {
+            d.name
+                .as_deref()
+                .is_some_and(|n| defines_name(n, table_name))
+        }) {
             return format!(
                 "A {} statement for '{}' in the schema could not be parsed and was skipped (see the schema warnings)",
                 def.kind,
@@ -2586,6 +2575,15 @@ impl<'a> Resolver<'a> {
         }
         format!("Check that the table exists in your schema definition; {LIST_TABLES}")
     }
+}
+
+/// Whether `name` (as written in a skipped statement, possibly qualified and
+/// quoted) has the last part of `table_name`
+fn defines_name(name: &str, table_name: &QualifiedName) -> bool {
+    name.rsplit('.').next().is_some_and(|last| {
+        last.trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+            .eq_ignore_ascii_case(&table_name.name)
+    })
 }
 
 /// Whether an operator is a comparison (=, <>, <, <=, >, >=)

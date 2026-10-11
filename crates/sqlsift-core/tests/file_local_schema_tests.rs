@@ -278,28 +278,23 @@ fn create_table_as_with_no_data_is_visible_to_later_statements() {
 }
 
 #[test]
-fn table_whose_create_failed_to_parse_says_so() {
+fn table_whose_create_failed_to_parse_is_not_reported() {
+    // The parse error is reported; the table exists with unknown columns
     let diagnostics = analyze(
         "CREATE TABLE t2 (id INTEGER);
          CREATE TABLE t3 (id INTEGER) bogus syntax here;
          SELECT id FROM t3;",
     );
-    assert_eq!(
-        kinds(&diagnostics),
-        vec![DiagnosticKind::ParseError, DiagnosticKind::TableNotFound]
-    );
-    let help = diagnostics[1].help.as_deref().unwrap();
-    assert!(
-        help.contains("'t3' on line 2 could not be parsed"),
-        "{help}"
-    );
+    assert_eq!(kinds(&diagnostics), vec![DiagnosticKind::ParseError]);
     // Only for the later statements
     let diagnostics = analyze(
         "SELECT id FROM t3;
          CREATE TABLE t3 (id INTEGER) bogus syntax here;",
     );
-    let help = diagnostics[0].help.as_deref().unwrap();
-    assert!(!help.contains("could not be parsed"), "{help}");
+    assert_eq!(
+        kinds(&diagnostics),
+        vec![DiagnosticKind::TableNotFound, DiagnosticKind::ParseError]
+    );
 }
 
 #[test]

@@ -319,21 +319,24 @@ const UNPARSEABLE: &str = "
 ";
 
 #[test]
-fn missing_table_whose_definition_was_skipped_says_so() {
+fn table_whose_definition_was_skipped_is_not_reported() {
     let mut builder = SchemaBuilder::new();
     builder.parse(UNPARSEABLE).expect("schema parses");
     let (c, warnings) = builder.build();
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert_eq!(c.skipped_definitions.len(), 1);
 
-    let d = single_pg(&c, "SELECT payload FROM events");
-    assert_eq!(
-        d.help.as_deref(),
-        Some(
-            "A CREATE TABLE statement for 'events' in the schema could not be parsed \
-             and was skipped (see the schema warnings)"
-        )
-    );
+    // The table exists but its columns are unknown
+    for sql in [
+        "SELECT payload FROM events",
+        "SELECT e.anything FROM events e JOIN posts p ON p.id = e.id",
+        "INSERT INTO events (id, payload) VALUES (1, 'x')",
+        "UPDATE events SET payload = 'x' WHERE id = 1",
+        "DELETE FROM events WHERE id = 1",
+    ] {
+        let diags = Analyzer::new(&c).analyze(sql);
+        assert!(diags.is_empty(), "{sql}: {diags:#?}");
+    }
 
     let d = single_pg(&c, "SELECT 1 FROM zzzzzz");
     assert_eq!(
