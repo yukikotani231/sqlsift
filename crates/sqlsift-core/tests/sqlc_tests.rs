@@ -18,7 +18,7 @@ const MYSQL_SCHEMA: &str = r"
 fn analyze_with(dialect: SqlDialect, sql: &str) -> Vec<Diagnostic> {
     let schema = match dialect {
         SqlDialect::PostgreSQL => SCHEMA,
-        SqlDialect::MySQL | SqlDialect::SQLite => MYSQL_SCHEMA,
+        _ => MYSQL_SCHEMA,
     };
     let mut builder = SchemaBuilder::with_dialect(dialect);
     builder.parse(schema).unwrap();

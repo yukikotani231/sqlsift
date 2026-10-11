@@ -113,7 +113,7 @@ Macros that expand to whole clauses or statements can't be followed: a parse err
 
 With Jinja templating, files in the dbt project's `macros/`, `dbt_packages/` and `target/` directories are skipped when they are matched by a glob pattern (`'**/*.sql'`); a file named on its own is still checked. Add other directories you don't want checked (`analyses/`, `snapshots/`) to `ignore`.
 
-sqlsift supports the PostgreSQL, MySQL and SQLite dialects only, so this helps dbt projects on Postgres (or a Postgres-compatible warehouse such as Redshift, as far as its SQL is Postgres-compatible), MySQL or SQLite. Projects on Snowflake, BigQuery or Databricks won't benefit until those dialects are supported.
+Set `dialect` to your warehouse. Snowflake, BigQuery, Redshift and Databricks are supported in alpha (see [Dialects](sql-support.md#dialects)): their queries parse and names are checked, but many warehouse types and functions are not known yet, and are left unreported.
 
 ## sqlc query files
 

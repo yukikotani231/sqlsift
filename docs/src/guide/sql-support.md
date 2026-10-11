@@ -7,6 +7,12 @@
 | PostgreSQL | default, `--dialect postgresql` | Most complete: enums, `DISTINCT ON`, `LATERAL`, JSON operators, psql scripts |
 | MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`, `mysqldump` files, `INSERT ... SET`, index hints ([details](queries.md#mysql-syntax)); booleans are integers |
 | SQLite | `--dialect sqlite` | SQLite's loose typing: booleans are integers |
+| Snowflake (alpha) | `--dialect snowflake` | `QUALIFY`, lateral column aliases (`SELECT a + 1 AS b ... WHERE b > 0`), semi-structured paths (`v:a.b`) parse |
+| BigQuery (alpha) | `--dialect bigquery` | Backtick identifiers, `QUALIFY`, `SELECT * EXCEPT / REPLACE`, `UNNEST` parse; `_PARTITIONTIME` and friends are known |
+| Redshift (alpha) | `--dialect redshift` | PostgreSQL-like, with lateral column aliases and Redshift system tables |
+| Databricks (alpha) | `--dialect databricks` | Spark SQL / Databricks SQL, backtick identifiers, lateral column aliases |
+
+The data warehouse dialects are alpha: queries parse with the warehouse's syntax and table and column names are checked, but many warehouse types (`VARIANT`, `STRUCT`, ...) and functions are not known yet. Like everything sqlsift can't work out, they are left unreported rather than guessed. For dbt projects on a warehouse, see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates).
 
 Set it once in `sqlsift.toml` with `dialect = "mysql"`.
 
