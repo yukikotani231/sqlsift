@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/yukikotani231/sqlsift/compare/v0.1.5...v0.2.0) - 2026-10-11
+
+### Added
+
+- aiosql / HugSQL query names and parameters, with an example project ([#236](https://github.com/yukikotani231/sqlsift/pull/236))
+- *(analyzer)* name the migration file and line in rename/drop hints ([#235](https://github.com/yukikotani231/sqlsift/pull/235))
+- *(analyzer)* wrong-argument-type rule for built-in functions and LIKE (E0027) ([#233](https://github.com/yukikotani231/sqlsift/pull/233))
+- *(cli)* sqlsift init detects the project layout and writes sqlsift.toml ([#225](https://github.com/yukikotani231/sqlsift/pull/225))
+- *(action)* report only the diagnostics a pull request introduces ([#223](https://github.com/yukikotani231/sqlsift/pull/223))
+- *(analyzer)* value-out-of-range, suspicious and restriction rules E0017-E0026 ([#222](https://github.com/yukikotani231/sqlsift/pull/222))
+- *(analyzer)* add structural and grouping rules E0009-E0016 ([#221](https://github.com/yukikotani231/sqlsift/pull/221))
+- *(dbt)* resolve ref() / source() columns from dbt's catalog.json (alpha) ([#190](https://github.com/yukikotani231/sqlsift/pull/190))
+- *(dialect)* add Snowflake, BigQuery, Redshift and Databricks dialects (alpha) ([#188](https://github.com/yukikotani231/sqlsift/pull/188))
+
+### Fixed
+
+- skip directories matched by globs; PostgreSQL case-sensitive quoted columns ([#228](https://github.com/yukikotani231/sqlsift/pull/228))
+- *(dbt)* parse config after comments, clause macros, loop aliases and var() relations ([#197](https://github.com/yukikotani231/sqlsift/pull/197))
+
+### Other
+
+- sqlx example project and a sweep of stale statements ([#234](https://github.com/yukikotani231/sqlsift/pull/234))
+- add example projects for common stacks, checked in CI ([#224](https://github.com/yukikotani231/sqlsift/pull/224))
+
 ## [0.1.5](https://github.com/yukikotani231/sqlsift/compare/v0.1.4...v0.1.5) - 2026-10-11
 
 ### Added

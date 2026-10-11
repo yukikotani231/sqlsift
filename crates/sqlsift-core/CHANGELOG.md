@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/yukikotani231/sqlsift/compare/v0.1.5...v0.2.0) - 2026-10-11
+
+### Added
+
+- aiosql / HugSQL query names and parameters, with an example project ([#236](https://github.com/yukikotani231/sqlsift/pull/236))
+- *(analyzer)* name the migration file and line in rename/drop hints ([#235](https://github.com/yukikotani231/sqlsift/pull/235))
+- *(analyzer)* wrong-argument-type rule for built-in functions and LIKE (E0027) ([#233](https://github.com/yukikotani231/sqlsift/pull/233))
+- *(cli)* sqlsift init detects the project layout and writes sqlsift.toml ([#225](https://github.com/yukikotani231/sqlsift/pull/225))
+- *(action)* report only the diagnostics a pull request introduces ([#223](https://github.com/yukikotani231/sqlsift/pull/223))
+- *(analyzer)* value-out-of-range, suspicious and restriction rules E0017-E0026 ([#222](https://github.com/yukikotani231/sqlsift/pull/222))
+- *(analyzer)* add structural and grouping rules E0009-E0016 ([#221](https://github.com/yukikotani231/sqlsift/pull/221))
+- *(bigquery)* types, UNNEST, struct fields and functions for the BigQuery dialect (alpha) ([#192](https://github.com/yukikotani231/sqlsift/pull/192))
+- *(snowflake)* types, functions, FLATTEN and identifier case for the Snowflake dialect (alpha) ([#193](https://github.com/yukikotani231/sqlsift/pull/193))
+- *(dbt)* resolve ref() / source() columns from dbt's catalog.json (alpha) ([#190](https://github.com/yukikotani231/sqlsift/pull/190))
+- *(analyzer)* fully resolve schema-qualified names ([#191](https://github.com/yukikotani231/sqlsift/pull/191))
+- *(dialect)* add Snowflake, BigQuery, Redshift and Databricks dialects (alpha) ([#188](https://github.com/yukikotani231/sqlsift/pull/188))
+
+### Fixed
+
+- skip directories matched by globs; PostgreSQL case-sensitive quoted columns ([#228](https://github.com/yukikotani231/sqlsift/pull/228))
+- *(analyzer)* accept fewer INSERT values than columns without a column list in PostgreSQL ([#220](https://github.com/yukikotani231/sqlsift/pull/220))
+- *(bigquery)* struct stars, UNPIVOT, script variables, GROUP BY aliases, other projects and parse gaps ([#198](https://github.com/yukikotani231/sqlsift/pull/198))
+- *(dbt)* parse config after comments, clause macros, loop aliases and var() relations ([#197](https://github.com/yukikotani231/sqlsift/pull/197))
+- *(dialect)* Snowflake, Redshift and Databricks false positives from the corpus ([#196](https://github.com/yukikotani231/sqlsift/pull/196))
+- *(analyzer)* unknown-type arithmetic and duplicate star columns from the corpus ([#195](https://github.com/yukikotani231/sqlsift/pull/195))
+
+### Other
+
+- sqlx example project and a sweep of stale statements ([#234](https://github.com/yukikotani231/sqlsift/pull/234))
+- app-developer corpus (sqlc, Prisma, postgres.js, MySQL) and fixes ([#232](https://github.com/yukikotani231/sqlsift/pull/232))
+- add example projects for common stacks, checked in CI ([#224](https://github.com/yukikotani231/sqlsift/pull/224))
+- real-world corpus for dbt and warehouse dialects ([#194](https://github.com/yukikotani231/sqlsift/pull/194))
+
 ## [0.1.5](https://github.com/yukikotani231/sqlsift/compare/v0.1.4...v0.1.5) - 2026-10-11
 
 ### Added
