@@ -1605,7 +1605,66 @@ impl<'a> Resolver<'a> {
                 let (key, _) = self.take_relations_since(start);
                 self.insert_pivot_relation(alias.as_ref(), key, None);
             }
+            TableFactor::JsonTable {
+                json_expr,
+                columns,
+                alias,
+                ..
+            } => {
+                // JSON_TABLE(doc, path COLUMNS (...)) sees the FROM items before it;
+                // its columns are the ones listed, with their types
+                self.expr(json_expr);
+                let mut listed = Vec::new();
+                self.json_table_columns(columns, &mut listed);
+                let (key, names) = match alias {
+                    Some(a) => (
+                        a.name.value.clone(),
+                        a.columns.iter().map(|c| c.name.value.clone()).collect(),
+                    ),
+                    None => ("json_table".to_string(), Vec::new()),
+                };
+                let columns = Relation::rename_columns(Some(listed), &names);
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Function, key, columns),
+                );
+            }
+            TableFactor::OpenJsonTable {
+                json_expr, alias, ..
+            } => {
+                self.expr(json_expr);
+                let key = alias
+                    .as_ref()
+                    .map_or_else(|| "openjson".to_string(), |a| a.name.value.clone());
+                self.scope.current().relations.insert(
+                    key.clone(),
+                    Relation::new(RelationKind::Function, key, None),
+                );
+            }
             _ => {}
+        }
+    }
+
+    /// The output columns of a `JSON_TABLE` column list, `NESTED PATH` columns
+    /// included
+    fn json_table_columns(
+        &self,
+        columns: &[sqlparser::ast::JsonTableColumn],
+        out: &mut Vec<Column>,
+    ) {
+        use sqlparser::ast::JsonTableColumn;
+        for column in columns {
+            match column {
+                JsonTableColumn::Named(named) => out.push(Column::new(
+                    named.name.value.clone(),
+                    ExpressionType::of_column(&SqlType::from_ast_in(&named.r#type, self.dialect)),
+                )),
+                JsonTableColumn::ForOrdinality(name) => out.push(Column::new(
+                    name.value.clone(),
+                    ExpressionType::Known(SqlType::Integer),
+                )),
+                JsonTableColumn::Nested(nested) => self.json_table_columns(&nested.columns, out),
+            }
         }
     }
 

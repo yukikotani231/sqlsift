@@ -1253,3 +1253,36 @@ fn mysql_and_sqlite_type_mismatches_are_implicit_conversions() {
         vec![DiagnosticKind::TypeMismatch]
     );
 }
+
+// #281: JSON_TABLE in FROM (PostgreSQL 17, MySQL 8)
+#[test]
+fn json_table_columns_are_the_listed_ones() {
+    let schema = "CREATE TABLE docs (id INTEGER PRIMARY KEY, body JSON);";
+    for dialect in [SqlDialect::PostgreSQL, SqlDialect::MySQL] {
+        for sql in [
+            "SELECT * FROM JSON_TABLE('[{\"a\":1}]', '$[*]' COLUMNS (a INT PATH '$.a')) AS jt",
+            "SELECT d.id, jt.a, jt.n FROM docs d, \
+             JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a', n FOR ORDINALITY)) AS jt \
+             WHERE jt.n > 1",
+            "SELECT jt.b FROM docs d, JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a', \
+             NESTED PATH '$.x[*]' COLUMNS (b TEXT PATH '$'))) AS jt",
+        ] {
+            let diagnostics = analyze(schema, dialect, sql);
+            assert!(diagnostics.is_empty(), "{dialect}: {sql}: {diagnostics:#?}");
+        }
+        let sql =
+            "SELECT jt.c FROM docs d, JSON_TABLE(d.body, '$[*]' COLUMNS (a INT PATH '$.a')) AS jt";
+        assert_eq!(
+            kinds(&analyze(schema, dialect, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{dialect}"
+        );
+        let sql =
+            "SELECT jt.a FROM docs d, JSON_TABLE(d.nope, '$[*]' COLUMNS (a INT PATH '$')) AS jt";
+        assert_eq!(
+            kinds(&analyze(schema, dialect, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{dialect}"
+        );
+    }
+}
