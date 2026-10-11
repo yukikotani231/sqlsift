@@ -70,6 +70,10 @@ Raw SQL is usually only checked when it runs. Rename a column in a migration and
 
 sqlsift complements these tools: keep your formatter and migration linter, and add sqlsift to make sure the queries still match the schema.
 
+## Getting started
+
+Run `sqlsift init` in your project: it finds the schema, the queries and the dialect, and writes a `sqlsift.toml` (see [Quick start](quick-start.md)). Or start from one of the [example projects](integrations/examples.md) for sqlc, Prisma, postgres.js, sqlx, plain SQL with migrations, MySQL and dbt.
+
 ## Status
 
 sqlsift is in early development (alpha). Diagnostics may change between versions. Feedback, bug reports and real-world SQL that sqlsift gets wrong are very welcome: please [open an issue](https://github.com/yukikotani231/sqlsift/issues/new/choose).

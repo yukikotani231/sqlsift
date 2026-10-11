@@ -151,11 +151,11 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / goose / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
-| **dbt** (Postgres, MySQL, SQLite) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`; after `dbt docs generate`, `ref()` / `source()` columns come from `target/catalog.json` and `--schema` is optional — alpha) |
+| **dbt** (Postgres, MySQL, SQLite; Snowflake, BigQuery, Redshift, Databricks in alpha) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`; after `dbt docs generate`, `ref()` / `source()` columns come from `target/catalog.json` and `--schema` is optional — alpha) |
 
 Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
 
-**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [postgres.js](examples/postgres-js), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
+**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [postgres.js](examples/postgres-js), [sqlx (Rust)](examples/sqlx), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
 
 ## Editor Integration
 
@@ -248,7 +248,7 @@ See [ROADMAP.md](ROADMAP.md) for what comes next.
 Contributions are welcome! The most useful things right now are:
 
 - **Real-world SQL that sqlsift gets wrong** — false positives and missed errors. Please [open an issue](https://github.com/yukikotani231/sqlsift/issues/new/choose) with a minimal schema and query.
-- **Dialect coverage** — MySQL and SQLite edge cases.
+- **Dialect coverage** — MySQL and SQLite edge cases, and the alpha warehouse dialects (Snowflake, BigQuery, Redshift, Databricks).
 - **Editor integrations** — setup guides or plugins for editors other than VS Code.
 
 To work on the code:
