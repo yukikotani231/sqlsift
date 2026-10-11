@@ -38,6 +38,11 @@ schema = [
 # directory or next to this file.
 # templating = "jinja"
 
+# dbt catalog.json (from `dbt docs generate`) with the columns of the models and
+# sources that {{ ref() }} / {{ source() }} name (alpha). When unset,
+# target/catalog.json of the dbt project is used if it exists.
+# dbt_catalog = "target/catalog.json"
+
 # Output format: "human", "json", "sarif", or "github" (GitHub Actions annotations)
 # format = "human"
 

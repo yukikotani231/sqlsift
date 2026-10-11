@@ -1,0 +1,77 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json",
+    "dbt_version": "1.8.0",
+    "generated_at": "2026-10-01T00:00:00.000000Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "env": {}
+  },
+  "nodes": {
+    "model.jaffle.stg_orders": {
+      "metadata": {
+        "type": "VIEW",
+        "schema": "analytics",
+        "name": "stg_orders",
+        "database": "warehouse",
+        "comment": null,
+        "owner": "dbt"
+      },
+      "columns": {
+        "order_id": {"type": "integer", "index": 1, "name": "order_id", "comment": null},
+        "customer_id": {"type": "integer", "index": 2, "name": "customer_id", "comment": null},
+        "order_date": {"type": "date", "index": 3, "name": "order_date", "comment": null},
+        "status": {"type": "text", "index": 4, "name": "status", "comment": null},
+        "amount": {"type": "numeric", "index": 5, "name": "amount", "comment": null}
+      },
+      "stats": {"has_stats": {"id": "has_stats", "label": "Has Stats?", "value": false, "include": false, "description": "Indicates whether there are statistics for this table"}},
+      "unique_id": "model.jaffle.stg_orders"
+    },
+    "model.jaffle.stg_customers": {
+      "metadata": {"type": "VIEW", "schema": "analytics", "name": "stg_customers", "database": "warehouse", "comment": null, "owner": "dbt"},
+      "columns": {
+        "customer_id": {"type": "integer", "index": 1, "name": "customer_id", "comment": null},
+        "first_name": {"type": "text", "index": 2, "name": "first_name", "comment": null},
+        "last_name": {"type": "text", "index": 3, "name": "last_name", "comment": null}
+      },
+      "stats": {},
+      "unique_id": "model.jaffle.stg_customers"
+    },
+    "model.jaffle.customer_orders": {
+      "metadata": {"type": "BASE TABLE", "schema": "analytics", "name": "customer_orders", "database": "warehouse", "comment": null, "owner": "dbt"},
+      "columns": {
+        "customer_id": {"type": "integer", "index": 1, "name": "customer_id", "comment": null},
+        "first_name": {"type": "text", "index": 2, "name": "first_name", "comment": null},
+        "order_count": {"type": "bigint", "index": 3, "name": "order_count", "comment": null},
+        "lifetime_value": {"type": "numeric", "index": 4, "name": "lifetime_value", "comment": null},
+        "newest": {"type": "USER-DEFINED", "index": 5, "name": "newest", "comment": null}
+      },
+      "stats": {},
+      "unique_id": "model.jaffle.customer_orders"
+    }
+  },
+  "sources": {
+    "source.jaffle.shop.orders": {
+      "metadata": {"type": "BASE TABLE", "schema": "raw_shop", "name": "orders", "database": "warehouse", "comment": null, "owner": "loader"},
+      "columns": {
+        "id": {"type": "integer", "index": 1, "name": "id", "comment": null},
+        "customer_id": {"type": "integer", "index": 2, "name": "customer_id", "comment": null},
+        "order_date": {"type": "date", "index": 3, "name": "order_date", "comment": null},
+        "status": {"type": "character varying(32)", "index": 4, "name": "status", "comment": null},
+        "amount_cents": {"type": "integer", "index": 5, "name": "amount_cents", "comment": null}
+      },
+      "stats": {},
+      "unique_id": "source.jaffle.shop.orders"
+    },
+    "source.jaffle.shop.customers": {
+      "metadata": {"type": "BASE TABLE", "schema": "raw_shop", "name": "customers", "database": "warehouse", "comment": null, "owner": "loader"},
+      "columns": {
+        "id": {"type": "integer", "index": 1, "name": "id", "comment": null},
+        "first_name": {"type": "text", "index": 2, "name": "first_name", "comment": null},
+        "last_name": {"type": "text", "index": 3, "name": "last_name", "comment": null}
+      },
+      "stats": {},
+      "unique_id": "source.jaffle.shop.customers"
+    }
+  },
+  "errors": null
+}

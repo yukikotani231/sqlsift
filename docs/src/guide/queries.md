@@ -102,7 +102,8 @@ where c.id > (select max(customer_id) from {{ this }})
 - Of `{% if %} ... {% elif %} ... {% else %} ... {% endif %}` only the first branch is checked; the others are skipped.
 - The bodies of `{% set x %}...{% endset %}`, `{% call %}...{% endcall %}`, `{% macro %}...{% endmacro %}` (and `test`, `materialization`, `docs` blocks) are skipped. The body of `{% raw %}...{% endraw %}` is checked as SQL.
 - `{{ source('raw', 'customers') }}` is the schema's table `raw.customers` when your schema has it, so its columns are checked.
-- `{{ ref(...) }}`, other `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema to get them checked.
+- `{{ ref('orders') }}` and `{{ source('shop', 'orders') }}` have the columns of the model or source in dbt's `catalog.json`, when there is one (see [Columns of models and sources](#columns-of-models-and-sources-from-dbts-catalog-alpha) below).
+- Any other `{{ ref(...) }}` or `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema, or generate dbt's catalog, to get them checked.
 - `{{ ... }}` as part of a name (`total_{{ c }}`, `as {{ alias }}`) is a name sqlsift doesn't know, and at the start of a statement (`{{ config(...) }}`) it is skipped.
 - `{{ ... }}` as a type (`x::{{ dbt.type_bigint() }}`, `cast(x as {{ ... }})`) is a type sqlsift doesn't know.
 - Any other `{{ ... }}`, and a string literal with one in it (`'{{ var("start") }}'`), is an untyped value, like a bind parameter: it is never a type mismatch.
@@ -110,6 +111,26 @@ where c.id > (select max(customer_id) from {{ this }})
 - Everything else is checked as usual, and diagnostics point at the original file.
 
 Macros that expand to whole clauses or statements can't be followed: a parse error on one shows the template tag (`found: Jinja expression {{ dbt_utils.date_spine(...) }}`). Use `ignore` or `{# sqlsift:disable-file #}` for such files.
+
+### Columns of models and sources from dbt's catalog (alpha)
+
+`dbt docs generate` writes `target/catalog.json`, with the columns and types of every model, seed, snapshot and source as they are in the warehouse. When it exists in the dbt project (next to `dbt_project.yml`), sqlsift reads it, so the columns of `{{ ref(...) }}` and `{{ source(...) }}` are checked too, and schema files become optional:
+
+```console
+$ dbt docs generate
+$ sqlsift check 'models/**/*.sql'
+error[E0002]: Column 'amount_usd' not found in table 'ref.stg_orders'
+  --> models/marts/order_typo.sql:3:22
+```
+
+Use `--dbt-catalog <PATH>` (or `dbt_catalog = "..."` in `sqlsift.toml`) when the catalog is elsewhere, for example when `target-path` is changed or the catalog is downloaded from a CI artifact or dbt Cloud. It is read whatever the templating, and a configured catalog that is missing or not a dbt catalog is an error; one found in `target/` that can't be read is a warning.
+
+- `{{ ref('orders') }}` is the model, seed or snapshot named `orders`; diagnostics name it `ref.orders`. Its relation is also a table under its warehouse name (`analytics.orders`) for SQL that names it directly. Tables in your schema files take precedence over the catalog.
+- `{{ source('shop', 'orders') }}` is the table `orders` of the source `shop`.
+- A `ref()` of a model that isn't in the catalog (not built yet when the catalog was generated), a package-qualified `ref('package', 'model')`, a versioned `ref('model', v=2)`, and a model name that two packages use, are tables with unknown columns, as without a catalog.
+- Column types are the warehouse's type names. The common ones (`integer`, `int64`, `number`, `varchar`, `string`, `timestamp_ntz`, `boolean`, ...) are checked; others (`variant`, `struct`, arrays, geography types) are unknown types and never a type mismatch.
+
+The catalog is a snapshot of the warehouse when `dbt docs generate` last ran: regenerate it after changing a model's columns, or sqlsift checks the models that use it against the old columns. The language server reads it when it starts. This support is **alpha**: how `ref()` names appear in diagnostics and how the catalog is found may change.
 
 With Jinja templating, files in the dbt project's `macros/`, `dbt_packages/` and `target/` directories are skipped when they are matched by a glob pattern (`'**/*.sql'`); a file named on its own is still checked. Add other directories you don't want checked (`analyses/`, `snapshots/`) to `ignore`.
 

@@ -77,6 +77,12 @@ pub enum Command {
         #[arg(long, value_name = "ENGINE")]
         templating: Option<String>,
 
+        /// dbt catalog.json (from `dbt docs generate`) with the columns of the models
+        /// and sources that `ref()` / `source()` name (alpha) [default:
+        /// target/catalog.json of the dbt project, if it exists]
+        #[arg(long = "dbt-catalog", value_name = "PATH")]
+        dbt_catalog: Option<PathBuf>,
+
         /// Output format
         #[arg(short, long, value_enum)]
         format: Option<OutputFormat>,

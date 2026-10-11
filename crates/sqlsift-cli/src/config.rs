@@ -23,6 +23,7 @@ const KNOWN_KEYS: &[&str] = &[
     "categories",
     "max_warnings",
     "templating",
+    "dbt_catalog",
     "baseline",
     "embedded_sql_tags",
 ];
@@ -52,6 +53,12 @@ pub struct Config {
     /// an ancestor directory of the query file
     #[serde(default)]
     pub templating: Option<String>,
+
+    /// dbt `catalog.json` (from `dbt docs generate`) with the columns of the
+    /// models and sources that `ref()` and `source()` name; when unset,
+    /// `target/catalog.json` of the dbt project is used if it exists
+    #[serde(default)]
+    pub dbt_catalog: Option<String>,
 
     /// Output format (human, json, sarif, github)
     #[serde(default)]
@@ -94,7 +101,8 @@ pub struct Config {
 impl Config {
     /// Load configuration from a TOML file.
     ///
-    /// Relative paths in `schema`, `files`, `ignore`, `schema_dir` and `baseline` are
+    /// Relative paths in `schema`, `files`, `ignore`, `schema_dir`, `baseline` and
+    /// `dbt_catalog` are
     /// resolved against the directory containing the configuration file.
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
@@ -122,6 +130,7 @@ impl Config {
         config.files = config.files.iter().map(resolve).collect();
         config.schema_dir = config.schema_dir.as_ref().map(resolve);
         config.baseline = config.baseline.as_ref().map(resolve);
+        config.dbt_catalog = config.dbt_catalog.as_ref().map(resolve);
         // Ignore patterns are matched later; the base directory is literal text
         for pattern in &config.ignore {
             glob::Pattern::new(pattern).map_err(|e| {
@@ -174,6 +183,7 @@ impl Config {
         format: Option<crate::args::OutputFormat>,
         dialect: Option<&str>,
         templating: Option<&str>,
+        dbt_catalog: Option<&Path>,
         max_warnings: Option<usize>,
         baseline: Option<&Path>,
     ) -> Self {
@@ -202,6 +212,10 @@ impl Config {
 
         if let Some(templating) = templating {
             self.templating = Some(templating.to_string());
+        }
+
+        if let Some(dbt_catalog) = dbt_catalog {
+            self.dbt_catalog = Some(dbt_catalog.display().to_string());
         }
 
         if max_warnings.is_some() {
