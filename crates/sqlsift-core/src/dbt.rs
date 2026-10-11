@@ -22,7 +22,9 @@
 //!
 //! Tables already in the catalog (from the schema files) are kept as they are.
 //! Column types are warehouse type names: the common ones are mapped to
-//! [`SqlType`]s, any other is [`SqlType::Unknown`] and never reported on.
+//! [`SqlType`]s (semi-structured ones such as `VARIANT` to
+//! [`SqlType::SemiStructured`]) and any other to [`SqlType::Unknown`]: values of
+//! these two are never reported on.
 
 use std::collections::HashMap;
 
@@ -207,14 +209,22 @@ pub fn warehouse_type(name: &str) -> SqlType {
     let lower = name.trim().to_ascii_lowercase();
     // The type name without its parameters (`varchar(256)`, `number(38,0)`)
     let base = lower.split('(').next().unwrap_or("").trim();
+    // The type's numeric parameters (`number(38,0)` -> 38, 0)
+    let params: Vec<Option<u64>> = lower
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(inner, _)| inner.split(',').map(|p| p.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let param = |i: usize| params.get(i).copied().flatten();
     match base {
         "smallint" | "int2" => SqlType::SmallInt,
         "integer" | "int" | "int4" => SqlType::Integer,
         "bigint" | "int8" | "int64" | "long" => SqlType::BigInt,
         "numeric" | "decimal" | "number" | "bignumeric" | "dec" => SqlType::Decimal {
-            precision: None,
-            scale: None,
+            precision: param(0),
+            scale: param(1),
         },
+        "byteint" => SqlType::TinyInt,
         "real" | "float4" => SqlType::Real,
         "double precision" | "double" | "float" | "float8" | "float64" => SqlType::DoublePrecision,
         "text" | "string" | "varchar" | "character varying" | "char" | "character" | "nvarchar"
@@ -241,6 +251,10 @@ pub fn warehouse_type(name: &str) -> SqlType {
         "json" => SqlType::Json,
         "jsonb" => SqlType::Jsonb,
         "bytea" | "binary" | "bytes" | "varbinary" => SqlType::Bytea,
+        // Snowflake semi-structured and spatial types (never type checked, like
+        // `SqlType::from_ast` maps them)
+        "variant" | "object" | "geography" | "geometry" => SqlType::SemiStructured(base.into()),
+        "array" => SqlType::SemiStructured("array".into()),
         _ => SqlType::Unknown,
     }
 }
@@ -290,16 +304,22 @@ mod tests {
             .unwrap();
         assert_eq!(orders.column_names(), ["order_id", "status", "payload"]);
         assert_eq!(orders.columns["order_id"].data_type, SqlType::Integer);
-        assert_eq!(orders.columns["payload"].data_type, SqlType::Unknown);
+        assert_eq!(
+            orders.columns["payload"].data_type,
+            SqlType::SemiStructured("variant".into())
+        );
         assert!(catalog.table_exists(&QualifiedName::with_schema("analytics", "orders")));
 
         let source = catalog
             .get_table(&QualifiedName::with_schema("shop", "raw_orders"))
             .unwrap();
-        assert!(matches!(
+        assert_eq!(
             source.columns["ID"].data_type,
-            SqlType::Decimal { .. }
-        ));
+            SqlType::Decimal {
+                precision: Some(38),
+                scale: Some(0)
+            }
+        );
         assert!(catalog.table_exists(&QualifiedName::with_schema("raw", "orders")));
 
         // Ambiguous and versioned models are left out of `ref`
@@ -337,6 +357,28 @@ mod tests {
         assert_eq!(warehouse_type("STRING"), SqlType::Text);
         assert_eq!(warehouse_type("TIMESTAMP_NTZ"), warehouse_type("timestamp"));
         assert_eq!(warehouse_type("ARRAY<STRING>"), SqlType::Unknown);
-        assert_eq!(warehouse_type("geography"), SqlType::Unknown);
+        assert_eq!(
+            warehouse_type("geography"),
+            SqlType::SemiStructured("geography".into())
+        );
+        assert_eq!(
+            warehouse_type("VARIANT"),
+            SqlType::SemiStructured("variant".into())
+        );
+        assert_eq!(
+            warehouse_type("ARRAY"),
+            SqlType::SemiStructured("array".into())
+        );
+        assert_eq!(
+            warehouse_type("NUMBER(12, 2)"),
+            SqlType::Decimal {
+                precision: Some(12),
+                scale: Some(2)
+            }
+        );
+        assert_eq!(
+            warehouse_type("TIMESTAMP_LTZ").display_name(),
+            "timestamp with time zone"
+        );
     }
 }
