@@ -34,7 +34,9 @@ This is how editors and [pre-commit hooks](../integrations/pre-commit.md) can ch
 
 ## File encoding
 
-Query and schema files are read as UTF-8. A byte order mark at the start of a file (written by many Windows editors, SSMS and DBeaver exports) is ignored, both in files and on stdin. Columns in diagnostics don't count it, matching what an editor shows.
+Query and schema files are read as UTF-8, or as UTF-16 when they start with a UTF-16 byte order mark (SSMS's "Unicode" encoding). A byte order mark at the start of a file (written by many Windows editors, SSMS and DBeaver exports) is ignored, both in files and on stdin. Columns in diagnostics don't count it, matching what an editor shows.
+
+A query file in any other encoding (Latin-1, Shift_JIS, UTF-16 without a byte order mark, binary files) is skipped with a warning, and the other files are still checked. A schema file sqlsift can't read stops the check, since every query depends on it.
 
 Very long expressions, such as generated `WHERE id = 1 OR id = 2 OR ...` filters with tens of thousands of terms, are fine: analysis runs with a large stack.
 

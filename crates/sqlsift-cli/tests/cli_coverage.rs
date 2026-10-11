@@ -4232,6 +4232,38 @@ fn byte_order_mark_is_ignored_in_query_and_schema_files() {
 }
 
 #[test]
+fn utf16_files_are_read_and_other_encodings_skipped() {
+    let t = TempDir::new("utf16");
+    t.write("schema.sql", USERS_SCHEMA);
+    // UTF-16 LE with a byte order mark (SSMS's "Unicode")
+    let utf16: Vec<u8> = "\u{feff}SELECT nme FROM users;\n"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    fs::write(t.path().join("mssql.sql"), utf16).unwrap();
+    // Latin-1 text: not UTF-8
+    fs::write(
+        t.path().join("latin1.sql"),
+        b"SELECT 'caf\xe9' FROM userz;\n",
+    )
+    .unwrap();
+    t.write("ok.sql", "SELECT nme FROM users;\n");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "mssql.sql",
+        "latin1.sql",
+        "ok.sql",
+    ])
+    .assert_code(1)
+    .assert_stderr_contains("mssql.sql:1:8")
+    .assert_stderr_contains("Warning: skipped latin1.sql: not UTF-8 or UTF-16 text")
+    .assert_stderr_contains("ok.sql:1:8")
+    .assert_stderr_contains("Found 2 error(s)");
+}
+
+#[test]
 fn byte_order_mark_is_ignored_on_stdin() {
     let t = with_users_schema("bom-stdin");
     t.run_stdin(&["check", "-s", "schema.sql", "-"], "\u{feff}SELECT 1;\n")

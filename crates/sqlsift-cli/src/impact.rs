@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::output::{self, FileDiagnostics, OutputFormatter};
 use crate::{
     analyze_files, build_catalog, collect_query_files, expand_glob, is_glob, load_dbt_catalogs,
-    load_dbt_vars, read_file, QueryFiles, QueryOptions,
+    load_dbt_vars, read_query_file, QueryFiles, QueryOptions,
 };
 
 /// What `sqlsift impact` runs with, besides the configuration
@@ -186,7 +186,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
     let mut affected = Vec::new();
     let mut affected_templating = Vec::new();
     for (path, templating) in files.iter().zip(&file_templating) {
-        if changes.may_affect(&read_file(path)?) {
+        if read_query_file(path)?.is_some_and(|text| changes.may_affect(&text)) {
             affected.push(path.clone());
             affected_templating.push(*templating);
         }

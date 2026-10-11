@@ -151,7 +151,7 @@ fn process_files<T: Send>(
                 stdin.to_string(),
                 options.stdin_filename.unwrap_or(path.as_path()),
             ),
-            _ => (read_file(path)?, path.as_path()),
+            _ => (read_query_file(path)?.unwrap_or_default(), path.as_path()),
         };
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
@@ -277,10 +277,59 @@ fn print_rules() {
     }
 }
 
-/// Read a file, naming the path in the error message
+/// Read a text file (UTF-8, or UTF-16 with a byte order mark), naming the path
+/// in the error message
 fn read_file(path: &Path) -> Result<String> {
-    fs::read_to_string(path)
-        .map_err(|e| miette::miette!("Failed to read {}: {}", path.display(), e))
+    read_query_file(path)?.ok_or_else(|| {
+        miette::miette!(
+            "Failed to read {}: not UTF-8 or UTF-16 text",
+            path.display()
+        )
+    })
+}
+
+/// Read a query file as [`read_file`] does; `None` (after a warning) when it is
+/// not text sqlsift can read, so that the other files are still checked
+fn read_query_file(path: &Path) -> Result<Option<String>> {
+    let bytes =
+        fs::read(path).map_err(|e| miette::miette!("Failed to read {}: {}", path.display(), e))?;
+    let text = decode_text(&bytes);
+    if text.is_none() {
+        eprintln!(
+            "Warning: skipped {}: not UTF-8 or UTF-16 text",
+            path.display()
+        );
+    }
+    Ok(text)
+}
+
+/// The text of a file: UTF-8, or UTF-16 with a byte order mark (kept as
+/// U+FEFF, which the analyzer skips like a UTF-8 one). `None` for anything
+/// else, including UTF-16 without a byte order mark (NUL characters)
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    let utf16 = |little_endian: bool| -> Option<String> {
+        if bytes.len() % 2 != 0 {
+            return None;
+        }
+        let units = bytes.chunks_exact(2).map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        });
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .ok()
+    };
+    match bytes {
+        [0xFF, 0xFE, ..] => utf16(true),
+        [0xFE, 0xFF, ..] => utf16(false),
+        _ => std::str::from_utf8(bytes)
+            .ok()
+            .filter(|text| !text.contains('\0'))
+            .map(str::to_string),
+    }
 }
 
 /// Whether a path pattern contains glob metacharacters
