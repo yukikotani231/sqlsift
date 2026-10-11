@@ -290,10 +290,12 @@ fn output_format(config: &Config) -> Result<OutputFormat> {
         Some("json") => OutputFormat::Json,
         Some("sarif") => OutputFormat::Sarif,
         Some("github") => OutputFormat::Github,
-        Some(other) => miette::bail!(
-            "Invalid format '{}'. Supported formats: human, json, sarif, github.",
-            other
-        ),
+        Some(other) => {
+            return Err(miette::miette!(
+                "Invalid format '{}'. Supported formats: human, json, sarif, github.",
+                other
+            ))
+        }
     })
 }
 

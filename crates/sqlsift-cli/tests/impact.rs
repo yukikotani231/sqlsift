@@ -80,12 +80,13 @@ fn files(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static 
     files
 }
 
-fn file_names(files: &Value) -> Vec<&str> {
+/// The `file` of each entry, with `/` separators (Windows paths use `\\`)
+fn file_names(files: &Value) -> Vec<String> {
     files
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["file"].as_str().unwrap())
+        .map(|f| f["file"].as_str().unwrap().replace('\\', "/"))
         .collect()
 }
 
