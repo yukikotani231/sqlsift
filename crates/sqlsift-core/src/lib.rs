@@ -14,6 +14,7 @@ pub mod dialect;
 pub mod embedded;
 pub mod error;
 pub mod ignore;
+pub mod impact;
 mod mysql;
 mod named_queries;
 mod psql;

@@ -3,6 +3,7 @@
 mod args;
 mod config;
 mod dbt;
+mod impact;
 mod init;
 mod output;
 
@@ -282,6 +283,20 @@ fn config_dialect(config: &Config) -> Result<SqlDialect> {
     }
 }
 
+/// The configured output format (human by default)
+fn output_format(config: &Config) -> Result<OutputFormat> {
+    Ok(match config.format.as_deref() {
+        None | Some("human") => OutputFormat::Human,
+        Some("json") => OutputFormat::Json,
+        Some("sarif") => OutputFormat::Sarif,
+        Some("github") => OutputFormat::Github,
+        Some(other) => miette::bail!(
+            "Invalid format '{}'. Supported formats: human, json, sarif, github.",
+            other
+        ),
+    })
+}
+
 /// Schema files from `schema` (glob patterns are expanded) followed by every
 /// `.sql` file under `schema_dir`, in filename order. Having none is an error
 /// unless `optional` (a dbt catalog provides the tables).
@@ -436,10 +451,12 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
 }
 
 /// Build the catalog from the schema files. Schema warnings are printed to
-/// stderr; a file with errors is returned with its diagnostics instead.
+/// stderr (unless `!warn`); a file with errors is returned with its diagnostics
+/// instead.
 fn build_catalog(
     schema_files: &[PathBuf],
     dialect: SqlDialect,
+    warn: bool,
 ) -> Result<std::result::Result<Catalog, FileDiagnostics>> {
     let mut builder = SchemaBuilder::with_dialect(dialect);
     for schema_file in schema_files {
@@ -456,7 +473,7 @@ fn build_catalog(
     }
     let (catalog, schema_diags) = builder.build();
 
-    if !schema_diags.is_empty() {
+    if warn && !schema_diags.is_empty() {
         eprintln!(
             "Warning: Schema parsing produced {} warning(s):",
             schema_diags.len()
@@ -466,6 +483,114 @@ fn build_catalog(
         }
     }
     Ok(Ok(catalog))
+}
+
+/// The query files to analyze, and their templating (same order)
+struct QueryFiles {
+    files: Vec<PathBuf>,
+    templating: Vec<Templating>,
+    /// Number of files skipped by `ignore` patterns or as dbt macros, packages
+    /// or build output
+    ignored: usize,
+    ignore_patterns: IgnorePatterns,
+}
+
+/// The query files of `config.files` (glob patterns are expanded), without
+/// ignored files, each with its templating. No files at all is an error, whose
+/// message ends with `files_hint` (how to give them).
+fn collect_query_files(
+    config: &Config,
+    templating: Templating,
+    dbt_projects: &mut dbt::DbtProjects,
+    stdin_filename: Option<&Path>,
+    files_hint: &str,
+) -> Result<QueryFiles> {
+    // Collect query files from config or CLI (glob patterns are expanded)
+    let mut query_files = Vec::new();
+    let mut unmatched = Vec::new();
+    for pattern in &config.files {
+        if is_glob(pattern) {
+            let mut matches = expand_glob(pattern)?;
+            if matches.is_empty() {
+                unmatched.push(format!("'{pattern}'"));
+            }
+            // Installed packages and build output that the pattern matches
+            // aren't checked for SQL in TypeScript / JavaScript
+            let base = glob_base(pattern);
+            matches.retain(|path| {
+                !(is_embedded_sql_file(path)
+                    && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
+            });
+            query_files.extend(matches);
+        } else {
+            query_files.push(PathBuf::from(pattern));
+        }
+    }
+
+    if query_files.is_empty() {
+        if !unmatched.is_empty() {
+            miette::bail!("No files match {}", unmatched.join(", "));
+        }
+        miette::bail!("No query files specified. {}", files_hint);
+    }
+    // A typo in one of several patterns shouldn't go unnoticed
+    for pattern in &unmatched {
+        eprintln!("Warning: no files match {pattern}");
+    }
+
+    // Skip ignored files (`ignore` in sqlsift.toml and `--ignore`); patterns
+    // from the config file were already made relative to the current directory
+    let ignore_patterns =
+        IgnorePatterns::new(Path::new(""), &config.ignore).map_err(|e| miette::miette!(e))?;
+    let found = query_files.len();
+    query_files.retain(|path| {
+        let ignored = ignore_patterns.is_ignored(path);
+        if ignored {
+            tracing::debug!(file = %path.display(), "Ignoring file");
+        }
+        !ignored
+    });
+    // Templating of each file: as configured, else Jinja for files in a dbt
+    // project (a `dbt_project.yml` in an ancestor directory). With Jinja, the
+    // dbt project's macros/, dbt_packages/ and target/ are skipped unless a
+    // file there is named on its own.
+    let named_files: HashSet<&str> = config
+        .files
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !is_glob(p))
+        .collect();
+    let mut file_templating = Vec::with_capacity(query_files.len());
+    query_files.retain(|path| {
+        let detect_path = if is_stdin(path) {
+            stdin_filename
+        } else {
+            Some(path.as_path())
+        };
+        let file_templating_of = if config.templating.is_none()
+            && detect_path.and_then(|p| dbt_projects.root_of(p)).is_some()
+        {
+            Templating::Jinja
+        } else {
+            templating
+        };
+        if file_templating_of == Templating::Jinja
+            && !is_stdin(path)
+            && !named_files.contains(path.to_string_lossy().as_ref())
+            && dbt_projects.is_skipped(path)
+        {
+            tracing::debug!(file = %path.display(), "Skipping dbt macro, package or build file");
+            return false;
+        }
+        file_templating.push(file_templating_of);
+        true
+    });
+    Ok(QueryFiles {
+        ignored: found - query_files.len(),
+        files: query_files,
+        templating: file_templating,
+        ignore_patterns,
+    })
 }
 
 fn run(args: Args) -> Result<bool> {
@@ -520,19 +645,7 @@ fn run(args: Args) -> Result<bool> {
             let templating = config.templating()?;
             tracing::info!(%templating, "Query file templating");
 
-            // Determine output format
-            let output_format = match config.format.as_deref() {
-                None | Some("human") => OutputFormat::Human,
-                Some("json") => OutputFormat::Json,
-                Some("sarif") => OutputFormat::Sarif,
-                Some("github") => OutputFormat::Github,
-                Some(other) => {
-                    return Err(miette::miette!(
-                        "Invalid format '{}'. Supported formats: human, json, sarif, github.",
-                        other
-                    ))
-                }
-            };
+            let output_format = output_format(&config)?;
 
             // dbt catalogs (`dbt_catalog`, or the dbt project's target/catalog.json):
             // schema files are optional with one
@@ -540,7 +653,7 @@ fn run(args: Args) -> Result<bool> {
             let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
             let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
             let formatter = OutputFormatter::new(output_format);
-            let mut catalog = match build_catalog(&schema_files, dialect)? {
+            let mut catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     formatter.print(&[failed]);
@@ -550,38 +663,18 @@ fn run(args: Args) -> Result<bool> {
             load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
             load_dbt_vars(&mut catalog, &config, templating, &mut dbt_projects);
 
-            // Collect query files from config or CLI (glob patterns are expanded)
-            let mut query_files = Vec::new();
-            let mut unmatched = Vec::new();
-            for pattern in &config.files {
-                if is_glob(pattern) {
-                    let mut matches = expand_glob(pattern)?;
-                    if matches.is_empty() {
-                        unmatched.push(format!("'{pattern}'"));
-                    }
-                    // Installed packages and build output that the pattern matches
-                    // aren't checked for SQL in TypeScript / JavaScript
-                    let base = glob_base(pattern);
-                    matches.retain(|path| {
-                        !(is_embedded_sql_file(path)
-                            && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
-                    });
-                    query_files.extend(matches);
-                } else {
-                    query_files.push(PathBuf::from(pattern));
-                }
-            }
-
-            if query_files.is_empty() {
-                if !unmatched.is_empty() {
-                    miette::bail!("No files match {}", unmatched.join(", "));
-                }
-                miette::bail!("No query files specified. Use positional arguments or configure in sqlsift.toml");
-            }
-            // A typo in one of several patterns shouldn't go unnoticed
-            for pattern in &unmatched {
-                eprintln!("Warning: no files match {pattern}");
-            }
+            let QueryFiles {
+                files: query_files,
+                templating: file_templating,
+                ignored: ignored_count,
+                ignore_patterns,
+            } = collect_query_files(
+                &config,
+                templating,
+                &mut dbt_projects,
+                stdin_filename.as_deref(),
+                "Use positional arguments or configure in sqlsift.toml",
+            )?;
 
             // The query read from stdin (`-`)
             let stdin_count = query_files.iter().filter(|p| is_stdin(p)).count();
@@ -634,54 +727,6 @@ fn run(args: Args) -> Result<bool> {
                 baseline::file_key(Path::new(&name), &baseline_dir)
             };
 
-            // Skip ignored files (`ignore` in sqlsift.toml and `--ignore`); patterns
-            // from the config file were already made relative to the current directory
-            let ignore_patterns = IgnorePatterns::new(Path::new(""), &config.ignore)
-                .map_err(|e| miette::miette!(e))?;
-            let found = query_files.len();
-            query_files.retain(|path| {
-                let ignored = ignore_patterns.is_ignored(path);
-                if ignored {
-                    tracing::debug!(file = %path.display(), "Ignoring file");
-                }
-                !ignored
-            });
-            // Templating of each file: as configured, else Jinja for files in a dbt
-            // project (a `dbt_project.yml` in an ancestor directory). With Jinja, the
-            // dbt project's macros/, dbt_packages/ and target/ are skipped unless a
-            // file there is named on its own.
-            let named_files: HashSet<&str> = config
-                .files
-                .iter()
-                .map(String::as_str)
-                .filter(|p| !is_glob(p))
-                .collect();
-            let mut file_templating = Vec::with_capacity(query_files.len());
-            query_files.retain(|path| {
-                let detect_path = if is_stdin(path) {
-                    stdin_filename.as_deref()
-                } else {
-                    Some(path.as_path())
-                };
-                let file_templating_of = if config.templating.is_none()
-                    && detect_path.and_then(|p| dbt_projects.root_of(p)).is_some()
-                {
-                    Templating::Jinja
-                } else {
-                    templating
-                };
-                if file_templating_of == Templating::Jinja
-                    && !is_stdin(path)
-                    && !named_files.contains(path.to_string_lossy().as_ref())
-                    && dbt_projects.is_skipped(path)
-                {
-                    tracing::debug!(file = %path.display(), "Skipping dbt macro, package or build file");
-                    return false;
-                }
-                file_templating.push(file_templating_of);
-                true
-            });
-            let ignored_count = found - query_files.len();
             if query_files.is_empty() {
                 if !quiet {
                     eprintln!("No files to check ({ignored_count} ignored)");
@@ -915,6 +960,48 @@ fn run(args: Args) -> Result<bool> {
             Ok(total_errors > 0 || too_many_warnings.is_some())
         }
 
+        Command::Impact {
+            migrations,
+            queries,
+            schema,
+            schema_dir,
+            ignore,
+            config: config_path,
+            allow,
+            warn,
+            deny,
+            dialect,
+            templating,
+            dbt_catalog,
+            format,
+        } => {
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &schema,
+                schema_dir.as_deref(),
+                &queries,
+                &ignore,
+                format,
+                dialect.as_deref(),
+                templating.as_deref(),
+                dbt_catalog.as_deref(),
+                None,
+                None,
+            );
+            let rules = config.rule_config(&RuleFlags {
+                allow: &allow,
+                warn: &warn,
+                deny: &deny,
+            })?;
+            impact::run(
+                &config,
+                &impact::ImpactOptions {
+                    migrations: &migrations,
+                    rules: &rules,
+                    quiet,
+                },
+            )
+        }
+
         Command::Init {
             dir,
             force,
@@ -959,7 +1046,7 @@ fn run(args: Args) -> Result<bool> {
             let dialect = config_dialect(&config)?;
             let schema_files = schema_files(&config, false)?;
 
-            let catalog = match build_catalog(&schema_files, dialect)? {
+            let catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     let output_format = match format {

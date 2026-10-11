@@ -18,11 +18,13 @@ sqlsift/
 │   │   ├── dialect/       # SQL dialect abstraction
 │   │   ├── rules.rs       # Rule registry, categories and rule levels
 │   │   ├── baseline.rs    # Baseline file (known diagnostics), shared by CLI and LSP
+│   │   ├── impact.rs      # `sqlsift impact`: catalog diff (changed relations) and diagnostic diff
 │   │   └── error.rs       # Diagnostic types
 │   │
 │   ├── sqlsift-cli/      # CLI binary
 │   │   ├── args.rs        # CLI argument definitions (clap)
 │   │   ├── config.rs      # Configuration file (sqlsift.toml) support
+│   │   ├── impact.rs      # `sqlsift impact` (schema before/after the migrations, output)
 │   │   ├── init/          # `sqlsift init`: project layout detection (detect.rs, sqlc_config.rs), sqlsift.toml rendering
 │   │   ├── output/        # Output formatters (human, JSON, SARIF, GitHub Actions)
 │   │   └── main.rs        # Entry point
