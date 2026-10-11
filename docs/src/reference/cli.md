@@ -106,6 +106,8 @@ Options:
       --base <REV>          Also the schema files added or changed since the current branch
                             left this git revision (e.g. origin/main), uncommitted and
                             untracked files included
+      --references          Also list the lines that use a changed table or view without a
+                            diagnostic changing (where to look when reviewing the change)
       --queries <PATTERN>   Query files to check (repeatable, glob patterns supported)
                             [default: `files` in sqlsift.toml]
   -s, --schema <FILE>       Schema definition file (repeatable)
@@ -142,6 +144,8 @@ Checked 3 of 41 query file(s); the others name no changed table or view
 ```
 
 With `--format json` the output is `{"migrations": [...], "changes": [{"name", "kind", "relation"}], "other_changes": bool, "introduced": [...], "resolved": [...]}`, where `introduced` and `resolved` list files and diagnostics as [`check --format json`](output-formats.md) does. `sarif` and `github` report what the change introduces.
+
+With `--references`, the JSON output also has `references`: `[{"file", "lines": [{"line", "uses": ["public.users", "public.users.email", ...]}]}]`.
 
 Exit codes: `0` the change introduces no errors, `1` it does, `2` usage or configuration error.
 

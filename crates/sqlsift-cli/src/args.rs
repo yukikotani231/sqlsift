@@ -126,6 +126,11 @@ pub enum Command {
         #[arg(long, value_name = "REV")]
         base: Option<String>,
 
+        /// Also list the queries that use a changed table or view without a
+        /// diagnostic changing (where to look when reviewing the change)
+        #[arg(long)]
+        references: bool,
+
         /// Query files to check (supports glob patterns) [default: `files` in sqlsift.toml]
         #[arg(long = "queries", value_name = "PATTERN")]
         queries: Vec<PathBuf>,

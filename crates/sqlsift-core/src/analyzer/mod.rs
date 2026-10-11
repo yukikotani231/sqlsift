@@ -34,6 +34,32 @@ use crate::templating::{self, Template, Templating};
 use comment_directives::InlineDirectives;
 use resolver::Resolver;
 
+/// A use of a catalog table or view, or of its columns, by a query: what
+/// [`Analyzer::with_references`] records. Only names that resolve to the
+/// catalog are recorded (not CTEs, subqueries or missing tables); a column is
+/// recorded where it is resolved, so a CTE or subquery over a table records the
+/// table's columns it reads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Reference {
+    /// The table or view, by its schema-qualified name
+    pub relation: QualifiedName,
+    pub kind: ReferenceKind,
+    /// Where it is used: the table name, the column reference or the `*`
+    pub span: Span,
+}
+
+/// What a [`Reference`] uses
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "column", rename_all = "snake_case")]
+pub enum ReferenceKind {
+    /// The relation itself (FROM, JOIN, the target of INSERT / UPDATE / DELETE)
+    Relation,
+    /// One of its columns
+    Column(String),
+    /// Every column (`SELECT *`, `t.*`)
+    AllColumns,
+}
+
 /// SQL Analyzer - validates SQL against a schema catalog
 pub struct Analyzer<'a> {
     catalog: &'a Catalog,
@@ -41,6 +67,8 @@ pub struct Analyzer<'a> {
     dialect: SqlDialect,
     rules: RuleConfig,
     templating: Templating,
+    /// References recorded by the last analysis, if they are recorded
+    references: Option<Vec<Reference>>,
 }
 
 impl<'a> Analyzer<'a> {
@@ -62,6 +90,7 @@ impl<'a> Analyzer<'a> {
             dialect: SqlDialect::default(),
             rules: RuleConfig::default(),
             templating: Templating::None,
+            references: None,
         }
     }
 
@@ -84,6 +113,7 @@ impl<'a> Analyzer<'a> {
             dialect,
             rules: RuleConfig::default(),
             templating: Templating::None,
+            references: None,
         }
     }
 
@@ -128,6 +158,45 @@ impl<'a> Analyzer<'a> {
         self
     }
 
+    /// Record the [`Reference`]s of the queries to catalog tables, views and
+    /// columns, returned by [`Analyzer::references`] after an analysis
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::{Analyzer, ReferenceKind};
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let mut analyzer = Analyzer::new(&catalog).with_references();
+    /// analyzer.analyze("SELECT u.name FROM users u");
+    /// let kinds: Vec<&ReferenceKind> = analyzer.references().iter().map(|r| &r.kind).collect();
+    /// assert_eq!(kinds, [&ReferenceKind::Column("name".into()), &ReferenceKind::Relation]);
+    /// ```
+    #[must_use]
+    pub fn with_references(mut self) -> Self {
+        self.references = Some(Vec::new());
+        self
+    }
+
+    /// The references recorded by the last analysis, in source order (empty
+    /// unless [`Analyzer::with_references`] turned recording on)
+    pub fn references(&self) -> &[Reference] {
+        self.references.as_deref().unwrap_or_default()
+    }
+
+    fn shift_references(&mut self, bom: usize) {
+        if bom == 0 {
+            return;
+        }
+        for reference in self.references.iter_mut().flatten() {
+            if reference.span.line > 0 {
+                reference.span.offset += bom;
+            }
+        }
+    }
+
     /// Analyze a SQL query and return diagnostics
     ///
     /// Validates SQL against the schema catalog and returns a list of diagnostics.
@@ -151,6 +220,7 @@ impl<'a> Analyzer<'a> {
         let (sql, bom) = strip_bom(sql);
         let mut diagnostics = self.analyze_text(sql, sql, &[], &[]);
         shift_offsets(&mut diagnostics, bom);
+        self.shift_references(bom);
         diagnostics
     }
 
@@ -184,6 +254,7 @@ impl<'a> Analyzer<'a> {
             &extracted.fragments,
         );
         shift_offsets(&mut diagnostics, bom);
+        self.shift_references(bom);
         diagnostics
     }
 
@@ -219,6 +290,7 @@ impl<'a> Analyzer<'a> {
             &extracted.fragments,
         );
         shift_offsets(&mut diagnostics, bom);
+        self.shift_references(bom);
         diagnostics
     }
 
@@ -235,6 +307,9 @@ impl<'a> Analyzer<'a> {
         fragments: &[(usize, usize, bool)],
     ) -> Vec<Diagnostic> {
         self.diagnostics.clear();
+        if let Some(references) = &mut self.references {
+            references.clear();
+        }
 
         // Template tags, then psql meta-commands and variables (the rewrites keep
         // every line and character column)
@@ -357,7 +432,14 @@ impl<'a> Analyzer<'a> {
             resolver.templated_statement = templated || !statement_fragments.is_empty();
             resolver.hidden_relations = statement_fragments.contains(&true);
             resolver.restrictions = restrictions;
+            resolver.references = self.references.is_some().then(Vec::new);
             resolver.statement(stmt);
+            if let (Some(all), Some(found)) = (&mut self.references, resolver.references.take()) {
+                all.extend(found.into_iter().map(|mut reference| {
+                    origin.shift(&mut reference.span);
+                    reference
+                }));
+            }
             if let Statement::Declare { stmts } = stmt {
                 variables.extend(
                     stmts
@@ -384,6 +466,9 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(rewritten) = &rewritten {
+            for reference in self.references.iter_mut().flatten() {
+                rewritten.map_span(&mut reference.span);
+            }
             for diagnostic in &mut self.diagnostics {
                 let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
                 for span in diagnostic.span.iter_mut().chain(labels) {
@@ -411,6 +496,13 @@ impl<'a> Analyzer<'a> {
             for span in diagnostic.span.iter_mut().chain(labels) {
                 offsets.fill_offset(span);
             }
+        }
+        for reference in self.references.iter_mut().flatten() {
+            offsets.fill_offset(&mut reference.span);
+        }
+        if let Some(references) = &mut self.references {
+            references.sort_by_key(|r| (r.span.line, r.span.column));
+            references.dedup();
         }
 
         // Filter out diagnostics suppressed by inline or file directives, then apply rule levels.

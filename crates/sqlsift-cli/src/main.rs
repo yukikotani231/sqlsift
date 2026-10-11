@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::Result;
+use sqlsift_core::analyzer::Reference;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
 use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
@@ -64,8 +65,9 @@ fn init_tracing(verbose: u8, quiet: bool) {
         .init();
 }
 
-/// A query file's contents and its diagnostics
-type AnalyzedFile = Result<(String, Vec<Diagnostic>)>;
+/// A query file's contents, its diagnostics and the references of its queries
+/// (empty unless [`QueryOptions::references`])
+type AnalyzedFile = Result<(String, Vec<Diagnostic>, Vec<Reference>)>;
 
 /// The file argument that reads a query from stdin
 const STDIN_ARG: &str = "-";
@@ -89,6 +91,8 @@ struct QueryOptions<'a> {
     embedded_sql_tags: &'a [String],
     /// `--stdin-filename`, whose extension decides how stdin is analyzed
     stdin_filename: Option<&'a Path>,
+    /// Record the references of the queries to catalog tables and columns
+    references: bool,
 }
 
 /// Read and analyze each query file, in parallel across the available cores.
@@ -112,6 +116,9 @@ fn analyze_files(
         let mut analyzer = Analyzer::with_dialect(options.catalog, options.dialect)
             .with_rules(options.rules.clone())
             .with_templating(options.templating[i]);
+        if options.references {
+            analyzer = analyzer.with_references();
+        }
         let diagnostics = if is_component_file(name) {
             analyzer.analyze_embedded_component(&content, options.embedded_sql_tags)
         } else if is_embedded_sql_file(name) {
@@ -119,7 +126,8 @@ fn analyze_files(
         } else {
             analyzer.analyze(&content)
         };
-        Ok((content, diagnostics))
+        let references = analyzer.references().to_vec();
+        Ok((content, diagnostics, references))
     };
 
     let workers = std::thread::available_parallelism()
@@ -747,6 +755,7 @@ fn run(args: Args) -> Result<bool> {
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
                 stdin_filename: stdin_filename.as_deref(),
+                references: false,
             };
             let analyzed = analyze_files(&query_files, stdin.as_deref(), &options);
 
@@ -770,7 +779,7 @@ fn run(args: Args) -> Result<bool> {
                 let mut baseline = Baseline::default();
                 let mut checked_keys = HashSet::new();
                 for (query_file, analyzed) in query_files.iter().zip(analyzed) {
-                    let (content, diagnostics) = analyzed?;
+                    let (content, diagnostics, _) = analyzed?;
                     let key = file_key(query_file);
                     baseline.add_file(&key, &baseline_sql(query_file, &content), &diagnostics);
                     checked_keys.insert(key);
@@ -852,7 +861,7 @@ fn run(args: Args) -> Result<bool> {
                     break;
                 }
 
-                let (content, diagnostics) = analyzed?;
+                let (content, diagnostics, _) = analyzed?;
                 files_checked += 1;
 
                 let diagnostics = match &baseline_filter {
@@ -965,6 +974,7 @@ fn run(args: Args) -> Result<bool> {
         Command::Impact {
             migrations,
             base,
+            references,
             queries,
             schema,
             schema_dir,
@@ -1002,6 +1012,7 @@ fn run(args: Args) -> Result<bool> {
                     base: base.as_deref(),
                     rules: &rules,
                     quiet,
+                    references,
                 },
             )
         }

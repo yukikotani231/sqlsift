@@ -255,3 +255,50 @@ fn base_picks_changed_schema_files() {
         RENAME.0
     );
 }
+
+#[test]
+fn references_list_unchanged_uses_of_changed_tables() {
+    let project = Project::new(&[
+        INIT,
+        (
+            "migrations/002_add.sql",
+            "ALTER TABLE users ADD COLUMN name TEXT;",
+        ),
+        (
+            "queries/users.sql",
+            "SELECT id\nFROM users;\nSELECT u.email FROM users u WHERE u.missing = 1;\n",
+        ),
+        QUERIES[1],
+    ]);
+    let args = [
+        "--schema-dir",
+        "migrations",
+        "--queries",
+        "queries/*.sql",
+        "--references",
+        "migrations/002_add.sql",
+    ];
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(0));
+    assert_eq!(file_names(&json["references"]), ["queries/users.sql"]);
+    let lines = &json["references"][0]["lines"];
+    assert_eq!(lines[0]["line"], 1);
+    assert_eq!(lines[0]["uses"][0], "public.users.id");
+    assert_eq!(lines[1]["line"], 2);
+    assert_eq!(lines[1]["uses"][0], "public.users");
+    assert_eq!(lines[2]["uses"].as_array().unwrap().len(), 2);
+
+    let human = project.run(&args);
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("public.users.email"), "{stderr}");
+
+    // Without the flag there is no list
+    let (json, _) = project.json(
+        &args[..4]
+            .iter()
+            .chain(&args[5..])
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    assert!(json.get("references").is_none());
+}

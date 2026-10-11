@@ -1,9 +1,11 @@
 //! `sqlsift impact`: the queries a schema change breaks or fixes
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use miette::Result;
+use sqlsift_core::analyzer::{Reference, ReferenceKind};
 use sqlsift_core::impact::{diff_diagnostics, SchemaChanges};
 use sqlsift_core::{Catalog, Severity};
 
@@ -22,6 +24,9 @@ pub struct ImpactOptions<'a> {
     pub base: Option<&'a str>,
     pub rules: &'a sqlsift_core::RuleConfig,
     pub quiet: bool,
+    /// `--references`: also list the queries that use a changed table or view
+    /// without a diagnostic changing
+    pub references: bool,
 }
 
 /// The schema files before and after the migrations
@@ -192,19 +197,39 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
             rules: options.rules,
             embedded_sql_tags: &embedded_sql_tags,
             stdin_filename: None,
+            references: options.references,
         };
         analyze_files(&affected, None, &options)
     };
     let analyzed_before = analyze(before);
     let analyzed_after = analyze(after);
 
+    let changed_names: HashSet<String> = changes.relations.iter().map(|r| r.name.clone()).collect();
     let mut introduced = Vec::new();
     let mut resolved = Vec::new();
+    let mut referencing = Vec::new();
     for ((path, old), new) in affected.iter().zip(analyzed_before).zip(analyzed_after) {
-        let (source, old) = old?;
-        let (_, new) = new?;
+        let (source, old, old_references) = old?;
+        let (_, new, new_references) = new?;
         let diff = diff_diagnostics(old, new);
         let file = path.display().to_string();
+        if options.references {
+            // Lines whose diagnostics change are reported already
+            let reported: HashSet<usize> = diff
+                .introduced
+                .iter()
+                .chain(&diff.resolved)
+                .filter_map(|d| d.span.map(|s| s.line))
+                .collect();
+            let lines = referencing_lines(
+                old_references.iter().chain(&new_references),
+                &changed_names,
+                &reported,
+            );
+            if !lines.is_empty() {
+                referencing.push((file.clone(), lines));
+            }
+        }
         if !diff.introduced.is_empty() {
             introduced.push(FileDiagnostics {
                 file: file.clone(),
@@ -230,14 +255,66 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
             formatter.print(&introduced);
             if !options.quiet {
                 print_resolved(&resolved);
+                if options.references {
+                    print_references(&referencing);
+                }
                 print_summary(&introduced, &resolved, affected.len(), files.len());
             }
         }
-        OutputFormat::Json => print_json(&changes, &migrations, &introduced, &resolved),
+        OutputFormat::Json => print_json(
+            &changes,
+            &migrations,
+            &introduced,
+            &resolved,
+            options.references.then_some(referencing.as_slice()),
+        ),
         // Annotations and code scanning results show what the change breaks
         OutputFormat::Sarif | OutputFormat::Github => formatter.print(&introduced),
     }
     Ok(introduced_errors > 0)
+}
+
+/// The uses of changed tables and views on one line of a query file:
+/// `schema.table` or `schema.table.column` names, sorted
+type ReferencingLine = (usize, Vec<String>);
+
+/// The lines of a query file that use a changed table or view, other than the
+/// `reported` lines
+fn referencing_lines<'r>(
+    references: impl Iterator<Item = &'r Reference>,
+    changed: &HashSet<String>,
+    reported: &HashSet<usize>,
+) -> Vec<ReferencingLine> {
+    let mut lines: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+    for reference in references {
+        let relation = reference.relation.to_string();
+        if !changed.contains(&relation) || reported.contains(&reference.span.line) {
+            continue;
+        }
+        let name = match &reference.kind {
+            ReferenceKind::Relation => relation,
+            ReferenceKind::Column(column) => format!("{relation}.{column}"),
+            ReferenceKind::AllColumns => format!("{relation}.*"),
+        };
+        lines.entry(reference.span.line).or_default().insert(name);
+    }
+    lines
+        .into_iter()
+        .map(|(line, names)| (line, names.into_iter().collect()))
+        .collect()
+}
+
+fn print_references(referencing: &[(String, Vec<ReferencingLine>)]) {
+    if referencing.is_empty() {
+        return;
+    }
+    eprintln!("Also using the changed tables and views (no diagnostic changes):");
+    for (file, lines) in referencing {
+        for (line, names) in lines {
+            eprintln!("  {file}:{line}  {}", names.join(", "));
+        }
+    }
+    eprintln!();
 }
 
 fn count(files: &[FileDiagnostics], severity: Severity) -> usize {
@@ -319,17 +396,31 @@ fn print_json(
     migrations: &[PathBuf],
     introduced: &[FileDiagnostics],
     resolved: &[FileDiagnostics],
+    referencing: Option<&[(String, Vec<ReferencingLine>)]>,
 ) {
     let refs = |files: &[FileDiagnostics]| -> Vec<serde_json::Value> {
         output::json_files(&files.iter().collect::<Vec<_>>())
     };
-    let output = serde_json::json!({
+    let mut output = serde_json::json!({
         "migrations": migrations.iter().map(|m| m.display().to_string()).collect::<Vec<_>>(),
         "changes": changes.relations,
         "other_changes": changes.global,
         "introduced": refs(introduced),
         "resolved": refs(resolved),
     });
+    if let (Some(referencing), Some(object)) = (referencing, output.as_object_mut()) {
+        let files: Vec<serde_json::Value> = referencing
+            .iter()
+            .map(|(file, lines)| {
+                let lines: Vec<serde_json::Value> = lines
+                    .iter()
+                    .map(|(line, names)| serde_json::json!({ "line": line, "uses": names }))
+                    .collect();
+                serde_json::json!({ "file": file, "lines": lines })
+            })
+            .collect();
+        object.insert("references".into(), files.into());
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&output).unwrap_or_default()

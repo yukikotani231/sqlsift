@@ -115,6 +115,9 @@ pub(super) struct Relation {
     /// Schema-qualified name of a catalog table or view referenced without an
     /// alias (`schema.table.column` refers to it); `None` for anything else
     pub(super) qualified: Option<QualifiedName>,
+    /// The catalog table or view the relation is (aliased or not), for
+    /// [`Reference`](super::Reference)s; `None` for anything else
+    pub(super) source: Option<QualifiedName>,
 }
 
 /// Whether a relation has a column
@@ -142,6 +145,7 @@ impl Relation {
             merged: HashSet::new(),
             former_columns: Vec::new(),
             qualified: None,
+            source: None,
         }
     }
 
@@ -159,6 +163,7 @@ impl Relation {
         let mut relation = Self::new(RelationKind::Table, name.to_string(), Some(columns));
         relation.former_columns.clone_from(&table.former_columns);
         relation.qualified = catalog.resolve_relation(name);
+        relation.source.clone_from(&relation.qualified);
         Some(relation)
     }
 
@@ -199,6 +204,7 @@ impl Relation {
         });
         let mut relation = Self::new(RelationKind::View, name.to_string(), columns);
         relation.qualified = catalog.resolve_relation(name);
+        relation.source.clone_from(&relation.qualified);
         Some(relation)
     }
 
