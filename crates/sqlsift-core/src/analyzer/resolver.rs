@@ -28,6 +28,7 @@ use crate::schema::{
 use crate::suggest::{find_most_similar, find_similar_name};
 use crate::types::SqlType;
 
+use super::parameters::ParameterTypes;
 use super::scope::{
     lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
     Relation, RelationKind, Scope, UNNAMED_COLUMN,
@@ -71,6 +72,9 @@ pub(super) struct Resolver<'a> {
     pub(super) restrictions: bool,
     /// Uses of catalog tables, views and their columns, when they are recorded
     pub(super) references: Option<Vec<Reference>>,
+    /// Types of the statement's placeholders, only collected when describing (it
+    /// is `Some` then, and output columns get their NULL-ability too)
+    pub(super) parameter_types: Option<ParameterTypes>,
 }
 
 impl<'a> Resolver<'a> {
@@ -91,6 +95,7 @@ impl<'a> Resolver<'a> {
             in_subquery: None,
             restrictions: false,
             references: None,
+            parameter_types: None,
         }
     }
 
@@ -410,7 +415,7 @@ impl<'a> Resolver<'a> {
         }
 
         // ON CONFLICT / ON DUPLICATE KEY UPDATE and RETURNING see the target table
-        let target = Relation::table(self.catalog, &table_name)?;
+        let target = Relation::table(self.catalog, self.dialect, &table_name)?;
         self.reference(target.source.as_ref(), ReferenceKind::Relation, table_span);
         let key = insert
             .table_alias
@@ -805,9 +810,11 @@ impl<'a> Resolver<'a> {
     /// LIMIT, OFFSET and ORDER BY of a query whose SELECT list is `projection`
     fn query_tail(&mut self, query: &Query, projection: &[SelectItem]) {
         if let Some(limit) = query_limit(query) {
+            self.note_parameter(limit, &ExpressionType::Known(SqlType::BigInt));
             self.expr(limit);
         }
         if let Some(offset) = query_offset(query) {
+            self.note_parameter(offset, &ExpressionType::Known(SqlType::BigInt));
             self.expr(offset);
         }
         if let Some(order_by) = &query.order_by {
@@ -863,6 +870,7 @@ impl<'a> Resolver<'a> {
         // comes from the right
         if left.len() == right.len() {
             for (l, r) in left.iter_mut().zip(right) {
+                l.nullable = super::nullability::either(l.nullable, r.nullable);
                 if !matches!(l.ty, ExpressionType::Known(_))
                     && matches!(r.ty, ExpressionType::Known(_))
                 {
@@ -886,7 +894,15 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .enumerate()
                 .map(|(i, expr)| {
-                    Column::new(format!("column{}", i + 1), self.infer_expr_type(expr))
+                    let mut column =
+                        Column::new(format!("column{}", i + 1), self.infer_expr_type(expr));
+                    column.nullable = super::nullability::strict(
+                        values
+                            .rows
+                            .iter()
+                            .map(|row| row.get(i).and_then(|e| self.output_nullable(e))),
+                    );
+                    column
                 })
                 .collect(),
         )
@@ -1011,9 +1027,16 @@ impl<'a> Resolver<'a> {
             aliases = std::mem::take(&mut self.scope.current().select_aliases);
         }
 
-        let columns = self.projection_columns(&select.projection);
-        if let Some(columns) = &columns {
+        let mut columns = self.projection_columns(&select.projection);
+        if let Some(columns) = &mut columns {
             self.check_group_by_positions(select, columns.len());
+            // ROLLUP / CUBE / GROUPING SETS rows have NULL in the columns they
+            // don't group by
+            if has_grouping_sets(&select.group_by) {
+                for column in columns.iter_mut() {
+                    column.nullable = Some(true);
+                }
+            }
         }
 
         if let Some(query) = query {
@@ -1051,7 +1074,9 @@ impl<'a> Resolver<'a> {
                     } else {
                         self.catalog.ident_name(alias)
                     };
-                    columns.push(Column::new(name, self.infer_expr_type(expr)));
+                    let mut column = Column::new(name, self.infer_expr_type(expr));
+                    column.nullable = self.output_nullable(expr);
+                    columns.push(column);
                 }
                 // BigQuery `f(x).*`: the fields of a STRUCT, which aren't modeled
                 SelectItem::UnnamedExpr(Expr::CompoundFieldAccess { access_chain, .. })
@@ -1064,6 +1089,7 @@ impl<'a> Resolver<'a> {
                     let name = implicit_column_name(self.catalog, expr)
                         .unwrap_or_else(|| UNNAMED_COLUMN.into());
                     let mut column = Column::new(name, self.infer_expr_type(expr));
+                    column.nullable = self.output_nullable(expr);
                     // Only a column reference is named the same in every dialect
                     column.guessed_name =
                         !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_));
@@ -1191,12 +1217,39 @@ impl<'a> Resolver<'a> {
 
     /// Resolve a FROM item with its joins, registering its relations in the current frame
     fn table_with_joins(&mut self, table: &TableWithJoins) {
+        let start = self.scope.current().relations.len();
         self.table_factor(&table.relation);
         self.forget_duplicate_relations();
         for join in &table.joins {
+            let left = self.scope.current().relations.len();
             self.table_factor(&join.relation);
             self.forget_duplicate_relations();
             self.join_constraint(&join.join_operator, &join.relation);
+            // The optional side of an outer join is NULL where nothing matches
+            let end = self.scope.current().relations.len();
+            match &join.join_operator {
+                JoinOperator::Left(_) | JoinOperator::LeftOuter(_) | JoinOperator::OuterApply => {
+                    self.null_extend(left..end);
+                }
+                JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
+                    self.null_extend(start..left);
+                }
+                JoinOperator::FullOuter(_) => self.null_extend(start..end),
+                _ => {}
+            }
+        }
+    }
+
+    /// Make the columns of the current block's relations at `range` (in FROM
+    /// order) nullable: they are on the optional side of an outer join
+    fn null_extend(&mut self, range: std::ops::Range<usize>) {
+        let relations = &mut self.scope.current().relations;
+        for i in range {
+            if let Some((_, relation)) = relations.get_index_mut(i) {
+                for column in relation.columns.iter_mut().flatten() {
+                    column.nullable = Some(true);
+                }
+            }
         }
     }
 
@@ -1353,7 +1406,8 @@ impl<'a> Resolver<'a> {
                     Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 } else if let Some(cte) = cte {
                     Relation::new(RelationKind::Cte, cte.name.clone(), cte.columns.clone())
-                } else if let Some(table) = Relation::table(self.catalog, &table_name) {
+                } else if let Some(table) = Relation::table(self.catalog, self.dialect, &table_name)
+                {
                     table
                 } else if let Some(view) = Relation::view(self.catalog, &table_name) {
                     view
@@ -1731,11 +1785,22 @@ impl<'a> Resolver<'a> {
             | Expr::IsNotFalse(expr)
             | Expr::IsUnknown(expr)
             | Expr::IsNotUnknown(expr)
-            | Expr::Cast { expr, .. }
             | Expr::Extract { expr, .. }
             | Expr::Collate { expr, .. }
             | Expr::Ceil { expr, .. }
             | Expr::Floor { expr, .. } => self.expr(expr),
+            Expr::Cast {
+                expr: inner,
+                data_type,
+                ..
+            } => {
+                if self.is_typed_parameter(inner) {
+                    let ty =
+                        ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect));
+                    self.note_parameter(inner, &ty);
+                }
+                self.expr(inner);
+            }
             Expr::Function(func) => {
                 match (&func.args, self.date_part_arg(func)) {
                     // Snowflake date part keyword (`DATEADD(day, 1, d)`): not a column
@@ -1782,6 +1847,12 @@ impl<'a> Resolver<'a> {
                 for e in list {
                     self.expr(e);
                 }
+                if self.parameter_types.is_some() {
+                    let ty = self.infer_expr_type(expr);
+                    for e in list {
+                        self.note_parameter(e, &ty);
+                    }
+                }
             }
             Expr::InSubquery {
                 expr,
@@ -1814,6 +1885,11 @@ impl<'a> Resolver<'a> {
                 self.expr(expr);
                 self.expr(low);
                 self.expr(high);
+                if self.parameter_types.is_some() {
+                    let ty = self.infer_expr_type(expr);
+                    self.note_parameter(low, &ty);
+                    self.note_parameter(high, &ty);
+                }
             }
             Expr::Case {
                 operand,
@@ -1871,11 +1947,13 @@ impl<'a> Resolver<'a> {
                 self.expr(expr);
                 self.expr(pattern);
                 self.check_like_operand(expr, "LIKE");
+                self.note_pattern_parameter(expr, pattern);
             }
             Expr::ILike { expr, pattern, .. } => {
                 self.expr(expr);
                 self.expr(pattern);
                 self.check_like_operand(expr, "ILIKE");
+                self.note_pattern_parameter(expr, pattern);
             }
             Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => {
                 self.expr(expr);
@@ -1885,6 +1963,12 @@ impl<'a> Resolver<'a> {
             Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);
+                if self.is_typed_parameter(right) {
+                    if let ExpressionType::Known(ty) = self.infer_expr_type(left) {
+                        let array = ExpressionType::Known(SqlType::Array(Box::new(ty)));
+                        self.note_parameter(right, &array);
+                    }
+                }
             }
             Expr::AtTimeZone {
                 timestamp,
@@ -2106,7 +2190,7 @@ impl<'a> Resolver<'a> {
             })
             .collect();
         let table_name = self.catalog.qualified_name(&ObjectName::from(parts));
-        Relation::table(self.catalog, &table_name)
+        Relation::table(self.catalog, self.dialect, &table_name)
             .or_else(|| Relation::view(self.catalog, &table_name))
     }
 
@@ -2836,6 +2920,17 @@ fn is_snowflake_date_part(name: &str) -> bool {
             | "timezone_minute"
             | "tzm"
     )
+}
+
+/// Whether a GROUP BY makes subtotal rows (ROLLUP, CUBE, GROUPING SETS)
+fn has_grouping_sets(group_by: &GroupByExpr) -> bool {
+    let GroupByExpr::Expressions(exprs, modifiers) = group_by else {
+        return false;
+    };
+    !modifiers.is_empty()
+        || exprs
+            .iter()
+            .any(|e| matches!(e, Expr::Rollup(_) | Expr::Cube(_) | Expr::GroupingSets(_)))
 }
 
 /// Name PostgreSQL gives an unaliased SELECT expression (`count(*)` -> `count`,

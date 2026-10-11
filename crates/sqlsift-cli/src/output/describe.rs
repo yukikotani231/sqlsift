@@ -1,8 +1,8 @@
 //! Output of `sqlsift describe`: the output columns and types of each query.
 //!
 //! The JSON shape is meant for tools (type generators, editors): a name or type
-//! sqlsift can't tell is `null`. `nullable` and `parameters` are reserved for
-//! NULL-ability and parameter types and are `null` until they are inferred.
+//! sqlsift can't tell is `null`; `nullable` is `false` only when the column
+//! certainly can't be NULL.
 
 use serde_json::{json, Value};
 use sqlsift_core::{QueryDescription, SqlDialect};
@@ -40,7 +40,7 @@ fn to_json(files: &[FileDescription], dialect: SqlDialect) -> Value {
                             json!({
                                 "name": c.name,
                                 "type": c.ty.as_ref().map(|t| t.display_name_in(dialect)),
-                                "nullable": Value::Null,
+                                "nullable": c.nullable,
                             })
                         })
                         .collect::<Vec<_>>()
@@ -52,7 +52,11 @@ fn to_json(files: &[FileDescription], dialect: SqlDialect) -> Value {
                     "name": q.name,
                     "kind": q.kind.as_str(),
                     "columns": columns,
-                    "parameters": Value::Null,
+                    "parameters": q.parameters.iter().map(|p| json!({
+                        "index": p.index,
+                        "name": p.name,
+                        "type": p.ty.as_ref().map(|t| t.display_name_in(dialect)),
+                    })).collect::<Vec<_>>(),
                 })
             })
         })
@@ -71,6 +75,22 @@ fn to_human(files: &[FileDescription], dialect: SqlDialect) -> String {
                 let _ = write!(out, " {name}");
             }
             let _ = writeln!(out, " ({})", q.kind.as_str());
+            if !q.parameters.is_empty() {
+                let parameters: Vec<String> = q
+                    .parameters
+                    .iter()
+                    .map(|p| {
+                        let ty =
+                            p.ty.as_ref()
+                                .map_or_else(|| "?".to_string(), |t| t.display_name_in(dialect));
+                        match &p.name {
+                            Some(name) => format!("{name} {ty}"),
+                            None => format!("${} {ty}", p.index),
+                        }
+                    })
+                    .collect();
+                let _ = writeln!(out, "  parameters: {}", parameters.join(", "));
+            }
             match &q.columns {
                 None => {
                     let _ = writeln!(out, "  (columns unknown)");
@@ -89,7 +109,12 @@ fn to_human(files: &[FileDescription], dialect: SqlDialect) -> String {
                             .ty
                             .as_ref()
                             .map_or_else(|| "?".to_string(), |t| t.display_name_in(dialect));
-                        let _ = writeln!(out, "  {name:<width$}  {ty}");
+                        let null = match column.nullable {
+                            Some(false) => " not null",
+                            Some(true) => " null",
+                            None => "",
+                        };
+                        let _ = writeln!(out, "  {name:<width$}  {ty}{null}");
                     }
                 }
             }
@@ -107,7 +132,7 @@ mod tests {
     fn describe(sql: &str) -> Vec<FileDescription> {
         let mut builder = SchemaBuilder::new();
         builder
-            .parse("CREATE TABLE users (id BIGINT, email TEXT);")
+            .parse("CREATE TABLE users (id BIGINT PRIMARY KEY, email TEXT);")
             .unwrap();
         let (catalog, _) = builder.build();
         let queries = Analyzer::new(&catalog).describe(sql).queries;
@@ -131,11 +156,11 @@ mod tests {
                 "name": "GetUser",
                 "kind": "select",
                 "columns": [
-                    { "name": "id", "type": "bigint", "nullable": null },
-                    { "name": "email", "type": "text", "nullable": null },
-                    { "name": null, "type": "integer", "nullable": null },
+                    { "name": "id", "type": "bigint", "nullable": false },
+                    { "name": "email", "type": "text", "nullable": true },
+                    { "name": null, "type": "integer", "nullable": false },
                 ],
-                "parameters": null,
+                "parameters": [{ "index": 1, "name": null, "type": "bigint" }],
             }])
         );
     }
@@ -152,7 +177,7 @@ mod tests {
         let files = describe("SELECT id, email AS e FROM users; DELETE FROM users;");
         assert_eq!(
             to_human(&files, SqlDialect::PostgreSQL),
-            "q.sql:1 (select)\n  id  bigint\n  e   text\nq.sql:1 (delete)\n  (no columns)\n"
+            "q.sql:1 (select)\n  id  bigint not null\n  e   text null\nq.sql:1 (delete)\n  (no columns)\n"
         );
     }
 }

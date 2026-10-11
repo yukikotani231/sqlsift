@@ -4,6 +4,8 @@ pub(crate) mod bigquery;
 mod comment_directives;
 mod describe;
 mod grouping;
+mod nullability;
+mod parameters;
 mod ranges;
 mod resolver;
 mod restriction;
@@ -33,7 +35,7 @@ use crate::sqlc::{self, QueryNames};
 use crate::templating::{self, Template, Templating};
 
 use comment_directives::InlineDirectives;
-pub use describe::{Description, OutputColumn, QueryDescription, QueryKind};
+pub use describe::{Description, OutputColumn, Parameter, QueryDescription, QueryKind};
 use resolver::Resolver;
 
 /// A use of a catalog table or view, or of its columns, by a query: what
@@ -425,6 +427,8 @@ impl<'a> Analyzer<'a> {
         let mut file_schema: Option<SchemaBuilder> = None;
         // Script variables declared so far (`DECLARE x INT64 DEFAULT 0`)
         let mut variables: Vec<String> = Vec::new();
+        // Placeholders of each described statement
+        let mut placeholders: Vec<Vec<(Span, Option<parameters::ParameterType>)>> = Vec::new();
 
         // Where each statement's text starts in the template source (to tell whether
         // it has template tags)
@@ -491,6 +495,10 @@ impl<'a> Analyzer<'a> {
             resolver.hidden_relations = statement_fragments.contains(&true);
             resolver.restrictions = restrictions;
             resolver.references = self.references.is_some().then(Vec::new);
+            let describing = self.descriptions.is_some() && QueryKind::of(stmt).is_some();
+            if describing {
+                resolver.parameter_types = Some(parameters::ParameterTypes::default());
+            }
             let output = resolver.statement(stmt);
             if let (Some(all), Some(found)) = (&mut self.references, resolver.references.take()) {
                 all.extend(found.into_iter().map(|mut reference| {
@@ -500,6 +508,19 @@ impl<'a> Analyzer<'a> {
             }
             if let Some(descriptions) = &mut self.descriptions {
                 if let Some(kind) = QueryKind::of(stmt) {
+                    // Placeholders, located relative to the input, with their types
+                    let types = resolver.parameter_types.take().unwrap_or_default();
+                    placeholders.push(
+                        describe::placeholder_locations(stmt)
+                            .into_iter()
+                            .map(|(line, column)| {
+                                let ty = types.get((line, column)).cloned();
+                                let mut span = Span::with_location(line, column, 1);
+                                origin.shift(&mut span);
+                                (span, ty)
+                            })
+                            .collect(),
+                    );
                     // Where the statement starts (its first token), relative to the input
                     let start = stmt.span().start;
                     let mut span = if start.line > 0 {
@@ -527,6 +548,7 @@ impl<'a> Analyzer<'a> {
                         name: None,
                         kind,
                         columns,
+                        parameters: Vec::new(),
                     });
                 }
             }
@@ -556,7 +578,21 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(descriptions) = &mut self.descriptions {
-            for description in descriptions.iter_mut() {
+            let original_text = LineIndex::new(original);
+            for (description, placeholders) in descriptions.iter_mut().zip(placeholders) {
+                // A placeholder's original text names its parameter (`:id` became `$1`)
+                let occurrences: Vec<(&str, Option<parameters::ParameterType>)> = placeholders
+                    .into_iter()
+                    .map(|(mut span, ty)| {
+                        if let Some(rewritten) = &rewritten {
+                            rewritten.map_span(&mut span);
+                        }
+                        let offset =
+                            original_text.byte_offset(span.line as u64, span.column as u64);
+                        (original.get(offset..).unwrap_or_default(), ty)
+                    })
+                    .collect();
+                description.parameters = describe::parameters(occurrences);
                 if let Some(rewritten) = &rewritten {
                     let mut span = Span::with_location(description.line, description.column, 1);
                     rewritten.map_span(&mut span);

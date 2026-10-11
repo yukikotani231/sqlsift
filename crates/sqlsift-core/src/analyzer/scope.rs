@@ -14,7 +14,7 @@ use sqlparser::ast::Ident;
 use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
-use crate::schema::{case_mismatched_column, Catalog, FormerColumn, QualifiedName};
+use crate::schema::{case_mismatched_column, Catalog, ColumnDef, FormerColumn, QualifiedName};
 use crate::types::SqlType;
 
 /// Type of an expression or column, as far as it can be inferred
@@ -63,7 +63,18 @@ pub(super) struct Column {
     /// (PostgreSQL `"authorId"`): only a quoted reference with the same case
     /// matches it (see [`ColumnDef::case_sensitive`](crate::schema::ColumnDef))
     pub(super) case_sensitive: bool,
+    /// Whether the column may be NULL (`None` if that can't be told)
+    pub(super) nullable: Option<bool>,
 }
+
+/// A column of unknown type and NULL-ability (a system column such as `ctid`)
+static UNKNOWN_COLUMN: Column = Column {
+    name: String::new(),
+    ty: ExpressionType::Unknown,
+    guessed_name: false,
+    case_sensitive: false,
+    nullable: None,
+};
 
 impl Column {
     pub(super) fn new(name: impl Into<String>, ty: ExpressionType) -> Self {
@@ -72,6 +83,7 @@ impl Column {
             ty,
             guessed_name: false,
             case_sensitive: false,
+            nullable: None,
         }
     }
 
@@ -123,7 +135,7 @@ pub(super) struct Relation {
 /// Whether a relation has a column
 pub(super) enum ColumnMatch<'r> {
     /// The relation has the column
-    Yes(&'r ExpressionType),
+    Yes(&'r Column),
     /// The relation's columns aren't fully known, so it may have the column
     Maybe,
     /// The relation has several columns with this name (`SELECT *` over a join in a
@@ -150,13 +162,25 @@ impl Relation {
     }
 
     /// A catalog table, with its declared column types
-    pub(super) fn table(catalog: &Catalog, name: &QualifiedName) -> Option<Self> {
+    pub(super) fn table(
+        catalog: &Catalog,
+        dialect: SqlDialect,
+        name: &QualifiedName,
+    ) -> Option<Self> {
         let table = catalog.get_table(name)?;
+        // SQLite lets a PRIMARY KEY column other than INTEGER PRIMARY KEY hold NULL
+        let nullable = |c: &ColumnDef| {
+            c.nullable
+                || dialect == SqlDialect::SQLite
+                    && c.is_primary_key
+                    && c.data_type != SqlType::Integer
+        };
         let columns = table
             .columns
             .values()
             .map(|c| Column {
                 case_sensitive: c.case_sensitive,
+                nullable: Some(nullable(c)),
                 ..Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type))
             })
             .collect();
@@ -243,10 +267,10 @@ impl Relation {
             {
                 return ColumnMatch::Duplicate;
             }
-            return ColumnMatch::Yes(&col.ty);
+            return ColumnMatch::Yes(col);
         }
         if self.kind == RelationKind::Table && is_system_column(dialect, name) {
-            return ColumnMatch::Yes(&ExpressionType::Unknown);
+            return ColumnMatch::Yes(&UNKNOWN_COLUMN);
         }
         if columns.iter().any(|c| c.name == UNNAMED_COLUMN) {
             return ColumnMatch::Maybe;
@@ -357,7 +381,7 @@ pub(super) fn split_column_ref(parts: &[Ident]) -> Option<(Option<&Ident>, &Iden
 /// Result of looking up an unqualified column
 pub(super) enum ColumnLookup<'s> {
     /// Found in exactly one relation (or merged by USING)
-    Found(&'s ExpressionType),
+    Found(&'s Column),
     /// Found in several relations of the same query block
     Ambiguous(Vec<String>),
     /// The relation (by its key in FROM) has several columns with this name
@@ -499,7 +523,7 @@ impl Scope {
     /// Look up an unqualified column: the innermost query block that has it wins
     pub(super) fn column(&self, name: &str, dialect: SqlDialect) -> ColumnLookup<'_> {
         for frame in self.visible() {
-            let mut found: Vec<(&str, &ExpressionType)> = Vec::new();
+            let mut found: Vec<(&str, &Column)> = Vec::new();
             let mut maybe = false;
             let mut duplicate = None;
             for (key, relation) in &frame.relations {
@@ -507,7 +531,7 @@ impl Scope {
                     ColumnMatch::Yes(ty) => found.push((key, ty)),
                     ColumnMatch::Duplicate => {
                         duplicate.get_or_insert(key.as_str());
-                        found.push((key, &ExpressionType::Unknown));
+                        found.push((key, &UNKNOWN_COLUMN));
                     }
                     ColumnMatch::Maybe => maybe = true,
                     ColumnMatch::No => {}

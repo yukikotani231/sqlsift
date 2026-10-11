@@ -147,6 +147,7 @@ impl Resolver<'_> {
     fn check_comparison(&mut self, left: &Expr, right: &Expr) {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
+        self.note_compared_parameters(left, &left_type, right, &right_type);
         // Literals carry no location: use the other operand's
         let span = located_span(left).or_else(|| located_span(right));
         let column = self.column_label(left).or_else(|| self.column_label(right));
@@ -168,6 +169,7 @@ impl Resolver<'_> {
     pub(super) fn check_join_comparison(&mut self, left: &Expr, right: &Expr) {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
+        self.note_compared_parameters(left, &left_type, right, &right_type);
         let span = located_span(left).or_else(|| located_span(right));
         let column = self.column_label(left).or_else(|| self.column_label(right));
         if self.report_enum_literal(&left_type, &right_type, column, span) {
@@ -393,6 +395,7 @@ impl Resolver<'_> {
                 let Some(col_def) = table_def.get_column(col_name) else {
                     continue; // Column not found - already reported
                 };
+                self.note_parameter(value_expr, &ExpressionType::of_column(&col_def.data_type));
 
                 // MySQL/SQLite generate the key when NULL is inserted into an
                 // integer primary key (AUTO_INCREMENT / rowid alias)
@@ -474,6 +477,10 @@ impl Resolver<'_> {
                 continue; // Column not found - already reported
             };
             let target_span = Span::from_sqlparser(&target.ident().span);
+            self.note_parameter(
+                &assignment.value,
+                &ExpressionType::of_column(&col_def.data_type),
+            );
 
             if !col_def.nullable
                 && !table_def.before_update_trigger
@@ -523,7 +530,7 @@ impl Resolver<'_> {
         match expr {
             Expr::Value(value) => infer_literal_type(&value.value),
             Expr::Identifier(ident) => match self.scope.column(&ident.value, self.dialect) {
-                ColumnLookup::Found(ty) => ty.clone(),
+                ColumnLookup::Found(column) => column.ty.clone(),
                 _ => ExpressionType::Unknown,
             },
             Expr::CompoundIdentifier(parts) if self.dialect.struct_field_paths() => {
@@ -605,7 +612,7 @@ impl Resolver<'_> {
             .qualified_relation(self.catalog, schema, table)
             .map(|r| r.column(&column.value, self.dialect))
         {
-            Some(ColumnMatch::Yes(ty)) => ty.clone(),
+            Some(ColumnMatch::Yes(column)) => column.ty.clone(),
             _ => ExpressionType::Unknown,
         }
     }
@@ -917,10 +924,25 @@ fn binary_op_result_type(
 }
 
 /// Infer type from a literal value
+/// Type of a numeric literal
+fn number_type(n: &str) -> SqlType {
+    if n.parse::<i32>().is_ok() {
+        SqlType::Integer
+    } else if n.parse::<i64>().is_ok() {
+        SqlType::BigInt
+    } else {
+        SqlType::Decimal {
+            precision: None,
+            scale: None,
+        }
+    }
+}
+
 fn infer_literal_type(value: &Value) -> ExpressionType {
     match value {
-        // Simplified: all numbers are integers (compatible with every numeric type)
-        Value::Number(_, _) => ExpressionType::Known(SqlType::Integer),
+        // A number is an integer, a bigint when it doesn't fit, else numeric (as in
+        // PostgreSQL); numeric types are compatible with each other
+        Value::Number(n, _) => ExpressionType::Known(number_type(n)),
         Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
             ExpressionType::StringLiteral(s.clone())
         }
