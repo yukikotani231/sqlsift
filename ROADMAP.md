@@ -1,45 +1,48 @@
 # Roadmap
 
-sqlsift is at v0.1.x. The next release, v0.2, is about adoption rather than new analysis: anyone with a common stack should get sqlsift running on their project in five minutes, and see it catch the query a migration breaks. Progress is tracked in the [v0.2](https://github.com/yukikotani231/sqlsift/milestone/1) and [v0.3](https://github.com/yukikotani231/sqlsift/milestone/2) milestones.
+sqlsift v0.2 is out. v0.3 widens where sqlsift can be used, v0.4 replaces the PostgreSQL parser, and v1.0 promises stable output. Progress is tracked in the [v0.3](https://github.com/yukikotani231/sqlsift/milestone/2) and [v0.4](https://github.com/yukikotani231/sqlsift/milestone/3) milestones.
 
 Three principles guide what goes in:
 
 - **Trustworthy**: no false positives. Anything sqlsift can't work out is left unreported.
 - **Quick to adopt**: one command and a working example for each common stack.
-- **Wider reach**: more places SQL lives (dbt, Rust, Python) and more dialects, once the basics are proven.
+- **Wider reach**: more places SQL lives (dbt, Rust, Python) and more dialects. New dialects start as alpha and are checked against a real-world corpus before they leave it.
 
-## v0.2: prove it can be adopted
+## v0.2: prove it can be adopted (released)
 
-| Item | Issue |
-| --- | --- |
-| `sqlsift init`: detect migrations, dialect and queries, write `sqlsift.toml`, offer a baseline | [#156](https://github.com/yukikotani231/sqlsift/issues/156) |
-| Example projects checked in CI: Prisma TypedSQL, sqlx `query_file!`, aiosql, migration review | [#157](https://github.com/yukikotani231/sqlsift/issues/157) |
-| aiosql / HugSQL query names in diagnostics | [#158](https://github.com/yukikotani231/sqlsift/issues/158) |
-| GitHub Action: report only the diagnostics a pull request introduces | [#159](https://github.com/yukikotani231/sqlsift/issues/159) |
-| Name the migration file in rename/drop hints | [#138](https://github.com/yukikotani231/sqlsift/issues/138) |
-| Docs no longer saying dbt/Jinja and TypeScript are unsupported | [#131](https://github.com/yukikotani231/sqlsift/issues/131) |
+`sqlsift init` ([#156](https://github.com/yukikotani231/sqlsift/issues/156)), example projects checked in CI ([#157](https://github.com/yukikotani231/sqlsift/issues/157)), aiosql / HugSQL query names ([#158](https://github.com/yukikotani231/sqlsift/issues/158)), a GitHub Action that reports only the diagnostics a pull request introduces ([#159](https://github.com/yukikotani231/sqlsift/issues/159)), migration file names in rename/drop hints ([#138](https://github.com/yukikotani231/sqlsift/issues/138)) and up-to-date docs ([#131](https://github.com/yukikotani231/sqlsift/issues/131)).
+
+Also in v0.2: rules E0009-E0027, including the first `suspicious` and `restriction` rules ([#199](https://github.com/yukikotani231/sqlsift/issues/199)), and Snowflake, BigQuery, Redshift and Databricks in alpha.
 
 ## v0.3: widen reach
 
-Picked by demand after v0.2, roughly in this order:
+| Item | Issue |
+| --- | --- |
+| Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
+| Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks (alpha released; next: feedback from real projects) | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
+| dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` (alpha released; next: feedback from real projects) | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
+| SQL in Rust code (sqlx `query!` / `query_as!`) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
+| SQL in Python code (configurable call names) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
+| Baseline strict mode and maintenance tooling | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
+| `sqlsift impact`: show which queries a migration breaks | [#230](https://github.com/yukikotani231/sqlsift/issues/230) |
+| `sqlsift describe`: each query's columns and types as JSON | [#231](https://github.com/yukikotani231/sqlsift/issues/231) |
+
+## v0.4: own PostgreSQL parser
 
 | Item | Issue |
 | --- | --- |
-| Baseline strict mode and maintenance tooling | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
-| Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
-| SQL in Rust code (sqlx `query!` / `query_as!`) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
-| dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` (alpha: catalog.json loaded, auto-discovered in `target/`; next: feedback from real projects) | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
-| Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
-| SQL in Python code (configurable call names) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
+| In-house PostgreSQL parser with error recovery and a lossless syntax tree; other dialects stay on sqlparser | [#257](https://github.com/yukikotani231/sqlsift/issues/257) |
+
+Replacing the parser changes diagnostic positions and which statements fail to parse, so it comes before v1.0. It ships only if the real-world corpus gives no new false positives and at least the same detections; otherwise sqlsift stays on sqlparser.
 
 ## v1.0 and later
 
-v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SARIF output stay compatible. It comes once sqlsift is used by real teams. Ideas beyond that, started when there is demand:
+v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SARIF output (including `sqlsift describe`) stay compatible. It comes once sqlsift is used by real teams. Ideas beyond that, started when there is demand:
 
 - Data warehouse dialects out of alpha (most dbt projects run on them)
 - Analysing function bodies (PL/pgSQL, `LANGUAGE sql`), e.g. Supabase RPC functions
-- More `suspicious` and `pedantic` rules (`= NULL`, `NOT IN` over a nullable column, `UPDATE` / `DELETE` without `WHERE`)
-- Editor features in the LSP: completion, hover with column types, go to definition
+- `pedantic` and `style` rules (none yet)
+- Editor features in the LSP: completion, hover with column types, go to definition (built on the v0.4 parser's error recovery)
 - Custom rule plugins
 
 ## Contributing

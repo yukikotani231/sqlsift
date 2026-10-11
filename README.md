@@ -240,6 +240,9 @@ The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 - [x] Per-rule and per-category levels (`off` / `warn` / `error`)
 - [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
 - [x] SQL embedded in application code (sqlc, aiosql and HugSQL query names and parameters, TypeScript tagged templates)
+- [x] `sqlsift init`, example projects per stack, and a GitHub Action that reports only what a pull request introduces
+- [x] 27 rules, including `suspicious` warnings and opt-in `restriction` rules
+- [x] Snowflake, BigQuery, Redshift and Databricks dialects and dbt `catalog.json` (alpha)
 
 #### Planned
 See [ROADMAP.md](ROADMAP.md) for what comes next.
