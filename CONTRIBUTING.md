@@ -56,6 +56,7 @@ cargo test --all-targets
 | `site` | Browser playground, deployed to GitHub Pages |
 | `docs` | User guide ([mdBook](https://rust-lang.github.io/mdBook/)), deployed to GitHub Pages under `/docs/` |
 | `tests/fixtures` | SQL fixtures, including real-world schemas (Chinook, Pagila, Northwind) |
+| `examples` | Example projects per stack, checked in CI by `scripts/check-examples.sh` (run it after `cargo build`; a change in their diagnostics means updating their `expected-diagnostics.txt` and README) |
 
 The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) and turned into an in-memory `Catalog` by `SchemaBuilder`; each query is then walked once by the `Resolver`, which resolves names through `Scope` and infers types, emitting diagnostics. [`CLAUDE.md`](CLAUDE.md) has a more detailed architecture overview and the current list of limitations.
 

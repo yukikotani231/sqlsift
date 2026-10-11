@@ -1,0 +1,4 @@
+# Flyway-style versioned migrations (V1__..., V2__...), applied in order.
+schema_dir = "migrations"
+files = ["queries/**/*.sql"]
+dialect = "mysql"

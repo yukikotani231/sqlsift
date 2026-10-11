@@ -1,0 +1,5 @@
+# The same paths as sqlc.yaml: the migrations are applied in order (the
+# *.down.sql rollbacks are skipped) and every query file is checked.
+schema_dir = "db/migrations"
+files = ["db/query/**/*.sql"]
+dialect = "postgresql"

@@ -41,6 +41,7 @@ sqlsift/
 │
 ├── docs/                  # User guide (mdBook), published to GitHub Pages at /sqlsift/docs/
 ├── site/                  # Browser playground (GitHub Pages root)
+├── examples/              # Example projects per stack (sqlc, Prisma, postgres.js, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Real-world schema test fixtures (Chinook, Pagila, Northwind)
 ├── scripts/

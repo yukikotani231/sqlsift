@@ -78,6 +78,35 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  examples:
+    name: Example projects
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-examples-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build sqlsift
+        run: cargo build -p sqlsift-cli
+
+      # Each example's own queries must be clean, and its broken/ files must
+      # report exactly the diagnostics in its expected-diagnostics.txt.
+      - name: Check example projects
+        run: scripts/check-examples.sh
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

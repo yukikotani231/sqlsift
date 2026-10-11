@@ -1,0 +1,4 @@
+# Diagnostics `sqlsift check broken/...` must report (checked in CI by
+# scripts/check-examples.sh): <file>:<line>:<column> <code>
+broken/top_customers.sql:4:16 E0002
+broken/top_customers.sql:8:18 E0002

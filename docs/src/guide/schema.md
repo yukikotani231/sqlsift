@@ -24,6 +24,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **`mysqldump --no-data`** | `sqlsift check -d mysql --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
 
+The [example projects](../integrations/examples.md) show complete setups for sqlc, Prisma TypedSQL, postgres.js, plain SQL migrations, MySQL and dbt.
+
 ## Migrations: only the "up" direction
 
 When reading migrations, sqlsift applies only the "up" direction:

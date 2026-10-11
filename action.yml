@@ -38,6 +38,10 @@ inputs:
     description: "Fail the step when sqlsift reports errors."
     required: false
     default: "true"
+  diff-base:
+    description: "Report only the diagnostics that are new compared with this git ref (branch, tag or commit), e.g. the `github.base_ref` context on pull requests. Diagnostics that already occur at that ref are hidden. Empty (the default, and what `github.base_ref` is outside pull requests): report every diagnostic."
+    required: false
+    default: ""
   version:
     description: "sqlsift-cli version to run from npm."
     required: false
@@ -68,11 +72,16 @@ runs:
         INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_CLI_PATH: ${{ inputs.cli-path }}
+        INPUT_DIFF_BASE: ${{ inputs.diff-base }}
         MATCHER: ${{ github.action_path }}/.github/sqlsift-problem-matcher.json
       run: |
         set -o pipefail
 
         if [[ -n "$INPUT_CLI_PATH" ]]; then
+          # Made absolute, as the diff-base run below works in another directory
+          if [[ "$INPUT_CLI_PATH" != /* && -e "$INPUT_CLI_PATH" ]]; then
+            INPUT_CLI_PATH="$PWD/$INPUT_CLI_PATH"
+          fi
           cli=("$INPUT_CLI_PATH")
         else
           cli=(npx --yes "sqlsift-cli@${INPUT_VERSION}")
@@ -90,11 +99,69 @@ runs:
         for r in "${rules[@]}"; do args+=(--disable "$r"); done
         read -ra files <<< "$INPUT_FILES"
 
+        # diff-base: check the base commit in a temporary worktree, record its
+        # diagnostics in a temporary baseline, then check this commit against
+        # it, so that only the diagnostics this change introduces are reported.
+        # On a pull_request checkout HEAD is the merge commit, so comparing it
+        # with the base branch tip shows what merging the PR would add. Only the
+        # base repository is fetched, so fork PRs need no extra token.
+        if [[ -n "$INPUT_DIFF_BASE" ]]; then
+          base_tree="${RUNNER_TEMP:-/tmp}/sqlsift-diff-base-$$"
+          # A baseline names files relative to its own directory, so it is
+          # written in the base worktree's copy of the current directory and
+          # read from the current directory
+          baseline_name=".sqlsift-diff-baseline-$$.json"
+          prefix=$(git rev-parse --show-prefix)
+          cleanup() {
+            rm -f "$baseline_name"
+            git worktree remove --force "$base_tree" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          # (a shallow checkout, the actions/checkout default, stays shallow; a
+          # full one is not made shallow)
+          depth=""
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then depth="--depth=1"; fi
+          # A commit SHA that is already here is used as is; anything else (a
+          # branch, a tag, a SHA the shallow checkout lacks) is fetched from
+          # origin, falling back to a local ref
+          if [[ "$INPUT_DIFF_BASE" =~ ^[0-9a-f]{40}$ ]] \
+            && base_commit=$(git rev-parse --verify --quiet "${INPUT_DIFF_BASE}^{commit}"); then
+            :
+          elif git fetch --quiet --no-tags ${depth:+"$depth"} origin "$INPUT_DIFF_BASE" 2>/dev/null; then
+            base_commit=$(git rev-parse FETCH_HEAD)
+          elif base_commit=$(git rev-parse --verify --quiet "${INPUT_DIFF_BASE}^{commit}"); then
+            :
+          else
+            echo "::error::sqlsift: diff-base '${INPUT_DIFF_BASE}' is neither a ref of origin nor a local commit"
+            echo "exit-code=2" >> "$GITHUB_OUTPUT"
+            exit 2
+          fi
+          git worktree add --quiet --detach "$base_tree" "$base_commit"
+          echo "Comparing with ${INPUT_DIFF_BASE} (${base_commit:0:12}): only new diagnostics are reported"
+          set +e
+          (cd "$base_tree/$prefix" && NO_COLOR=1 "${cli[@]}" "${args[@]}" --quiet \
+            --write-baseline --baseline "$baseline_name" "${files[@]}" 2>&1)
+          base_code=$?
+          set -e
+          if [[ "$base_code" -eq 0 && -f "$base_tree/$prefix/$baseline_name" ]]; then
+            cp "$base_tree/$prefix/$baseline_name" "$baseline_name"
+          else
+            # E.g. no sqlsift.toml or no query files yet at the base: all is new
+            echo "::warning::sqlsift could not check ${INPUT_DIFF_BASE} (exit code ${base_code}); reporting every diagnostic"
+            echo '{"version":2,"entries":[]}' > "$baseline_name"
+          fi
+          args+=(--baseline "$baseline_name")
+        fi
+
         # Inline annotations on the pull request diff
         echo "::add-matcher::${MATCHER}"
         set +e
-        NO_COLOR=1 "${cli[@]}" "${args[@]}" --max-errors 0 "${files[@]}" 2>&1
-        code=$?
+        # (in diff-base mode the note about baseline entries that no longer occur
+        # only means problems were fixed, so it is left out)
+        NO_COLOR=1 "${cli[@]}" "${args[@]}" --max-errors 0 "${files[@]}" 2>&1 | {
+          if [[ -n "$INPUT_DIFF_BASE" ]]; then grep -v '^Note: .*baseline entr' || true; else cat; fi
+        }
+        code=${PIPESTATUS[0]}
         set -e
         echo "::remove-matcher owner=sqlsift::"
 
