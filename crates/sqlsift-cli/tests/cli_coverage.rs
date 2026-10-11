@@ -1008,7 +1008,7 @@ fn schema_dir_later_migration_drops_column() {
     t.run(&["check", "--schema-dir", "migrations", "q.sql"])
         .assert_code(1)
         .assert_stderr_contains("error[E0002]")
-        .assert_stderr_contains("legacy");
+        .assert_stderr_contains("'legacy' was dropped in migrations/002_drop.sql:1");
 }
 
 #[test]
@@ -1027,7 +1027,30 @@ fn schema_dir_rename_column_in_later_migration() {
     t.run(&["check", "--schema-dir", "migrations", "new.sql"])
         .assert_code(0);
     t.run(&["check", "--schema-dir", "migrations", "old.sql"])
-        .assert_code(1);
+        .assert_code(1)
+        .assert_stderr_contains(
+            "'fullname' was renamed to 'display_name' in migrations/002_rename.sql:1",
+        );
+    // JSON output carries the hint too
+    let json = t
+        .run(&[
+            "check",
+            "--format",
+            "json",
+            "--schema-dir",
+            "migrations",
+            "old.sql",
+        ])
+        .assert_code(1)
+        .json();
+    let help = json["files"][0]["diagnostics"][0]["help"]
+        .as_str()
+        .unwrap_or_default()
+        .replace('\\', "/");
+    assert_eq!(
+        help,
+        "'fullname' was renamed to 'display_name' in migrations/002_rename.sql:1"
+    );
 }
 
 #[test]
@@ -1115,7 +1138,7 @@ fn alter_on_unknown_table_produces_schema_warning_only() {
     t.run(&["check", "-s", "schema.sql", "q.sql"])
         .assert_code(0)
         .assert_stderr_contains("Warning: Schema parsing produced 1 warning(s)")
-        .assert_stderr_contains("ALTER TABLE references table 'ghosts'");
+        .assert_stderr_contains("schema.sql:2: ALTER TABLE references table 'ghosts'");
 }
 
 #[test]

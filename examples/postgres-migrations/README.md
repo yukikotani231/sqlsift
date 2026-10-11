@@ -40,14 +40,14 @@ error[E0002]: Column 'name' not found in table 'customers'
     |
   4 | SELECT c.id, c.name, sum(o.total) AS lifetime_value
     |                ^^^^
-    = help: 'name' was renamed to 'full_name' by ALTER TABLE in the schema
+    = help: 'name' was renamed to 'full_name' in migrations/0003_rename_customer_name.sql:2
 
 error[E0002]: Column 'name' not found in table 'customers'
   --> broken/top_customers.sql:8:18
     |
   8 | GROUP BY c.id, c.name
     |                  ^^^^
-    = help: 'name' was renamed to 'full_name' by ALTER TABLE in the schema
+    = help: 'name' was renamed to 'full_name' in migrations/0003_rename_customer_name.sql:2
 
 Found 2 error(s), 0 warning(s) in 1 file(s)
 ```

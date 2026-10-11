@@ -39,8 +39,9 @@ pub struct Catalog {
     /// and were skipped (for diagnostics on queries that use them)
     #[serde(default)]
     pub skipped_definitions: Vec<SkippedDefinition>,
-    /// Tables and views dropped earlier in the query file being analyzed (for
-    /// diagnostics on queries that reference them)
+    /// Tables and views that DROP or ALTER TABLE ... RENAME TO removed, in the
+    /// schema input or earlier in the query file being analyzed (for diagnostics
+    /// on queries that still reference them)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_relations: Vec<DroppedRelation>,
     /// Databases (BigQuery projects) named by three-part names of tables and views
@@ -75,11 +76,39 @@ pub struct SkippedDefinition {
     pub line: Option<usize>,
 }
 
-/// A table or view dropped earlier in the query file being analyzed
+/// A table or view that was dropped or renamed
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DroppedRelation {
     pub name: QualifiedName,
+    /// The relation's current name (without schema) if it was renamed, or `None`
+    /// if it was dropped
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_to: Option<String>,
+    /// The statement that dropped or renamed it, when known
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+/// Where a schema change (a rename or a drop) was made
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLocation {
+    /// The schema file, as given to sqlsift (relative paths stay relative), or
+    /// `None` for the query file being analyzed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// 1-based line of the statement in that file
     pub line: usize,
+}
+
+impl SourceLocation {
+    /// Where the change was made, to end a hint: `in db/0003_rename.sql:2`, or
+    /// `at line 2 of this file` for the query file being analyzed
+    pub fn describe(&self) -> String {
+        match &self.file {
+            Some(file) => format!("in {file}:{}", self.line),
+            None => format!("at line {} of this file", self.line),
+        }
+    }
 }
 
 impl Catalog {
@@ -351,9 +380,65 @@ impl Catalog {
         }
     }
 
-    /// Record a table or view dropped earlier in the file being analyzed
-    pub fn record_dropped_relation(&mut self, name: QualifiedName, line: usize) {
-        self.dropped_relations.push(DroppedRelation { name, line });
+    /// Record a dropped table or view. Earlier names of it are dropped too.
+    pub fn record_dropped_relation(
+        &mut self,
+        name: QualifiedName,
+        location: Option<SourceLocation>,
+    ) {
+        self.restore_relation(&name);
+        for i in 0..self.dropped_relations.len() {
+            if self.was_renamed_to(&self.dropped_relations[i], &name) {
+                self.dropped_relations[i].renamed_to = None;
+                self.dropped_relations[i].location.clone_from(&location);
+            }
+        }
+        self.dropped_relations.push(DroppedRelation {
+            name,
+            renamed_to: None,
+            location,
+        });
+    }
+
+    /// Record that table `old` was renamed to `new_name` (in the same schema).
+    /// Earlier names of `old` now refer to `new_name` as well.
+    pub fn record_renamed_relation(
+        &mut self,
+        old: QualifiedName,
+        new_name: &str,
+        location: Option<SourceLocation>,
+    ) {
+        if self.names_match(&old.name, new_name) {
+            return;
+        }
+        let new = QualifiedName {
+            schema: old.schema.clone(),
+            name: new_name.to_string(),
+        };
+        self.restore_relation(&new);
+        self.restore_relation(&old);
+        for i in 0..self.dropped_relations.len() {
+            if self.was_renamed_to(&self.dropped_relations[i], &old) {
+                self.dropped_relations[i].renamed_to = Some(new_name.to_string());
+                self.dropped_relations[i].location.clone_from(&location);
+            }
+        }
+        self.dropped_relations.push(DroppedRelation {
+            name: old,
+            renamed_to: Some(new_name.to_string()),
+            location,
+        });
+    }
+
+    /// Whether `former` was renamed to the relation called `name`
+    fn was_renamed_to(&self, former: &DroppedRelation, name: &QualifiedName) -> bool {
+        former.renamed_to.as_deref().is_some_and(|new_name| {
+            let current = QualifiedName {
+                schema: former.name.schema.clone(),
+                name: new_name.to_string(),
+            };
+            self.relation_names_match(&current, name)
+        })
     }
 
     /// Remove any recorded drops that match `name`
@@ -657,6 +742,10 @@ pub struct FormerColumn {
     pub name: String,
     /// The column's current name if it was renamed, or `None` if it was dropped
     pub renamed_to: Option<String>,
+    /// The ALTER TABLE that renamed or dropped it (the latest one when it was
+    /// renamed more than once), when known
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
 }
 
 impl TableDef {
@@ -684,7 +773,7 @@ impl TableDef {
 
     /// Remember that column `old` was renamed to `new`. Earlier names of `old` now
     /// refer to `new` as well.
-    pub fn record_column_rename(&mut self, old: &str, new: &str) {
+    pub fn record_column_rename(&mut self, old: &str, new: &str, location: Option<SourceLocation>) {
         if old.eq_ignore_ascii_case(new) {
             return;
         }
@@ -697,16 +786,18 @@ impl TableDef {
                 .is_some_and(|n| n.eq_ignore_ascii_case(old))
             {
                 former.renamed_to = Some(new.to_string());
+                former.location.clone_from(&location);
             }
         }
         self.former_columns.push(FormerColumn {
             name: old.to_string(),
             renamed_to: Some(new.to_string()),
+            location,
         });
     }
 
     /// Remember that column `name` was dropped. Earlier names of it are dropped too.
-    pub fn record_column_drop(&mut self, name: &str) {
+    pub fn record_column_drop(&mut self, name: &str, location: Option<SourceLocation>) {
         self.forget_former_column(name);
         for former in &mut self.former_columns {
             if former
@@ -715,11 +806,13 @@ impl TableDef {
                 .is_some_and(|n| n.eq_ignore_ascii_case(name))
             {
                 former.renamed_to = None;
+                former.location.clone_from(&location);
             }
         }
         self.former_columns.push(FormerColumn {
             name: name.to_string(),
             renamed_to: None,
+            location,
         });
     }
 

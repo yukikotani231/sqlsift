@@ -444,7 +444,9 @@ fn build_catalog(
     let mut builder = SchemaBuilder::with_dialect(dialect);
     for schema_file in schema_files {
         let content = read_file(schema_file)?;
-        if let Err(diags) = with_analysis_stack(|| builder.parse(&content)) {
+        if let Err(diags) =
+            with_analysis_stack(|| builder.parse_file(&content, &schema_file.display().to_string()))
+        {
             return Ok(Err(FileDiagnostics {
                 file: schema_file.display().to_string(),
                 source: content,

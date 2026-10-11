@@ -14,7 +14,8 @@ use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::psql;
 use crate::schema::{
     Catalog, CheckConstraintDef, ColumnDef, DefaultValue, EnumTypeDef, ForeignKeyDef, IdentityKind,
-    PrimaryKeyDef, QualifiedName, SkippedDefinition, TableDef, UniqueConstraintDef, ViewDef,
+    PrimaryKeyDef, QualifiedName, SkippedDefinition, SourceLocation, TableDef, UniqueConstraintDef,
+    ViewDef,
 };
 use crate::types::SqlType;
 
@@ -27,6 +28,16 @@ pub struct SchemaBuilder {
     /// can't be inferred defines a relation with unknown columns (so references to
     /// them aren't reported) instead of warning
     query_file: bool,
+    /// The schema file being parsed ([`Self::parse_file`]), named in the hints
+    /// on renamed and dropped tables and columns
+    source_file: Option<String>,
+    /// Lines of the input before the text being parsed (statement locations are
+    /// relative to that text)
+    line_offset: usize,
+    /// Column of the input where the text being parsed starts
+    column_offset: usize,
+    /// Line of the statement being applied, for nodes without a location
+    statement_line: Option<usize>,
 }
 
 impl SchemaBuilder {
@@ -43,6 +54,10 @@ impl SchemaBuilder {
             diagnostics: Vec::new(),
             dialect,
             query_file: false,
+            source_file: None,
+            line_offset: 0,
+            column_offset: 1,
+            statement_line: None,
         }
     }
 
@@ -54,25 +69,28 @@ impl SchemaBuilder {
             diagnostics: Vec::new(),
             dialect,
             query_file: true,
+            source_file: None,
+            line_offset: 0,
+            column_offset: 1,
+            statement_line: None,
         }
     }
 
-    /// Apply one parsed statement to the catalog (statements that don't define or
+    /// Apply one parsed statement of the query file, which starts at line
+    /// `line` of the file, to the catalog (statements that don't define or
     /// change the schema are ignored)
-    pub(crate) fn apply_statement(&mut self, stmt: &Statement) {
+    pub(crate) fn apply_statement(&mut self, stmt: &Statement, line: usize) {
+        self.line_offset = line.saturating_sub(1);
+        self.statement_line = Some(line);
         self.process_statement(stmt);
+        self.line_offset = 0;
+        self.statement_line = None;
     }
 
     /// Record a definition in the query file that could not be parsed (for
     /// diagnostics on the later statements that use it)
     pub(crate) fn skip_definition(&mut self, definition: SkippedDefinition) {
         self.catalog.skipped_definitions.push(definition);
-    }
-
-    /// Record a table or view dropped in the query file (for diagnostics on later
-    /// statements that reference it)
-    pub(crate) fn record_dropped_relation(&mut self, name: QualifiedName, line: usize) {
-        self.catalog.record_dropped_relation(name, line);
     }
 
     /// Whether `stmt` is a statement [`SchemaBuilder`] applies to the catalog
@@ -94,6 +112,30 @@ impl SchemaBuilder {
         }
     }
 
+    /// Parse the SQL schema definitions of the file `path` (as it should be shown
+    /// to the user), like [`Self::parse`]. Diagnostics on queries that use a table
+    /// or column the file renamed or dropped name the file and line.
+    ///
+    /// # Errors
+    ///
+    /// The diagnostics, when there are errors (see [`Self::parse`]).
+    pub fn parse_file(&mut self, sql: &str, path: &str) -> Result<(), Vec<Diagnostic>> {
+        self.source_file = Some(path.to_string());
+        let first_new = self.diagnostics.len();
+        let result = self.parse(sql);
+        self.source_file = None;
+        // Schema warnings are listed without the schema text: name the file and line
+        for diagnostic in self.diagnostics.iter_mut().skip(first_new) {
+            if diagnostic.severity == crate::error::Severity::Warning {
+                diagnostic.message = match diagnostic.span.filter(|s| s.line > 0) {
+                    Some(span) => format!("{path}:{}: {}", span.line, diagnostic.message),
+                    None => format!("{path}: {}", diagnostic.message),
+                };
+            }
+        }
+        result
+    }
+
     /// Parse SQL schema definitions and build the catalog.
     ///
     /// dbmate `-- migrate:down` sections are ignored (see
@@ -103,6 +145,14 @@ impl SchemaBuilder {
         let (sql, bom) = crate::analyzer::strip_bom(sql);
         let first_new = self.diagnostics.len();
         self.parse_text(sql);
+        // Spans made from a line and column (no byte offset yet)
+        for span in self.diagnostics[first_new..]
+            .iter_mut()
+            .filter_map(|d| d.span.as_mut())
+            .filter(|s| s.offset == 0 && s.line > 0)
+        {
+            span.offset = byte_offset_of(sql, span.line, span.column).unwrap_or(0);
+        }
         crate::analyzer::shift_offsets(&mut self.diagnostics[first_new..], bom);
 
         if self
@@ -213,9 +263,16 @@ impl SchemaBuilder {
             });
             match parsed {
                 Ok(stmts) => {
+                    // `raw_stmt` is a subslice of `sql`
+                    let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
+                    let (line, column) = line_column_at(sql, offset);
+                    self.line_offset = line - 1;
+                    self.column_offset = column;
                     for stmt in stmts {
                         self.process_statement(&stmt);
                     }
+                    self.line_offset = 0;
+                    self.column_offset = 1;
                 }
                 Err(err) => {
                     // `raw_stmt` is a subslice of `sql`
@@ -719,8 +776,12 @@ impl SchemaBuilder {
                     match object_type {
                         ObjectType::Table => self.process_drop_table(name),
                         ObjectType::View => {
+                            let location = self.name_location(name);
                             let name = self.catalog.qualified_name(name);
-                            self.catalog.drop_view(&name);
+                            if self.catalog.view_exists(&name) {
+                                self.catalog.drop_view(&name);
+                                self.catalog.record_dropped_relation(name, location);
+                            }
                         }
                         ObjectType::Type => {
                             let name = self.catalog.qualified_name(name);
@@ -772,6 +833,53 @@ impl SchemaBuilder {
 
     fn relation_exists(&self, name: &QualifiedName) -> bool {
         self.catalog.relation_exists_exactly(name)
+    }
+
+    /// Where the node at `span` (of the statement being applied) is, for hints
+    /// on what it renamed or dropped: `None` when neither the schema file nor
+    /// the line is known
+    fn location(&self, span: sqlparser::tokenizer::Span) -> Option<SourceLocation> {
+        if !self.query_file && self.source_file.is_none() {
+            return None;
+        }
+        let line = match usize::try_from(span.start.line) {
+            Ok(line) if line > 0 => line + self.line_offset,
+            _ => self.statement_line?,
+        };
+        Some(SourceLocation {
+            file: self.source_file.clone(),
+            line,
+        })
+    }
+
+    /// [`Self::location`] of an object name
+    fn name_location(&self, name: &ObjectName) -> Option<SourceLocation> {
+        self.location(
+            name.0
+                .first()
+                .map_or(sqlparser::tokenizer::Span::empty(), |ident| ident.span),
+        )
+    }
+
+    /// Span in the input of an object name, for schema warnings (with a line and
+    /// column but no byte offset)
+    fn name_span(&self, name: &ObjectName) -> Option<Span> {
+        let start = name.0.first()?.span.start;
+        let end = name.0.last()?.span.end;
+        if start.line == 0 {
+            return None;
+        }
+        let (line, column) = absolute_location(
+            (self.line_offset + 1, self.column_offset),
+            usize::try_from(start.line).ok()?,
+            usize::try_from(start.column).ok()?,
+        );
+        let length = if end.line == start.line && end.column > start.column {
+            usize::try_from(end.column - start.column).unwrap_or(1)
+        } else {
+            1
+        };
+        Some(Span::with_location(line, column, length))
     }
 
     /// Process CREATE TABLE statement
@@ -1021,15 +1129,15 @@ impl SchemaBuilder {
 
         // Check if table exists
         if !self.catalog.table_exists(&table_name) {
-            self.diagnostics.push(
-                Diagnostic::warning(
-                    DiagnosticKind::TableNotFound,
-                    format!(
-                        "ALTER TABLE references table '{table_name}' which was not found in schema"
-                    ),
-                )
-                .with_help("Ensure the CREATE TABLE statement appears before ALTER TABLE"),
-            );
+            let mut warning = Diagnostic::warning(
+                DiagnosticKind::TableNotFound,
+                format!(
+                    "ALTER TABLE references table '{table_name}' which was not found in schema"
+                ),
+            )
+            .with_help("Ensure the CREATE TABLE statement appears before ALTER TABLE");
+            warning.span = self.name_span(name);
+            self.diagnostics.push(warning);
             return;
         }
 
@@ -1052,10 +1160,11 @@ impl SchemaBuilder {
                     }
                 }
                 AlterTableOperation::DropColumn { column_name, .. } => {
+                    let location = self.location(column_name.span);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(index) = column_index(table, &column_name.value) {
                             if let Some((name, _)) = table.columns.shift_remove_index(index) {
-                                table.record_column_drop(&name);
+                                table.record_column_drop(&name, location);
                             }
                         }
                     }
@@ -1065,13 +1174,14 @@ impl SchemaBuilder {
                     new_column_name,
                 } => {
                     let case_sensitive = self.catalog.is_case_sensitive_column(new_column_name);
+                    let location = self.location(old_column_name.span);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(index) = column_index(table, &old_column_name.value) {
                             let mut col = table.columns[index].clone();
                             col.name.clone_from(&new_column_name.value);
                             col.case_sensitive = case_sensitive;
                             let old_name = table.columns[index].name.clone();
-                            table.record_column_rename(&old_name, &col.name);
+                            table.record_column_rename(&old_name, &col.name, location);
                             replace_column(table, index, col);
                         }
                     }
@@ -1114,11 +1224,12 @@ impl SchemaBuilder {
                         data_type,
                         &options,
                     );
+                    let location = self.location(col_name.span);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         merge_constraints(table, constraints);
                         if let Some(index) = column_index(table, &col_name.value) {
                             let old_name = table.columns[index].name.clone();
-                            table.record_column_rename(&old_name, &col.name);
+                            table.record_column_rename(&old_name, &col.name, location);
                             replace_column(table, index, col);
                         } else {
                             table.forget_former_column(&col.name);
@@ -1129,8 +1240,17 @@ impl SchemaBuilder {
                 AlterTableOperation::RenameTable {
                     table_name: new_name,
                 } => {
+                    let location = self.name_location(new_name);
                     let new_qualified = self.catalog.qualified_name(new_name);
-                    self.catalog.rename_table(&table_name, new_qualified.name);
+                    // The name the table had (as created, not as written here)
+                    let old_name = self
+                        .catalog
+                        .get_table(&table_name)
+                        .map_or_else(|| table_name.clone(), |t| t.name.clone());
+                    self.catalog
+                        .rename_table(&table_name, new_qualified.name.clone());
+                    self.catalog
+                        .record_renamed_relation(old_name, &new_qualified.name, location);
                 }
                 AlterTableOperation::AddConstraint(constraint) => {
                     let mut constraints = TableDef::new(table_name.clone());
@@ -1157,11 +1277,17 @@ impl SchemaBuilder {
 
     /// Process DROP TABLE statement
     fn process_drop_table(&mut self, name: &ObjectName) {
+        let location = self.name_location(name);
         let table_name = self.catalog.qualified_name(name);
+        let mut existed = self.catalog.table_exists(&table_name);
         self.catalog.drop_table(&table_name);
         if self.query_file {
             // A `CREATE TABLE ... AS` with unknown columns is defined as a view
+            existed |= self.catalog.view_exists(&table_name);
             self.catalog.drop_view(&table_name);
+        }
+        if existed {
+            self.catalog.record_dropped_relation(table_name, location);
         }
     }
 

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::schema::{
-    split_dotted_idents, Catalog, ColumnDef, FormerColumn, QualifiedName, TableDef,
+    split_dotted_idents, Catalog, ColumnDef, FormerColumn, QualifiedName, SourceLocation, TableDef,
 };
 use crate::suggest::{find_most_similar, find_similar_name};
 use crate::types::SqlType;
@@ -2229,7 +2229,8 @@ impl<'a> Resolver<'a> {
         ))
     }
 
-    /// Why a table is missing when an earlier statement of the query file dropped it
+    /// Why a table is missing when the schema or an earlier statement of the
+    /// query file dropped or renamed it
     fn dropped_table_hint(&self, table_name: &QualifiedName) -> Option<String> {
         let dropped = self
             .catalog
@@ -2237,9 +2238,19 @@ impl<'a> Resolver<'a> {
             .iter()
             .rev()
             .find(|d| self.catalog.relation_names_match(&d.name, table_name))?;
+        let location = dropped.location.as_ref().map(SourceLocation::describe);
+        let Some(new_name) = &dropped.renamed_to else {
+            let location = location.unwrap_or_else(|| "in the schema".into());
+            return Some(format!("'{table_name}' was dropped {location}"));
+        };
+        // Qualified as the reference is
+        let new_name = match &table_name.schema {
+            Some(schema) => format!("{schema}.{new_name}"),
+            None => new_name.clone(),
+        };
+        let location = location.unwrap_or_else(|| "by ALTER TABLE in the schema".into());
         Some(format!(
-            "'{table_name}' was dropped at line {} of this file",
-            dropped.line
+            "'{table_name}' was renamed to '{new_name}' {location}"
         ))
     }
 
@@ -2695,16 +2706,15 @@ fn missing_column_help(
     candidates: impl IntoIterator<Item = String>,
     name: &str,
 ) -> Option<String> {
-    match former {
-        Some(FormerColumn {
-            renamed_to: Some(new_name),
-            ..
-        }) => Some(format!(
-            "'{name}' was renamed to '{new_name}' by ALTER TABLE in the schema"
-        )),
-        Some(FormerColumn {
-            renamed_to: None, ..
-        }) => Some(format!("'{name}' was dropped by ALTER TABLE in the schema")),
-        None => find_similar_name(candidates, name).map(|s| format!("Did you mean '{s}'?")),
-    }
+    let Some(former) = former else {
+        return find_similar_name(candidates, name).map(|s| format!("Did you mean '{s}'?"));
+    };
+    let location = former.location.as_ref().map_or_else(
+        || "by ALTER TABLE in the schema".to_string(),
+        SourceLocation::describe,
+    );
+    Some(match &former.renamed_to {
+        Some(new_name) => format!("'{name}' was renamed to '{new_name}' {location}"),
+        None => format!("'{name}' was dropped {location}"),
+    })
 }
