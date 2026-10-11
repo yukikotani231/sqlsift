@@ -263,6 +263,8 @@ cargo run -- check --schema tests/fixtures/schema.sql tests/fixtures/invalid_que
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup, repository layout and how to add a rule. Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …), which drive automated releases.
 
+sqlsift is built with heavy use of [Claude Code](https://claude.com/claude-code): the maintainer sets the direction, decides the design and reviews every change, and the [`CLAUDE.md`](CLAUDE.md) in the repository is the same guide the agent works from. Pull requests and review comments written by it end with a note saying so.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

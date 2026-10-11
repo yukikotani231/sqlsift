@@ -101,6 +101,7 @@ The guide is an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`. Instal
 - Keep each PR focused on one change, with tests for user-visible behavior.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages and PR titles (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`; add `!` for breaking changes). Releases and the changelog are generated from them by [release-plz](https://release-plz.dev/), so don't edit version numbers or `CHANGELOG.md` by hand.
 - Update the user guide in `docs/` (and the README or the sample `sqlsift.toml` where relevant) when behavior or options change.
+- AI-assisted contributions are welcome; sqlsift itself is developed with Claude Code. Say so in the PR (the template has a checkbox), and make sure you understand every change and can answer review questions about it.
 
 ## License
 
