@@ -1623,7 +1623,7 @@ fn syntax_errors_in_other_statements_still_reported() {
     let catalog = catalog();
     let sql = r"
         VACUUM events;
-        SELECT FROM WHERE;
+        SELECT * FROM;
     ";
 
     let diagnostics = analyze(&catalog, sql);
