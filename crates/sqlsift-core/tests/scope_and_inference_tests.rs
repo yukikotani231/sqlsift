@@ -386,8 +386,12 @@ fn duplicate_star_columns_by_dialect() {
             .into_iter()
             .map(|d| d.kind)
             .collect();
-        if dialect == SqlDialect::SQLite {
-            // SQLite resolves the name to the first such column
+        if matches!(
+            dialect,
+            SqlDialect::SQLite | SqlDialect::Snowflake | SqlDialect::Databricks
+        ) {
+            // SQLite resolves the name to the first such column; not verified for
+            // Snowflake and Databricks, so left unreported
             assert!(kinds.is_empty(), "{dialect:?}: {kinds:?}");
         } else {
             assert_eq!(kinds, vec![DiagnosticKind::AmbiguousColumn], "{dialect:?}");
