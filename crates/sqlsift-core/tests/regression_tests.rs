@@ -1286,6 +1286,7 @@ fn json_table_columns_are_the_listed_ones() {
         );
     }
 }
+
 // #280: PostgreSQL 18 RETURNING old / new
 #[test]
 fn returning_old_and_new_rows() {
@@ -1324,4 +1325,41 @@ fn returning_old_and_new_rows() {
         )),
         vec![DiagnosticKind::TableNotFound]
     );
+}
+
+// #282: MySQL 8.0.19 INSERT ... AS new(a, b) ON DUPLICATE KEY UPDATE
+#[test]
+fn mysql_insert_row_alias_column_aliases() {
+    let schema = "CREATE TABLE counters (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(20) NOT NULL UNIQUE,
+        hits INT NOT NULL DEFAULT 0,
+        note TEXT
+    );";
+    for sql in [
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = hits + h, note = n",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = counters.hits + new.h",
+        "INSERT INTO counters VALUES (1, 'a', 1, NULL) AS new(i, n, h, t) \
+         ON DUPLICATE KEY UPDATE hits = h, note = t",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new \
+         ON DUPLICATE KEY UPDATE hits = new.hits, note = new.note",
+    ] {
+        let diagnostics = analyze(schema, SqlDialect::MySQL, sql);
+        assert!(diagnostics.is_empty(), "{sql}: {diagnostics:#?}");
+    }
+    // The aliases replace the column names
+    for sql in [
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = new.hits",
+        "INSERT INTO counters (name, hits) VALUES ('a', 1) AS new(n, h) \
+         ON DUPLICATE KEY UPDATE hits = x",
+    ] {
+        assert_eq!(
+            kinds(&analyze(schema, SqlDialect::MySQL, sql)),
+            vec![DiagnosticKind::ColumnNotFound],
+            "{sql}"
+        );
+    }
 }

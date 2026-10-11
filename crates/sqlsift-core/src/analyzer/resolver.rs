@@ -435,10 +435,42 @@ impl<'a> Resolver<'a> {
                 .and_then(|a| a.row_alias.0.last())
                 .map(|a| a.ident().value.clone());
             if let Some(row_alias) = &row_alias {
+                let mut relation = target.clone();
+                // `AS new(a, b)` names the inserted columns, in INSERT order
+                if let Some(names) = insert
+                    .insert_alias
+                    .as_ref()
+                    .and_then(|a| a.col_aliases.as_ref())
+                    .filter(|names| !names.is_empty())
+                {
+                    let names: Vec<String> = names.iter().map(|n| n.value.clone()).collect();
+                    let inserted = relation.columns.take().map(|columns| {
+                        if insert.columns.is_empty() {
+                            return columns;
+                        }
+                        insert
+                            .columns
+                            .iter()
+                            .filter_map(|c| {
+                                let name = &column_ident(c).value;
+                                columns
+                                    .iter()
+                                    .find(|col| col.name.eq_ignore_ascii_case(name))
+                                    .cloned()
+                            })
+                            .collect()
+                    });
+                    let mut renamed = Relation::rename_columns(inserted, &names);
+                    if let Some(columns) = &mut renamed {
+                        columns.truncate(names.len());
+                    }
+                    relation.columns = renamed;
+                    relation.former_columns.clear();
+                }
                 self.scope
                     .current()
                     .relations
-                    .insert(row_alias.clone(), target.clone());
+                    .insert(row_alias.clone(), relation);
             }
             self.on_insert(on, table_def, &table_name, target);
             // EXCLUDED / the row alias are only visible in the ON clause
