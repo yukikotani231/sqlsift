@@ -20,7 +20,14 @@ impl DbtProjects {
     /// directories that holds a `dbt_project.yml`
     pub fn root_of(&mut self, file: &Path) -> Option<PathBuf> {
         let file = std::env::current_dir().ok()?.join(file);
-        let dir = file.parent()?;
+        self.root_of_dir(file.parent()?)
+    }
+
+    /// The root of the dbt project directory `dir` is in: the nearest of `dir` and
+    /// its ancestors that holds a `dbt_project.yml`
+    pub fn root_of_dir(&mut self, dir: &Path) -> Option<PathBuf> {
+        let dir = std::env::current_dir().ok()?.join(dir);
+        let dir = dir.as_path();
         if let Some(root) = self.roots.get(dir) {
             return root.clone();
         }
@@ -46,6 +53,11 @@ impl DbtProjects {
             .and_then(|first| first.as_os_str().to_str())
             .is_some_and(|first| SKIPPED_DIRS.contains(&first))
     }
+}
+
+/// The catalog that `dbt docs generate` writes in the dbt project at `root`
+pub fn catalog_file(root: &Path) -> PathBuf {
+    root.join("target").join("catalog.json")
 }
 
 #[cfg(test)]

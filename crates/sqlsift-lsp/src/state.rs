@@ -43,6 +43,10 @@ pub struct ServerState {
     /// Language ids of the open documents (from `textDocument/didOpen`)
     pub document_languages: HashMap<Url, String>,
     pub schema_files: Vec<PathBuf>,
+    /// dbt `catalog.json` whose relations are added to the catalog (`dbt_catalog`
+    /// in sqlsift.toml, or `target/catalog.json` of a dbt project at the workspace
+    /// root or next to sqlsift.toml)
+    pub dbt_catalog: Option<PathBuf>,
     /// `ignore` patterns from sqlsift.toml: matching documents get no diagnostics
     pub ignore: IgnorePatterns,
     /// `baseline` from sqlsift.toml and the directory its file names are relative to:
@@ -65,6 +69,7 @@ impl ServerState {
             open_documents: HashMap::new(),
             document_languages: HashMap::new(),
             schema_files: Vec::new(),
+            dbt_catalog: None,
             ignore: IgnorePatterns::default(),
             baseline: None,
             workspace_root: None,
@@ -76,6 +81,7 @@ impl ServerState {
     pub fn load_config(&mut self, workspace_root: &Path) {
         self.workspace_root = Some(workspace_root.to_path_buf());
         self.templating = dbt_templating(workspace_root);
+        self.dbt_catalog = dbt_catalog_in(workspace_root);
 
         let Some((config_path, result)) = Config::find_from_root(workspace_root) else {
             return;
@@ -116,6 +122,16 @@ impl ServerState {
                     self.templating = dbt_templating(config_dir);
                 }
             }
+        }
+
+        // dbt catalog: configured, or found in the dbt project (unless templating
+        // is turned off)
+        if let Some(path) = &config.dbt_catalog {
+            self.dbt_catalog = Some(config_dir.join(path));
+        } else if self.templating_configured && self.templating == Templating::None {
+            self.dbt_catalog = None;
+        } else if self.dbt_catalog.is_none() {
+            self.dbt_catalog = dbt_catalog_in(config_dir);
         }
 
         self.embedded_sql_tags = config.embedded_sql_tags();
@@ -179,6 +195,19 @@ impl ServerState {
 
         let (catalog, schema_diags) = builder.build();
         self.catalog = catalog;
+
+        if let Some(path) = &self.dbt_catalog {
+            let loaded = std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|json| sqlsift_core::dbt::load_catalog_json(&json, &mut self.catalog));
+            if let Err(e) = loaded {
+                errors.push(format!(
+                    "Failed to load dbt catalog {}: {}",
+                    path.display(),
+                    e
+                ));
+            }
+        }
 
         for d in schema_diags {
             errors.push(format!("Schema warning: {}", d.message));
@@ -420,6 +449,12 @@ fn dbt_templating(dir: &Path) -> Templating {
     }
 }
 
+/// The `target/catalog.json` of the dbt project in `dir`, if there are both
+fn dbt_catalog_in(dir: &Path) -> Option<PathBuf> {
+    let catalog = dir.join("target").join("catalog.json");
+    (dir.join("dbt_project.yml").is_file() && catalog.is_file()).then_some(catalog)
+}
+
 /// Resolve schema file paths from config (handles glob patterns and schema_dir).
 /// Relative paths are resolved against `base_dir` (the config file's directory).
 fn resolve_schema_files(config: &Config, base_dir: &Path) -> Vec<PathBuf> {
@@ -574,6 +609,68 @@ mod tests {
         let mut state = ServerState::new();
         state.load_config(&root);
         assert_eq!(state.templating, Templating::None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_dbt_catalog_gives_ref_columns() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sqlsift-lsp-dbt-catalog-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("dbt_project.yml"), "name: demo\n").unwrap();
+        std::fs::write(
+            root.join("target/catalog.json"),
+            r#"{"nodes": {"model.demo.s": {"metadata": {"schema": "a", "name": "s"},
+                "columns": {"id": {"type": "integer", "index": 1, "name": "id"}}}}}"#,
+        )
+        .unwrap();
+        let sql = "SELECT s.id, s.bogus FROM {{ ref('s') }} s";
+
+        // Found in target/ of the dbt project at the workspace root, without
+        // schema files
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        let diagnostics = state.analyze_document(sql);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].message.contains("bogus"));
+
+        // `dbt_catalog` in sqlsift.toml, relative to it
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::rename(
+            root.join("target/catalog.json"),
+            root.join("other/catalog.json"),
+        )
+        .unwrap();
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        state.rebuild_catalog();
+        assert!(state.analyze_document(sql).is_empty());
+        std::fs::write(
+            root.join("sqlsift.toml"),
+            "dbt_catalog = \"other/catalog.json\"\n",
+        )
+        .unwrap();
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(state.analyze_document(sql).len(), 1);
+
+        // A missing catalog is reported
+        std::fs::write(root.join("sqlsift.toml"), "dbt_catalog = \"nope.json\"\n").unwrap();
+        let mut state = ServerState::new();
+        state.load_config(&root);
+        let errors = state.rebuild_catalog();
+        assert!(errors[0].contains("dbt catalog"), "{errors:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

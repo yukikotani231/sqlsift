@@ -281,8 +281,9 @@ fn config_dialect(config: &Config) -> Result<SqlDialect> {
 }
 
 /// Schema files from `schema` (glob patterns are expanded) followed by every
-/// `.sql` file under `schema_dir`, in filename order
-fn schema_files(config: &Config) -> Result<Vec<PathBuf>> {
+/// `.sql` file under `schema_dir`, in filename order. Having none is an error
+/// unless `optional` (a dbt catalog provides the tables).
+fn schema_files(config: &Config, optional: bool) -> Result<Vec<PathBuf>> {
     let mut schema_files: Vec<PathBuf> = Vec::new();
     for pattern in &config.schema {
         if is_glob(pattern) {
@@ -311,12 +312,92 @@ fn schema_files(config: &Config) -> Result<Vec<PathBuf>> {
         schema_files.extend(matches);
     }
 
-    if schema_files.is_empty() {
+    if schema_files.is_empty() && !optional {
         miette::bail!(
             "No schema files specified. Use --schema, --schema-dir, or configure in sqlsift.toml"
         );
     }
     Ok(schema_files)
+}
+
+/// A dbt catalog to load, and whether it was configured (else it was found in a
+/// dbt project)
+type DbtCatalogFile = (PathBuf, bool);
+
+/// The dbt catalogs whose relations are added to the catalog: `dbt_catalog`, else
+/// the `target/catalog.json` of the dbt projects of the current directory, the
+/// configuration file's directory and the query files (unless templating is
+/// turned off)
+fn dbt_catalog_files(
+    config: &Config,
+    templating: Templating,
+    projects: &mut dbt::DbtProjects,
+) -> Result<Vec<DbtCatalogFile>> {
+    if let Some(path) = &config.dbt_catalog {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            miette::bail!(
+                "dbt catalog not found: {} (generate it with `dbt docs generate`)",
+                path.display()
+            );
+        }
+        return Ok(vec![(path, true)]);
+    }
+    if config.templating.is_some() && templating == Templating::None {
+        return Ok(Vec::new());
+    }
+    let mut dirs = vec![PathBuf::new()];
+    dirs.extend(config.base_dir.clone());
+    for pattern in &config.files {
+        let path = Path::new(pattern);
+        if is_glob(pattern) {
+            dirs.push(glob_base(pattern));
+        } else if !is_stdin(path) {
+            dirs.push(path.parent().unwrap_or(Path::new("")).to_path_buf());
+        }
+    }
+    let mut catalogs: Vec<DbtCatalogFile> = Vec::new();
+    for dir in dirs {
+        let Some(root) = projects.root_of_dir(&dir) else {
+            continue;
+        };
+        let catalog = dbt::catalog_file(&root);
+        if catalog.is_file() && !catalogs.iter().any(|(c, _)| *c == catalog) {
+            catalogs.push((catalog, false));
+        }
+    }
+    Ok(catalogs)
+}
+
+/// Add the relations of dbt catalogs to `catalog`. A catalog that was found (not
+/// configured) and can't be read is skipped with a warning.
+fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<()> {
+    for (path, configured) in files {
+        let loaded = fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| sqlsift_core::dbt::load_catalog_json(&json, catalog));
+        match loaded {
+            Ok(summary) => tracing::info!(
+                catalog = %path.display(),
+                refs = summary.refs,
+                sources = summary.sources,
+                "Loaded dbt catalog"
+            ),
+            Err(e) if *configured => {
+                return Err(miette::miette!(
+                    "Failed to load dbt catalog {}: {}",
+                    path.display(),
+                    e
+                ));
+            }
+            Err(e) => eprintln!(
+                "Warning: failed to load dbt catalog {}: {}; ref() and source() columns are unknown",
+                path.display(),
+                e
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Build the catalog from the schema files. Schema warnings are printed to
@@ -365,6 +446,7 @@ fn run(args: Args) -> Result<bool> {
             deny,
             dialect,
             templating,
+            dbt_catalog,
             format,
             max_errors,
             max_warnings,
@@ -381,6 +463,7 @@ fn run(args: Args) -> Result<bool> {
                 format,
                 dialect.as_deref(),
                 templating.as_deref(),
+                dbt_catalog.as_deref(),
                 max_warnings,
                 baseline.as_deref(),
             );
@@ -414,15 +497,20 @@ fn run(args: Args) -> Result<bool> {
                 }
             };
 
-            let schema_files = schema_files(&config)?;
+            // dbt catalogs (`dbt_catalog`, or the dbt project's target/catalog.json):
+            // schema files are optional with one
+            let mut dbt_projects = dbt::DbtProjects::default();
+            let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
+            let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
             let formatter = OutputFormatter::new(output_format);
-            let catalog = match build_catalog(&schema_files, dialect)? {
+            let mut catalog = match build_catalog(&schema_files, dialect)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
                     formatter.print(&[failed]);
                     return Ok(true);
                 }
             };
+            load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
 
             // Collect query files from config or CLI (glob patterns are expanded)
             let mut query_files = Vec::new();
@@ -530,7 +618,6 @@ fn run(args: Args) -> Result<bool> {
                 .map(String::as_str)
                 .filter(|p| !is_glob(p))
                 .collect();
-            let mut dbt_projects = dbt::DbtProjects::default();
             let mut file_templating = Vec::with_capacity(query_files.len());
             query_files.retain(|path| {
                 let detect_path = if is_stdin(path) {
@@ -815,9 +902,10 @@ fn run(args: Args) -> Result<bool> {
                 None,
                 None,
                 None,
+                None,
             );
             let dialect = config_dialect(&config)?;
-            let schema_files = schema_files(&config)?;
+            let schema_files = schema_files(&config, false)?;
 
             let catalog = match build_catalog(&schema_files, dialect)? {
                 Ok(catalog) => catalog,

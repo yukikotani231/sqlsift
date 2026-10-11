@@ -38,6 +38,9 @@ Options:
       --templating <ENGINE> Query file templating: jinja (dbt models), none [default: jinja
                             when dbt_project.yml is in the current or the config file's
                             directory or above the query file, else none]
+      --dbt-catalog <PATH>  dbt catalog.json with the columns of the models and sources
+                            that ref() / source() name (alpha) [default:
+                            target/catalog.json of the dbt project, if it exists]
   -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
       --max-errors <N>      Maximum number of errors before stopping [default: 100, 0 = unlimited]
       --max-warnings <N>    Fail (exit 1) when more than N warnings are reported

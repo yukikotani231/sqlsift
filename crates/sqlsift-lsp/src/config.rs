@@ -28,6 +28,11 @@ pub struct Config {
     #[serde(default)]
     pub templating: Option<String>,
 
+    /// dbt `catalog.json` (relative to the config file's directory) with the
+    /// columns of the models and sources that `ref()` / `source()` name
+    #[serde(default)]
+    pub dbt_catalog: Option<String>,
+
     #[serde(default)]
     pub disable: Vec<String>,
 

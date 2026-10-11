@@ -13,6 +13,7 @@ ignore = ["queries/archive/**", "**/*.generated.sql"]  # query files to skip
 
 dialect = "postgresql"            # postgresql, mysql, sqlite; alpha: snowflake, bigquery, redshift, databricks
 templating = "jinja"              # jinja (dbt models) or none
+dbt_catalog = "target/catalog.json"  # dbt catalog with the columns of ref() / source() (alpha)
 format = "human"                  # human, json, sarif or github
 max_warnings = 0                  # fail when more than this many warnings are reported
 baseline = "sqlsift-baseline.json"  # known diagnostics that are not reported
@@ -39,6 +40,7 @@ correctness = "error"
 | `ignore` | list of globs | `[]` | Query files to skip. `**` matches any number of directories; a pattern matching a directory skips everything below it. `--ignore` adds to this list |
 | `dialect` | string | `"postgresql"` | `postgresql`, `mysql` or `sqlite` |
 | `templating` | string | auto | `jinja` masks dbt / Jinja templates in query files, `none` turns that off. When unset, `jinja` is used if a `dbt_project.yml` is in the current directory, next to `sqlsift.toml` or in a directory above the query file. See [dbt and Jinja templates](../guide/queries.md#dbt-and-jinja-templates) |
+| `dbt_catalog` | path | auto | dbt `catalog.json` (from `dbt docs generate`) with the columns of the models and sources that `{{ ref() }}` / `{{ source() }}` name (alpha); schema files are optional with one. When unset, `target/catalog.json` of the dbt project is used if it exists (unless `templating = "none"`). `--dbt-catalog` overrides it. See [Columns of models and sources](../guide/queries.md#columns-of-models-and-sources-from-dbts-catalog-alpha) |
 | `format` | string | `"human"` | `human`, `json`, `sarif` or `github` |
 | `max_warnings` | integer | none | Fail when more than this many warnings are reported |
 | `baseline` | path | none | Baseline file of known diagnostics, hidden by `sqlsift check` and the language server; `--baseline` overrides it. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline) |
