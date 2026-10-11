@@ -227,6 +227,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - ✅ Rule levels per rule and per category (`[rules]`, `[categories]`, `-A`/`-W`/`-D`, inline `-- sqlsift:disable` and file-wide `-- sqlsift:disable-file`), `sqlsift rules` lists the registry
 - ✅ Ignoring query files (`ignore` in sqlsift.toml, `--ignore`; `sqlsift_core::ignore`), honored by the CLI and LSP
 - ✅ Baseline of known diagnostics (`sqlsift check --write-baseline`, `--baseline`, `baseline` in sqlsift.toml; `sqlsift_core::baseline`), honored by the CLI and LSP
+- ✅ `sqlsift describe`: output columns and types of each query as JSON or a listing (`Analyzer::describe`, `analyzer/describe.rs`, `sqlsift-cli/src/output/describe.rs`), with parameter types (`analyzer/parameters.rs`) and NULL-ability (`analyzer/nullability.rs`, only inferred when describing); unknown names and types are null, `nullable: false` only when certain
 - ✅ Multiple output formats (human, JSON, SARIF, GitHub Actions workflow commands)
 - ✅ Type inference for expressions (WHERE, JOIN, INSERT VALUES, UPDATE SET, binary operators, nested expressions)
   - Detects type mismatches in comparisons (E0003)
