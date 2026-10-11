@@ -7,9 +7,10 @@
 
 use sqlparser::ast::{
     Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem, Expr,
-    GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator, NamedWindowDefinition,
-    NamedWindowExpr, OnConflictAction, OnInsert, Query, Select, SelectItem, SetExpr, Statement,
-    Subscript, TableFactor, TableWithJoins, Values, WildcardAdditionalOptions,
+    FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert, JoinConstraint,
+    JoinOperator, NamedWindowDefinition, NamedWindowExpr, ObjectName, OnConflictAction, OnInsert,
+    Query, RenameSelectItem, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
+    TableWithJoins, Values, WildcardAdditionalOptions,
 };
 use std::collections::HashMap;
 
@@ -19,6 +20,7 @@ use crate::schema::{
     split_dotted_idents, Catalog, ColumnDef, FormerColumn, QualifiedName, TableDef,
 };
 use crate::suggest::{find_most_similar, find_similar_name};
+use crate::types::SqlType;
 
 use super::scope::{
     lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
@@ -699,22 +701,27 @@ impl<'a> Resolver<'a> {
         // Output column aliases. Snowflake, Redshift and Databricks also resolve
         // them in WHERE and in later items of the SELECT list (lateral column
         // aliases); an alias is only used for a name no table in scope has.
+        // Only explicit aliases of earlier items are lateral aliases: `SELECT nope`
+        // must not resolve `nope` as its own alias.
         let mut aliases = projection_aliases(&select.projection);
         let lateral = self.dialect.lateral_column_aliases();
-        if lateral {
-            self.scope.current().select_aliases = std::mem::take(&mut aliases);
-        }
 
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
             self.select_item(item, &select_span);
+            if let (true, SelectItem::ExprWithAlias { alias, .. }) = (lateral, item) {
+                self.scope
+                    .current()
+                    .select_aliases
+                    .push(alias.value.clone());
+            }
         }
 
         if let Some(selection) = &select.selection {
             self.expr(selection);
         }
         if lateral {
-            aliases = std::mem::take(&mut self.scope.current().select_aliases);
+            self.scope.current().select_aliases.clear();
         }
 
         // GROUP BY can reference output column aliases, like ORDER BY
@@ -778,7 +785,7 @@ impl<'a> Resolver<'a> {
                     for relation in frame.relations.values() {
                         star.extend(relation.star_columns()?.cloned());
                     }
-                    columns.extend(self.wildcard_columns(star, options));
+                    columns.extend(self.apply_wildcard_options(star, options)?);
                 }
                 SelectItem::QualifiedWildcard(name, options) => {
                     let parts = split_dotted_idents(&name.0);
@@ -787,67 +794,86 @@ impl<'a> Resolver<'a> {
                     };
                     let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
                     let relation = frame.qualified_relation(self.catalog, schema, table)?;
-                    columns.extend(self.wildcard_columns(relation.columns.clone()?, options));
+                    columns
+                        .extend(self.apply_wildcard_options(relation.columns.clone()?, options)?);
                 }
             }
         }
         Some(columns)
     }
 
-    /// Columns of `*` after `EXCEPT (...)` / `EXCLUDE (...)` drop columns and
-    /// `REPLACE (expr AS col)` replaces them
-    fn wildcard_columns(
+    /// Columns of `SELECT *` after its `EXCLUDE` / `EXCEPT`, `RENAME` and `REPLACE`
+    /// options, or `None` if they can't be determined (`ILIKE`)
+    fn apply_wildcard_options(
         &self,
         mut columns: Vec<Column>,
         options: &WildcardAdditionalOptions,
-    ) -> Vec<Column> {
-        let dropped = wildcard_dropped_columns(options);
+    ) -> Option<Vec<Column>> {
+        if options.opt_ilike.is_some() {
+            return None;
+        }
+        let excluded = wildcard_excluded(options);
         columns.retain(|c| {
-            !dropped
+            !excluded
                 .iter()
-                .any(|d| d.value.eq_ignore_ascii_case(&c.name))
+                .any(|e| e.value.eq_ignore_ascii_case(&c.name))
         });
-        for item in options.opt_replace.iter().flat_map(|r| &r.items) {
+        if let Some(replace) = &options.opt_replace {
+            for element in &replace.items {
+                let name = &element.column_name.value;
+                if let Some(col) = columns
+                    .iter_mut()
+                    .find(|c| c.name.eq_ignore_ascii_case(name))
+                {
+                    col.ty = self.infer_expr_type(&element.expr);
+                }
+            }
+        }
+        for rename in wildcard_renamed(options) {
             if let Some(col) = columns
                 .iter_mut()
-                .find(|c| c.name.eq_ignore_ascii_case(&item.column_name.value))
+                .find(|c| c.name.eq_ignore_ascii_case(&rename.ident.value))
             {
-                col.ty = self.infer_expr_type(&item.expr);
+                col.name.clone_from(&rename.alias.value);
             }
         }
-        columns
+        Some(columns)
     }
 
-    /// Resolve the `EXCEPT (...)` columns and `REPLACE (...)` expressions of `*`
-    /// (or of `qualifier.*`): an EXCEPT column must be a column of the wildcard
-    fn wildcard_options(&mut self, options: &WildcardAdditionalOptions, qualifier: Option<&str>) {
-        for col in options
-            .opt_except
-            .iter()
-            .flat_map(|e| std::iter::once(&e.first_element).chain(&e.additional_elements))
-        {
-            let Some(frame) = self.scope.current_ref() else {
-                return;
-            };
-            let mut relations = frame
-                .relations
-                .iter()
-                .filter(|(k, _)| qualifier.map_or(true, |q| k.eq_ignore_ascii_case(q)));
-            let missing = relations.clone().next().is_some()
-                && relations
-                    .all(|(_, r)| matches!(r.column(&col.value, self.dialect), ColumnMatch::No));
-            if missing {
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        DiagnosticKind::ColumnNotFound,
-                        format!("Column '{}' in SELECT * EXCEPT not found", col.value),
-                    )
-                    .with_span(Span::from_sqlparser(&col.span)),
-                );
+    /// Resolve the column names and expressions in the options of `SELECT *` /
+    /// `t.*` (`EXCLUDE (a)`, `RENAME (a AS b)`, `REPLACE (expr AS a)`)
+    fn wildcard_options(
+        &mut self,
+        qualifier: Option<(Option<&Ident>, &Ident)>,
+        options: &WildcardAdditionalOptions,
+    ) {
+        if let Some(replace) = &options.opt_replace {
+            for element in &replace.items {
+                self.expr(&element.expr);
             }
         }
-        for item in options.opt_replace.iter().flat_map(|r| &r.items) {
-            self.expr(&item.expr);
+        let names = wildcard_excluded(options)
+            .into_iter()
+            .chain(wildcard_renamed(options).into_iter().map(|r| &r.ident))
+            .chain(
+                options
+                    .opt_replace
+                    .iter()
+                    .flat_map(|r| r.items.iter().map(|e| &e.column_name)),
+            );
+        for name in names {
+            match qualifier {
+                Some(qualifier) => self.column(Some(qualifier), name),
+                // Only a name no relation has: `EXCLUDE (id)` over a join is fine
+                None => {
+                    if matches!(
+                        self.scope.column(&name.value, self.dialect),
+                        ColumnLookup::NotFound
+                    ) {
+                        self.column(None, name);
+                    }
+                }
+            }
         }
     }
 
@@ -955,15 +981,30 @@ impl<'a> Resolver<'a> {
 
                 // Table-valued function call (e.g., generate_series(...)): columns are
                 // known only from an alias column list
-                if args.is_some() {
-                    // Without an alias, the function name names the relation
-                    if let Some(key) = alias_name.or_else(|| name.0.last().map(|i| i.value.clone()))
+                if let Some(table_args) = args {
+                    let mut relation = None;
+                    let mut columns = None;
+                    if self.dialect == SqlDialect::Snowflake {
+                        relation = self.identifier_relation(name, &table_args.args);
+                        if relation.is_none() {
+                            columns = self.snowflake_table_function(factor);
+                        }
+                    }
+                    // Without an alias, the table (`IDENTIFIER('t')`) or else the
+                    // function name names the relation
+                    let table_key = relation
+                        .as_ref()
+                        .and_then(|r| r.name.rsplit('.').next().map(str::to_string));
+                    if let Some(key) = alias_name
+                        .or(table_key)
+                        .or_else(|| name.0.last().map(|i| i.value.clone()))
                     {
-                        let columns = Relation::rename_columns(None, &alias_columns);
-                        self.scope.current().relations.insert(
-                            key.clone(),
-                            Relation::new(RelationKind::Function, key, columns),
-                        );
+                        let mut relation = relation.unwrap_or_else(|| {
+                            Relation::new(RelationKind::Function, key.clone(), columns)
+                        });
+                        relation.columns =
+                            Relation::rename_columns(relation.columns, &alias_columns);
+                        self.scope.current().relations.insert(key, relation);
                     }
                     return;
                 }
@@ -1046,7 +1087,12 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 // Table-valued functions (e.g., generate_series, unnest): columns are
-                // known only from an alias column list
+                // known only from an alias column list (or Snowflake's FLATTEN)
+                let columns = if self.dialect == SqlDialect::Snowflake {
+                    self.snowflake_table_function(factor)
+                } else {
+                    None
+                };
                 let (key, names) = match alias {
                     Some(a) => (
                         a.name.value.clone(),
@@ -1054,7 +1100,7 @@ impl<'a> Resolver<'a> {
                     ),
                     None => (format!("{factor}"), Vec::new()),
                 };
-                let columns = Relation::rename_columns(None, &names);
+                let columns = Relation::rename_columns(columns, &names);
                 self.scope.current().relations.insert(
                     key.clone(),
                     Relation::new(RelationKind::Function, key, columns),
@@ -1103,17 +1149,18 @@ impl<'a> Resolver<'a> {
                 let parts = split_dotted_idents(&name.0);
                 if let [.., table] = parts.as_ref() {
                     let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
-                    self.wildcard_options(options, Some(&table.value));
                     let in_scope = self.scope.current_ref().is_some_and(|f| {
                         f.qualified_relation(self.catalog, schema, table).is_some()
                     });
-                    if !in_scope {
+                    if in_scope {
+                        self.wildcard_options(Some((schema, table)), options);
+                    } else {
                         self.diagnostics.push(relation_not_in_from(schema, table));
                     }
                 }
             }
             SelectItem::Wildcard(options) => {
-                self.wildcard_options(options, None);
+                self.wildcard_options(None, options);
                 // * - valid if we have at least one table
                 if self
                     .scope
@@ -1189,7 +1236,17 @@ impl<'a> Resolver<'a> {
             | Expr::Ceil { expr, .. }
             | Expr::Floor { expr, .. } => self.expr(expr),
             Expr::Function(func) => {
-                self.function_args(&func.args);
+                match (&func.args, self.date_part_arg(func)) {
+                    // Snowflake date part keyword (`DATEADD(day, 1, d)`): not a column
+                    (FunctionArguments::List(list), Some(index)) => {
+                        for (i, arg) in list.args.iter().enumerate() {
+                            if i != index {
+                                self.function_arg(arg);
+                            }
+                        }
+                    }
+                    (args, _) => self.function_args(args),
+                }
                 // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
                 if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
                     for clause in &list.clauses {
@@ -1385,24 +1442,119 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve function arguments (handles Named, ExprNamed, and Unnamed variants)
-    fn function_args(&mut self, args: &sqlparser::ast::FunctionArguments) {
-        use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+    fn function_args(&mut self, args: &FunctionArguments) {
         if let FunctionArguments::List(arg_list) = args {
             for arg in &arg_list.args {
-                match arg {
-                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
-                    | FunctionArg::Named {
-                        arg: FunctionArgExpr::Expr(e),
-                        ..
-                    }
-                    | FunctionArg::ExprNamed {
-                        arg: FunctionArgExpr::Expr(e),
-                        ..
-                    } => self.expr(e),
-                    _ => {}
-                }
+                self.function_arg(arg);
             }
         }
+    }
+
+    /// Resolve one function argument
+    fn function_arg(&mut self, arg: &FunctionArg) {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e))
+            | FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(e),
+                ..
+            }
+            | FunctionArg::ExprNamed {
+                arg: FunctionArgExpr::Expr(e),
+                ..
+            } => self.expr(e),
+            _ => {}
+        }
+    }
+
+    /// Position of a Snowflake date part keyword argument (`DATEADD(day, ...)`,
+    /// `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`), which the parser represents
+    /// as a column reference
+    fn date_part_arg(&self, func: &sqlparser::ast::Function) -> Option<usize> {
+        if self.dialect != SqlDialect::Snowflake {
+            return None;
+        }
+        let name = func.name.0.last()?.value.to_ascii_uppercase();
+        let index = match name.as_str() {
+            "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
+            | "DATE_TRUNC" | "DATE_PART" => 0,
+            "LAST_DAY" => 1,
+            "TIME_SLICE" => 2,
+            _ => return None,
+        };
+        let FunctionArguments::List(list) = &func.args else {
+            return None;
+        };
+        match list.args.get(index)? {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))
+                if ident.quote_style.is_none() && is_snowflake_date_part(&ident.value) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// Snowflake table function in FROM (`LATERAL FLATTEN(input => ...)`,
+    /// `TABLE(GENERATOR(...))`, `TABLE(SPLIT_TO_TABLE(...))`, ...): resolve its
+    /// arguments, which can reference earlier FROM items, and return its columns
+    /// if they are known (FLATTEN's)
+    fn snowflake_table_function(&mut self, factor: &TableFactor) -> Option<Vec<Column>> {
+        let (name, args): (&ObjectName, &[FunctionArg]) = match factor {
+            TableFactor::Table {
+                name,
+                args: Some(args),
+                ..
+            } => (name, &args.args),
+            TableFactor::Function { name, args, .. } => (name, args),
+            TableFactor::TableFunction {
+                expr: Expr::Function(func),
+                ..
+            } => match &func.args {
+                FunctionArguments::List(list) => (&func.name, &list.args),
+                _ => return None,
+            },
+            TableFactor::TableFunction { expr, .. } => {
+                self.expr(expr);
+                return None;
+            }
+            _ => return None,
+        };
+        for arg in args {
+            self.function_arg(arg);
+        }
+        let is_flatten = name
+            .0
+            .last()
+            .is_some_and(|f| f.value.eq_ignore_ascii_case("FLATTEN"));
+        is_flatten.then(flatten_columns)
+    }
+
+    /// `IDENTIFIER('name')` in FROM (Snowflake): the table or view it names, if it is
+    /// in the catalog
+    fn identifier_relation(&self, name: &ObjectName, args: &[FunctionArg]) -> Option<Relation> {
+        let is_identifier = name.0.len() == 1 && name.0[0].value.eq_ignore_ascii_case("IDENTIFIER");
+        let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+            sqlparser::ast::Value::SingleQuotedString(literal),
+        )))] = args
+        else {
+            return None;
+        };
+        if !is_identifier {
+            return None;
+        }
+        let parts: Vec<Ident> = literal
+            .split('.')
+            .map(|part| {
+                let part = part.trim();
+                match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+                    Some(quoted) => Ident::with_quote('"', quoted),
+                    None => Ident::new(part),
+                }
+            })
+            .collect();
+        let table_name = self.catalog.qualified_name(&ObjectName(parts));
+        Relation::table(self.catalog, &table_name)
+            .or_else(|| Relation::view(self.catalog, &table_name))
     }
 
     /// Resolve a column reference, qualified by `[schema.]table` or not
@@ -1710,21 +1862,6 @@ fn is_logical_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
     matches!(op, And | Or)
 }
 
-/// Columns a wildcard leaves out (`* EXCEPT (...)`, `* EXCLUDE (...)`)
-fn wildcard_dropped_columns(options: &WildcardAdditionalOptions) -> Vec<&Ident> {
-    let mut dropped: Vec<&Ident> = Vec::new();
-    if let Some(except) = &options.opt_except {
-        dropped.push(&except.first_element);
-        dropped.extend(&except.additional_elements);
-    }
-    match &options.opt_exclude {
-        Some(ExcludeSelectItem::Single(col)) => dropped.push(col),
-        Some(ExcludeSelectItem::Multiple(cols)) => dropped.extend(cols),
-        None => {}
-    }
-    dropped
-}
-
 /// Scope key (alias or table name) a FROM relation is registered under
 fn relation_key(factor: &TableFactor) -> Option<String> {
     match factor {
@@ -1817,6 +1954,144 @@ fn is_date_part_keyword(name: &str) -> bool {
             | "DAY_MINUTE"
             | "DAY_HOUR"
             | "YEAR_MONTH"
+    )
+}
+
+/// Columns removed by `SELECT * EXCLUDE (...)` (Snowflake) / `EXCEPT (...)` (BigQuery)
+fn wildcard_excluded(options: &WildcardAdditionalOptions) -> Vec<&Ident> {
+    let mut names: Vec<&Ident> = match &options.opt_exclude {
+        Some(ExcludeSelectItem::Single(ident)) => vec![ident],
+        Some(ExcludeSelectItem::Multiple(idents)) => idents.iter().collect(),
+        None => Vec::new(),
+    };
+    if let Some(except) = &options.opt_except {
+        names.push(&except.first_element);
+        names.extend(&except.additional_elements);
+    }
+    names
+}
+
+/// Columns renamed by `SELECT * RENAME (a AS b, ...)` (Snowflake)
+fn wildcard_renamed(options: &WildcardAdditionalOptions) -> Vec<&sqlparser::ast::IdentWithAlias> {
+    match &options.opt_rename {
+        Some(RenameSelectItem::Single(rename)) => vec![rename],
+        Some(RenameSelectItem::Multiple(renames)) => renames.iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Output columns of Snowflake's FLATTEN table function
+fn flatten_columns() -> Vec<Column> {
+    let number = || ExpressionType::Known(SqlType::BigInt);
+    let text = || ExpressionType::Known(SqlType::Text);
+    vec![
+        Column::new("SEQ", number()),
+        Column::new("KEY", text()),
+        Column::new("PATH", text()),
+        Column::new("INDEX", number()),
+        Column::new("VALUE", ExpressionType::Unknown),
+        Column::new("THIS", ExpressionType::Unknown),
+    ]
+}
+
+/// Snowflake date and time parts and their abbreviations, as accepted by DATEADD,
+/// DATEDIFF, DATE_TRUNC, DATE_PART, LAST_DAY, ...
+fn is_snowflake_date_part(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "year"
+            | "y"
+            | "yy"
+            | "yyy"
+            | "yyyy"
+            | "yr"
+            | "years"
+            | "yrs"
+            | "month"
+            | "mm"
+            | "mon"
+            | "mons"
+            | "months"
+            | "day"
+            | "d"
+            | "dd"
+            | "days"
+            | "dayofmonth"
+            | "dayofweek"
+            | "weekday"
+            | "dow"
+            | "dw"
+            | "dayofweekiso"
+            | "weekday_iso"
+            | "dow_iso"
+            | "dw_iso"
+            | "dayofyear"
+            | "yearday"
+            | "doy"
+            | "dy"
+            | "week"
+            | "w"
+            | "wk"
+            | "weekofyear"
+            | "woy"
+            | "wy"
+            | "weekiso"
+            | "week_iso"
+            | "weekofyeariso"
+            | "weekofyear_iso"
+            | "yearofweek"
+            | "yearofweekiso"
+            | "quarter"
+            | "q"
+            | "qtr"
+            | "qtrs"
+            | "quarters"
+            | "hour"
+            | "h"
+            | "hh"
+            | "hr"
+            | "hours"
+            | "hrs"
+            | "minute"
+            | "m"
+            | "mi"
+            | "min"
+            | "minutes"
+            | "mins"
+            | "second"
+            | "s"
+            | "sec"
+            | "seconds"
+            | "secs"
+            | "millisecond"
+            | "ms"
+            | "msec"
+            | "milliseconds"
+            | "microsecond"
+            | "us"
+            | "usec"
+            | "microseconds"
+            | "nanosecond"
+            | "ns"
+            | "nsec"
+            | "nanosec"
+            | "nsecond"
+            | "nanoseconds"
+            | "nanosecs"
+            | "nseconds"
+            | "epoch_second"
+            | "epoch"
+            | "epoch_seconds"
+            | "epoch_millisecond"
+            | "epoch_milliseconds"
+            | "epoch_microsecond"
+            | "epoch_microseconds"
+            | "epoch_nanosecond"
+            | "epoch_nanoseconds"
+            | "timezone_hour"
+            | "tzh"
+            | "timezone_minute"
+            | "tzm"
     )
 }
 

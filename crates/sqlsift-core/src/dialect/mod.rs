@@ -82,6 +82,14 @@ impl SqlDialect {
         matches!(self, SqlDialect::MySQL | SqlDialect::SQLite)
     }
 
+    /// Whether character strings are implicitly coerced to numbers, dates,
+    /// timestamps and booleans (and numbers to booleans) when compared, assigned or
+    /// used in arithmetic: Snowflake converts the value at run time, so only a
+    /// string literal that can't be converted is a definite error
+    pub fn coerces_strings(self) -> bool {
+        matches!(self, SqlDialect::Snowflake)
+    }
+
     /// Whether inserting NULL into a single-column integer primary key generates
     /// a key (MySQL AUTO_INCREMENT, SQLite rowid alias)
     pub fn null_generates_integer_key(self) -> bool {

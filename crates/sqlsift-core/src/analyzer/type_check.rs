@@ -108,6 +108,10 @@ impl Resolver<'_> {
                     // MySQL BOOLEAN is TINYINT(1); SQLite stores booleans as integers
                     return None;
                 }
+                if self.dialect.coerces_strings() && is_coercible_pair(lt, rt) {
+                    // Snowflake converts strings (and numbers to booleans) at run time
+                    return None;
+                }
                 let compatible = lt.is_compatible_with(rt) != TypeCompatibility::ExplicitCast
                     || rt.is_compatible_with(lt) != TypeCompatibility::ExplicitCast;
                 (!compatible).then(|| {
@@ -270,8 +274,10 @@ impl Resolver<'_> {
         }
         // An interval or date/time operand with a numeric one is fine only in the
         // combinations allowed above; otherwise report each non-numeric side
+        // (Snowflake converts a string operand to a number at run time)
         for (ty, expr) in [(lt, left), (rt, right)] {
-            if !ty.is_numeric() {
+            let numeric = ty.is_numeric() || (self.dialect.coerces_strings() && ty.is_string());
+            if !numeric {
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticKind::TypeMismatch,
@@ -491,10 +497,9 @@ impl Resolver<'_> {
             }
             Expr::Nested(inner) => self.infer_expr_type(inner),
             Expr::BinaryOp { .. } => self.infer_binary_chain_type(expr),
-            Expr::Cast { data_type, .. } => match SqlType::from_ast(data_type) {
-                SqlType::Unknown => ExpressionType::Unknown,
-                sql_type => ExpressionType::Known(sql_type),
-            },
+            Expr::Cast { data_type, .. } => {
+                ExpressionType::of_column(&SqlType::from_ast(data_type))
+            }
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
             Expr::Case {
@@ -506,10 +511,9 @@ impl Resolver<'_> {
                 self.infer_case_type(&branches)
             }
             // Typed literals such as DATE '2024-01-01'
-            Expr::TypedString { data_type, .. } => match SqlType::from_ast(data_type) {
-                SqlType::Unknown => ExpressionType::Unknown,
-                sql_type => ExpressionType::Known(sql_type),
-            },
+            Expr::TypedString { data_type, .. } => {
+                ExpressionType::of_column(&SqlType::from_ast(data_type))
+            }
             // Scalar subquery: the type of its single column
             Expr::Subquery(query) => match self
                 .subquery_columns
@@ -590,6 +594,12 @@ impl Resolver<'_> {
             }
         }
 
+        if self.dialect == SqlDialect::Snowflake {
+            if let Some(ty) = self.snowflake_function_type(name, func) {
+                return ty;
+            }
+        }
+
         match name {
             // Aggregate functions returning INTEGER/BIGINT
             "COUNT" => ExpressionType::Known(SqlType::BigInt),
@@ -652,6 +662,120 @@ impl Resolver<'_> {
         }
     }
 
+    /// Return type of a Snowflake function, or `None` to use the generic rules.
+    /// Functions returning semi-structured values (PARSE_JSON, OBJECT_CONSTRUCT,
+    /// ARRAY_AGG, GET, ...) are left unknown.
+    fn snowflake_function_type(
+        &self,
+        name: &str,
+        func: &sqlparser::ast::Function,
+    ) -> Option<ExpressionType> {
+        let args = unnamed_args(func);
+        let known = |t: SqlType| Some(ExpressionType::Known(t));
+        let timestamp = |with_timezone| SqlType::Timestamp {
+            precision: None,
+            with_timezone,
+        };
+        let decimal = SqlType::Decimal {
+            precision: None,
+            scale: None,
+        };
+        // The type of a date/time argument (DATEADD on a DATE is a DATE, ...)
+        let temporal_arg = |i: usize| match args.get(i).map(|e| self.infer_expr_type(e)) {
+            Some(ExpressionType::Known(
+                t @ (SqlType::Date | SqlType::Time { .. } | SqlType::Timestamp { .. }),
+            )) => ExpressionType::Known(t),
+            _ => ExpressionType::Unknown,
+        };
+        let numeric_arg = |i: usize| match args.get(i).map(|e| self.infer_expr_type(e)) {
+            Some(ExpressionType::Known(t)) if t.is_numeric() => ExpressionType::Known(t),
+            _ => ExpressionType::Unknown,
+        };
+        let branches = |indices: &mut dyn Iterator<Item = usize>| {
+            let exprs: Vec<&Expr> = indices.filter_map(|i| args.get(i).copied()).collect();
+            self.infer_case_type(&exprs)
+        };
+        match name {
+            // Conditional expressions: the type of their result branches
+            "IFF" => Some(branches(&mut (1..=2))),
+            "NVL2" => Some(branches(&mut (1..=2))),
+            "NVL" | "ANY_VALUE" => Some(self.infer_first_arg_type(func)),
+            // DECODE(expr, search1, result1, ..., default)
+            "DECODE" => {
+                let results = (2..args.len()).step_by(2);
+                let default = (args.len() > 1 && args.len() % 2 == 0).then(|| args.len() - 1);
+                Some(branches(&mut results.chain(default)))
+            }
+            "ZEROIFNULL" | "NULLIFZERO" => Some(numeric_arg(0)),
+            "DIV0" | "DIV0NULL" | "MEDIAN" => known(decimal),
+
+            // Conversion functions (TRY_CAST and `::` are casts)
+            "TO_NUMBER" | "TO_DECIMAL" | "TO_NUMERIC" | "TRY_TO_NUMBER" | "TRY_TO_DECIMAL"
+            | "TRY_TO_NUMERIC" => known(decimal),
+            "TO_DOUBLE" | "TRY_TO_DOUBLE" => known(SqlType::DoublePrecision),
+            "TO_BOOLEAN" | "TRY_TO_BOOLEAN" => known(SqlType::Boolean),
+            "TO_DATE" | "TRY_TO_DATE" | "DATE" | "DATE_FROM_PARTS" | "LAST_DAY" | "NEXT_DAY"
+            | "PREVIOUS_DAY" => known(SqlType::Date),
+            "TO_TIME" | "TRY_TO_TIME" | "TIME" | "TIME_FROM_PARTS" => known(SqlType::Time {
+                precision: None,
+                with_timezone: false,
+            }),
+            "TO_TIMESTAMP"
+            | "TO_TIMESTAMP_NTZ"
+            | "TRY_TO_TIMESTAMP"
+            | "TRY_TO_TIMESTAMP_NTZ"
+            | "TIMESTAMP_FROM_PARTS"
+            | "TIMESTAMP_NTZ_FROM_PARTS"
+            | "SYSDATE"
+            | "LOCALTIMESTAMP" => known(timestamp(false)),
+            "TO_TIMESTAMP_LTZ"
+            | "TO_TIMESTAMP_TZ"
+            | "TRY_TO_TIMESTAMP_LTZ"
+            | "TRY_TO_TIMESTAMP_TZ"
+            | "TIMESTAMP_LTZ_FROM_PARTS"
+            | "TIMESTAMP_TZ_FROM_PARTS"
+            | "CONVERT_TIMEZONE"
+            | "GETDATE" => known(timestamp(true)),
+            "TO_VARCHAR" | "TO_CHAR" | "TO_JSON" | "TYPEOF" => known(SqlType::Text),
+
+            // Date/time arithmetic: DATEADD(part, n, date) keeps the date's type,
+            // DATE_TRUNC(part, date) too
+            "DATEADD" | "TIMEADD" | "TIMESTAMPADD" => Some(temporal_arg(2)),
+            "DATE_TRUNC" => Some(temporal_arg(1)),
+            "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF" => known(SqlType::BigInt),
+            "DATE_PART" | "YEAR" | "MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK"
+            | "DAYOFWEEKISO" | "DAYOFYEAR" | "WEEK" | "WEEKOFYEAR" | "WEEKISO" | "YEAROFWEEK"
+            | "YEAROFWEEKISO" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => known(SqlType::Integer),
+
+            // Strings
+            "LISTAGG" | "SPLIT_PART" | "STRTOK" | "REGEXP_SUBSTR" | "REGEXP_REPLACE"
+            | "CONCAT_WS" | "ARRAY_TO_STRING" | "UUID_STRING" | "MD5_HEX" | "SHA1" | "SHA1_HEX"
+            | "SHA2" | "SHA2_HEX" | "BASE64_ENCODE" | "HEX_ENCODE" | "CHR" | "TRANSLATE"
+            | "SOUNDEX" => known(SqlType::Text),
+            "LEN" | "CHARINDEX" | "REGEXP_COUNT" | "REGEXP_INSTR" | "EDITDISTANCE"
+            | "ARRAY_SIZE" | "ASCII" => known(SqlType::Integer),
+            "REGEXP_LIKE" | "RLIKE" | "CONTAINS" | "STARTSWITH" | "ENDSWITH" | "EQUAL_NULL"
+            | "IS_NULL_VALUE" | "ARRAY_CONTAINS" | "BOOLAND" | "BOOLOR" | "BOOLXOR" => {
+                known(SqlType::Boolean)
+            }
+
+            // Aggregates and sequences
+            "HASH"
+            | "COUNT_IF"
+            | "APPROX_COUNT_DISTINCT"
+            | "HLL"
+            | "SEQ1"
+            | "SEQ2"
+            | "SEQ4"
+            | "SEQ8"
+            | "ROW_NUMBER"
+            | "RANK"
+            | "DENSE_RANK" => known(SqlType::BigInt),
+            "BOOLAND_AGG" | "BOOLOR_AGG" | "BOOLXOR_AGG" => known(SqlType::Boolean),
+            _ => None,
+        }
+    }
+
     /// Infer the type of the first argument to a function
     fn infer_first_arg_type(&self, func: &sqlparser::ast::Function) -> ExpressionType {
         if let FunctionArguments::List(arg_list) = &func.args {
@@ -678,6 +802,20 @@ impl Resolver<'_> {
         }
         ty
     }
+}
+
+/// A function's positional (unnamed) argument expressions
+fn unnamed_args(func: &sqlparser::ast::Function) -> Vec<&Expr> {
+    let FunctionArguments::List(list) = &func.args else {
+        return Vec::new();
+    };
+    list.args
+        .iter()
+        .filter_map(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Result type of a binary operation on operands of the given types
@@ -773,6 +911,24 @@ fn arithmetic_op(op: &BinaryOperator) -> Option<ArithmeticOp> {
     }
 }
 
+/// Whether Snowflake implicitly converts between the two types: a string and a
+/// number, date/time or boolean, or a number and a boolean
+fn is_coercible_pair(a: &SqlType, b: &SqlType) -> bool {
+    let scalar = |t: &SqlType| {
+        t.is_numeric()
+            || *t == SqlType::Boolean
+            || matches!(
+                t,
+                SqlType::Date | SqlType::Time { .. } | SqlType::Timestamp { .. }
+            )
+    };
+    let numeric_boolean = |x: &SqlType, y: &SqlType| x.is_numeric() && *y == SqlType::Boolean;
+    (a.is_string() && scalar(b))
+        || (b.is_string() && scalar(a))
+        || numeric_boolean(a, b)
+        || numeric_boolean(b, a)
+}
+
 /// Whether one side is BOOLEAN and the other an integer type
 fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
     (*a == SqlType::Boolean && b.is_integer()) || (*b == SqlType::Boolean && a.is_integer())
@@ -781,7 +937,6 @@ fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dialect::SqlDialect;
     use crate::schema::SchemaBuilder;
 
     /// Resolve and type check one statement
