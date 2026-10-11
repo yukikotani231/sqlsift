@@ -36,10 +36,10 @@
     <article>
       <h1>Introducing sqlsift: schema-aware static analysis for SQL, no database needed</h1>
       <p class="meta">October 2026 · Yuki Kotani</p>
-<p>SQL is usually the one part of a codebase nothing checks before it
-runs. The compiler checks the code around a query, tests check the paths
-someone thought of, and the database checks the query itself: in
-production, if that's the first place it runs.</p>
+<p>Nothing checks the SQL in most codebases before it runs. The compiler
+sees a string, the tests cover the queries someone thought to test, and
+the rest gets checked by the database, sometimes for the first time in
+production.</p>
 <p><a href="https://github.com/yukikotani231/sqlsift">sqlsift</a> moves
 that last check earlier. It replays your migrations into an in-memory
 schema and checks every query against it, without a database. Think of
@@ -47,8 +47,8 @@ it as a type checker for your SQL.</p>
 <p><img
 src="demo.gif"
 alt="sqlsift init and check on a project whose migration renamed a column" /></p>
-<h2 id="the-bug-that-started-this">The bug that started this</h2>
-<p>Here is a pattern I keep seeing. A migration renames a column:</p>
+<h2 id="an-example">An example</h2>
+<p>Say a migration renames a column:</p>
 <pre class="sql"><code>ALTER TABLE page_views RENAME COLUMN site_id TO website_id;</code></pre>
 <p>Later, someone adds a cleanup job that still uses the old name:</p>
 <pre class="ts"><code>await sql`
@@ -59,10 +59,9 @@ alt="sqlsift init and check on a project whose migration renamed a column" /></p
 is a string. This exact shape happened in a real open-source app: the
 cleanup job kept failing until the maintainers spotted it and <a
 href="https://github.com/Seentics/seentics/commit/d2f0d97">fixed it</a>.
-It isn't carelessness. The rename and the new job came from two separate
-changes a couple of hours apart, and nothing in the toolchain could
-connect them.</p>
-<p>sqlsift reports it the moment it's written:</p>
+The rename and the new job came from two separate changes a couple of
+hours apart, and nothing in the toolchain could connect them.</p>
+<p>sqlsift catches it before it ships:</p>
 <pre class="console"><code>$ npx sqlsift-cli check
 error[E0002]: Column &#39;site_id&#39; not found in table &#39;page_views&#39;
   --&gt; src/retention.ts:6:11
@@ -89,9 +88,10 @@ join</li>
 <code>INSERT</code> without a column list, <code>SELECT *</code></li>
 </ul>
 <p>Each rule can be set to off, warn or error.</p>
-<h2 id="no-false-positives">No false positives</h2>
-<p>A linter that cries wolf gets turned off. sqlsift's rule is: if it
-can't work something out, it says nothing.</p>
+<h2 id="when-it-isnt-sure-it-stays-quiet">When it isn't sure, it stays
+quiet</h2>
+<p>If sqlsift can't work out a type or a name, it reports nothing rather
+than guess.</p>
 <p>To check that, I ran it the way a user would on 16 open-source apps
 using sqlc, Prisma TypedSQL, postgres.js, MySQL and Supabase (687
 files), and fixed it until it reported zero false positives. Along the
@@ -128,7 +128,7 @@ MySQL, plain migrations and dbt, all checked in CI. The <a
 href="https://sqlsift.dev/docs/">user guide</a> has the rest.</p>
 <h2 id="what-it-doesnt-do-yet">What it doesn't do yet</h2>
 <ul>
-<li>Function bodies (PL/pgSQL) aren't analysed.</li>
+<li>Function bodies (PL/pgSQL) aren't analyzed.</li>
 <li>SQL inside Rust, Go or Python code isn't read yet (<code>.sql</code>
 files are).</li>
 <li>Schemas written in Drizzle or Prisma schema files need exporting to
@@ -139,11 +139,11 @@ SQL first.</li>
 <p>sqlsift is written in Rust on top of <a
 href="https://github.com/apache/datafusion-sqlparser-rs">sqlparser-rs</a>.
 I build it with heavy use of Claude Code: I set the direction, decide
-the design and review what goes in, and the corpus of real projects is
-how I keep myself honest about false positives.</p>
+the design and review what goes in. Running it on real projects is how I
+check it isn't flagging valid SQL.</p>
 <p>If it gets your SQL wrong, please <a
 href="https://github.com/yukikotani231/sqlsift/issues">open an
-issue</a>. That is the most useful thing you can send.</p>
+issue</a>; a schema and the query that broke it is all I need.</p>
     </article>
   </main>
 </body>
