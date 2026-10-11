@@ -187,7 +187,7 @@ schema_dir = "migrations"         # <timestamp>_name.sql; *.down.sql halves are 
 files = ["queries/**/*.sql"]
 ```
 
-sqlx's type overrides in column aliases (`id AS "id!"`, `status AS "status: Status"`) are ordinary quoted aliases. SQL written inline in Rust (`query!("SELECT ...")`) is not checked. See the [sqlx example project](../integrations/examples.md).
+sqlx's type overrides in column aliases (`id AS "id!"`, `status AS "status: Status"`) are ordinary quoted aliases. SQL written inline in Rust is checked too; see [SQL in Rust (sqlx)](#sql-in-rust-sqlx) and the [sqlx example project](../integrations/examples.md).
 
 ## aiosql and HugSQL query files
 
@@ -280,6 +280,38 @@ Each checked template is one statement:
 ### Directives
 
 [Suppression comments](suppression.md) work as code comments (`// sqlsift:disable-file`, `/* sqlsift:disable E0002 */`) and as SQL comments inside a template. A `sqlsift:disable` comment on a line of its own applies to the next line of SQL (for a template starting on the next line, its first line of SQL); after a query, it applies to that line. A block comment followed by code on the same line is ignored. A `sqlsift:disable-file` comment applies to the whole file, also when it is written inside one of its templates.
+
+## SQL in Rust (sqlx)
+
+Rust files (`.rs`) are checked for the SQL passed to [sqlx](https://github.com/launchbadge/sqlx)'s query macros, the same SQL `cargo build` checks against a live database or the `.sqlx` cache, here against the migrations alone:
+
+```rust
+let posts = sqlx::query_as!(
+    Post,
+    r#"SELECT id, titel AS "title!" FROM posts WHERE author_id = $1"#,
+    author_id
+)
+.fetch_all(&pool)
+.await?;
+```
+
+```toml
+schema_dir = "migrations"
+files = ["src/**/*.rs"]
+```
+
+A string literal (plain, or raw: `r"..."`, `r#"..."#`) is checked when it is
+
+- the first argument of `query!`, `query_as!`, `query_scalar!` or their `_unchecked` variants, or the second after a type (`query_as!(Post, "...")`), written with or without the `sqlx::` path;
+- the first argument of the functions of the same names, when called through the `sqlx` crate: `sqlx::query("...")`, `sqlx::query_as::<_, Post>("...")`, `sqlx::query_scalar("...")`. These are checked by sqlx only when they run, so this is where sqlsift catches what the build doesn't. An unqualified `query("...")` is not checked, since any function may be named so.
+
+A string that doesn't start with a statement keyword (`SELECT`, `WITH`, `INSERT`, `UPDATE`, `DELETE`, ...) is skipped, so another crate's `query!` macro that takes something else is left alone.
+
+`embedded_sql_macros` in `sqlsift.toml` replaces the list of macro and function names, for example to add your own macros wrapping sqlx's. Parameters are sqlx's own (`$1` for PostgreSQL, `?` for MySQL and SQLite), and type overrides in column aliases (`AS "id!"`, `AS "status: Status"`) are ordinary quoted aliases. `query_file!` needs nothing here: add its `.sql` files to `files` (see [sqlx query files](#sqlx-query-files)).
+
+Diagnostics point at the query's line and column in the Rust file. Escapes in plain strings are read as Rust does (`\"name\"` is a quoted identifier). A glob pattern skips Rust files in `target` directories. SQL built at run time (`format!`, `QueryBuilder`) is not checked. [Suppression comments](suppression.md) work as Rust comments (`// sqlsift:disable E0002` on the line before a query, `// sqlsift:disable-file`), as in TypeScript.
+
+`--stdin-filename` with an `.rs` extension checks stdin the same way.
 
 ## Exit codes
 

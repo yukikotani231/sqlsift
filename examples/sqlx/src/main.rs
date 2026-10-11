@@ -1,6 +1,9 @@
 //! A todo service whose SQL lives in `queries/*.sql`, loaded at compile time
-//! with `sqlx::query_file!` / `sqlx::query_file_as!`. sqlsift checks those
-//! files against `migrations/` without a database (see the README).
+//! with `sqlx::query_file!` / `sqlx::query_file_as!`, and inline in
+//! `admin.rs`. sqlsift checks both against `migrations/` without a database
+//! (see the README).
+
+mod admin;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
@@ -101,5 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     complete_todo(&pool, id, user.id).await?;
     print_stats(&pool, user.id).await?;
+    for todo in admin::overdue(&pool).await? {
+        println!("overdue: {todo:?}");
+    }
     Ok(())
 }

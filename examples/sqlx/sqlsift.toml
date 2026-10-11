@@ -1,6 +1,7 @@
 # The migrations sqlx::migrate!() applies, in version order (the *.down.sql
-# halves of reversible migrations would be skipped), and the files
-# query_file! / query_file_as! read, one statement each.
+# halves of reversible migrations would be skipped), the files
+# query_file! / query_file_as! read, one statement each, and the Rust code
+# with inline query!(...) / sqlx::query(...) SQL.
 schema_dir = "migrations"
-files = ["queries/**/*.sql"]
+files = ["queries/**/*.sql", "src/**/*.rs"]
 dialect = "postgresql"

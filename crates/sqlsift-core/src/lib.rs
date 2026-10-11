@@ -21,6 +21,7 @@ mod psql;
 pub mod rules;
 pub mod schema;
 mod sqlc;
+pub mod sqlx;
 pub mod stack;
 mod suggest;
 pub mod templating;

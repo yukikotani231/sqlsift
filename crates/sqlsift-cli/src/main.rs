@@ -19,6 +19,7 @@ use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FI
 use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
+use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::{with_analysis_stack, ANALYSIS_STACK_SIZE};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
@@ -93,6 +94,8 @@ struct QueryOptions<'a> {
     rules: &'a RuleConfig,
     /// Template literal tags whose SQL is checked in TypeScript / JavaScript files
     embedded_sql_tags: &'a [String],
+    /// sqlx macros whose SQL is checked in Rust files
+    embedded_sql_macros: &'a [String],
     /// `--stdin-filename`, whose extension decides how stdin is analyzed
     stdin_filename: Option<&'a Path>,
     /// Record the references of the queries to catalog tables and columns
@@ -113,6 +116,8 @@ fn analyze_files(
             analyzer.analyze_embedded_component(content, options.embedded_sql_tags)
         } else if is_embedded_sql_file(name) {
             analyzer.analyze_embedded(content, options.embedded_sql_tags)
+        } else if is_rust_file(name) {
+            analyzer.analyze_rust(content, options.embedded_sql_macros)
         } else {
             analyzer.analyze(content)
         };
@@ -547,10 +552,10 @@ fn collect_query_files(
                 unmatched.push(format!("'{pattern}'"));
             }
             // Installed packages and build output that the pattern matches
-            // aren't checked for SQL in TypeScript / JavaScript
+            // aren't checked for SQL in TypeScript / JavaScript / Rust
             let base = glob_base(pattern);
             matches.retain(|path| {
-                !(is_embedded_sql_file(path)
+                !((is_embedded_sql_file(path) || is_rust_file(path))
                     && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
             });
             query_files.extend(matches);
@@ -770,12 +775,14 @@ fn run(args: Args) -> Result<bool> {
             // Analyze the query files in parallel; results are then collected in file
             // order, so output and --max-errors behave exactly as when run sequentially
             let embedded_sql_tags = config.embedded_sql_tags();
+            let embedded_sql_macros = config.embedded_sql_macros();
             let options = QueryOptions {
                 catalog: &catalog,
                 dialect,
                 templating: &file_templating,
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
+                embedded_sql_macros: &embedded_sql_macros,
                 stdin_filename: stdin_filename.as_deref(),
                 references: false,
             };
@@ -788,7 +795,13 @@ fn run(args: Args) -> Result<bool> {
                     (Some(_), Some(name)) if is_stdin(path) => name,
                     _ => path,
                 };
-                baseline::sql_text(name, content, &embedded_sql_tags, dialect)
+                baseline::sql_text(
+                    name,
+                    content,
+                    &embedded_sql_tags,
+                    &embedded_sql_macros,
+                    dialect,
+                )
             };
             // Whether a baseline entry's file (not checked in this run) no longer
             // exists or is ignored: its entries are stale
@@ -1165,12 +1178,14 @@ fn run(args: Args) -> Result<bool> {
             }
 
             let embedded_sql_tags = config.embedded_sql_tags();
+            let embedded_sql_macros = config.embedded_sql_macros();
             let options = QueryOptions {
                 catalog: &catalog,
                 dialect,
                 templating: &file_templating,
                 rules: &rules,
                 embedded_sql_tags: &embedded_sql_tags,
+                embedded_sql_macros: &embedded_sql_macros,
                 stdin_filename: None,
                 references: false,
             };
@@ -1180,6 +1195,8 @@ fn run(args: Args) -> Result<bool> {
                         analyzer.describe_embedded_component(content, options.embedded_sql_tags)
                     } else if is_embedded_sql_file(name) {
                         analyzer.describe_embedded(content, options.embedded_sql_tags)
+                    } else if is_rust_file(name) {
+                        analyzer.describe_rust(content, options.embedded_sql_macros)
                     } else {
                         analyzer.describe(content)
                     }

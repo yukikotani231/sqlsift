@@ -58,8 +58,8 @@ pub const EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs",
 /// [`EXTENSIONS`] files
 pub const COMPONENT_EXTENSIONS: &[&str] = &["vue", "svelte"];
 
-/// Directories skipped when a glob pattern matches TypeScript or JavaScript files
-/// in them: installed packages and build output
+/// Directories skipped when a glob pattern matches TypeScript, JavaScript or Rust
+/// files in them: installed packages and build output
 pub const SKIPPED_DIRECTORIES: &[&str] = &[
     "node_modules",
     "dist",
@@ -68,6 +68,7 @@ pub const SKIPPED_DIRECTORIES: &[&str] = &[
     ".nuxt",
     ".svelte-kit",
     "out",
+    "target",
 ];
 
 /// Template tags extracted by default
@@ -115,6 +116,7 @@ pub fn is_component_file(path: &Path) -> bool {
 ///
 /// assert!(is_in_skipped_directory(Path::new("node_modules/pg/index.js")));
 /// assert!(is_in_skipped_directory(Path::new("web/dist/app.js")));
+/// assert!(is_in_skipped_directory(Path::new("target/debug/build/x/out/db.rs")));
 /// assert!(!is_in_skipped_directory(Path::new("src/db/posts.ts")));
 /// ```
 pub fn is_in_skipped_directory(path: &Path) -> bool {
@@ -301,7 +303,7 @@ const VALUE_KEYWORDS: &[&str] = &[
 ];
 
 /// A `sqlsift:` directive in a code comment, written to the SQL as a `--` comment
-struct Directive {
+pub(crate) struct Directive {
     /// Index of the comment's first character
     start: usize,
     /// The directive's text (from `sqlsift:`), on the comment's first line
@@ -484,8 +486,22 @@ pub(crate) fn extract<S: AsRef<str>>(
         }
     }
 
-    // Directives in code comments become `--` comments, unless SQL follows the
-    // comment on its line (which the `--` would hide)
+    finish(&chars, out, &directives, identifiers, fragments)
+}
+
+/// The [`Extracted`] SQL from the SQL text `out` of the source `chars`: writes
+/// the directives of code comments as `--` comments (unless SQL follows the
+/// comment on its line, which the `--` would hide) and turns the character
+/// ranges of substituted identifiers and indexes of dropped fragments into lines
+/// and columns
+pub(crate) fn finish(
+    chars: &[char],
+    mut out: Vec<char>,
+    directives: &[Directive],
+    identifiers: Vec<(usize, usize)>,
+    fragments: Vec<(usize, bool)>,
+) -> Extracted {
+    let n = chars.len();
     for d in directives {
         let line_end = (d.start..n)
             .find(|&k| matches!(chars[k], '\n' | '\r'))
@@ -543,7 +559,7 @@ pub(crate) fn extract<S: AsRef<str>>(
 
 /// The `sqlsift:` directive in the text `text` (after `//` or `/*`, on the first
 /// line) of the comment at `start`
-fn directive(text: &[char], start: usize, end: Option<usize>) -> Option<Directive> {
+pub(crate) fn directive(text: &[char], start: usize, end: Option<usize>) -> Option<Directive> {
     let leading = text
         .iter()
         .take_while(|c| c.is_whitespace() || **c == '*' || **c == '/')
@@ -601,7 +617,7 @@ fn mask_markup(chars: &mut [char]) {
 
 /// Whether the template text starting at `i` starts with a statement keyword
 /// (after whitespace, SQL comments and opening parentheses)
-fn starts_with_statement(chars: &[char], mut i: usize) -> bool {
+pub(crate) fn starts_with_statement(chars: &[char], mut i: usize) -> bool {
     let n = chars.len();
     loop {
         match (chars.get(i), chars.get(i + 1)) {

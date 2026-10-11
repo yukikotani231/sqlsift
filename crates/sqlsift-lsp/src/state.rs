@@ -8,10 +8,11 @@ use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::embedded::is_embedded_sql_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
+use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
-use crate::config::{default_embedded_sql_tags, Config};
+use crate::config::{default_embedded_sql_macros, default_embedded_sql_tags, Config};
 
 /// Language ids of documents whose SQL is in tagged template literals
 const EMBEDDED_SQL_LANGUAGES: &[&str] = &[
@@ -20,6 +21,18 @@ const EMBEDDED_SQL_LANGUAGES: &[&str] = &[
     "javascript",
     "javascriptreact",
 ];
+
+/// Language id of Rust documents, whose SQL is in sqlx macros
+const RUST_LANGUAGE: &str = "rust";
+
+/// The code a document's SQL is embedded in
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingCode {
+    /// TypeScript or JavaScript: tagged template literals
+    Script,
+    /// Rust: sqlx macros
+    Rust,
+}
 
 /// Language ids of Jinja-templated SQL documents (`jinja-sql` is set by the
 /// "dbt Power User" extension)
@@ -37,6 +50,9 @@ pub struct ServerState {
     /// `embedded_sql_tags` from sqlsift.toml: tags of the template literals
     /// checked as SQL in TypeScript and JavaScript documents
     pub embedded_sql_tags: Vec<String>,
+    /// `embedded_sql_macros` from sqlsift.toml: sqlx macros whose SQL is checked
+    /// in Rust documents
+    pub embedded_sql_macros: Vec<String>,
     /// Rule levels from sqlsift.toml
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
@@ -65,6 +81,7 @@ impl ServerState {
             templating: Templating::None,
             templating_configured: false,
             embedded_sql_tags: default_embedded_sql_tags(),
+            embedded_sql_macros: default_embedded_sql_macros(),
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             document_languages: HashMap::new(),
@@ -135,6 +152,7 @@ impl ServerState {
         }
 
         self.embedded_sql_tags = config.embedded_sql_tags();
+        self.embedded_sql_macros = config.embedded_sql_macros();
 
         // Rule levels (`disable`, `[rules]`, `[categories]`)
         let (rules, problems) = config.rule_config();
@@ -240,36 +258,63 @@ impl ServerState {
     /// Analyze a SQL document and return diagnostics
     #[cfg(test)]
     pub fn analyze_document(&self, text: &str) -> Vec<Diagnostic> {
-        self.analyze_with(text, self.templating, false)
+        self.analyze_with(text, self.templating, None)
     }
 
-    /// Analyze `text` as SQL with `templating`, or, when `embedded`, the SQL in
-    /// its tagged template literals (`embedded_sql_tags`)
+    /// Analyze `text` as SQL with `templating`, or, when it is `embedded` code,
+    /// the SQL in its tagged template literals (`embedded_sql_tags`) or sqlx
+    /// macros (`embedded_sql_macros`)
     ///
     /// The analysis runs on a thread with a large stack, so a very long expression
     /// can't overflow the server's stack.
-    fn analyze_with(&self, text: &str, templating: Templating, embedded: bool) -> Vec<Diagnostic> {
+    fn analyze_with(
+        &self,
+        text: &str,
+        templating: Templating,
+        embedded: Option<EmbeddingCode>,
+    ) -> Vec<Diagnostic> {
         with_analysis_stack(|| {
             let mut analyzer = Analyzer::with_dialect(&self.catalog, self.dialect)
                 .with_rules(self.rules.clone())
                 .with_templating(templating);
-            if embedded {
-                analyzer.analyze_embedded(text, &self.embedded_sql_tags)
-            } else {
-                analyzer.analyze(text)
+            match embedded {
+                Some(EmbeddingCode::Script) => {
+                    analyzer.analyze_embedded(text, &self.embedded_sql_tags)
+                }
+                Some(EmbeddingCode::Rust) => analyzer.analyze_rust(text, &self.embedded_sql_macros),
+                None => analyzer.analyze(text),
             }
         })
     }
 
-    /// Whether the document at `uri` is TypeScript or JavaScript, whose SQL is in
-    /// tagged template literals: by its language id, or else its file extension
+    /// Whether the document at `uri` is code with SQL embedded in it (see
+    /// [`ServerState::embedding_code`])
     pub fn is_embedded_sql_document(&self, uri: &Url) -> bool {
+        self.embedding_code(uri).is_some()
+    }
+
+    /// The code the SQL of the document at `uri` is embedded in: TypeScript or
+    /// JavaScript (tagged template literals) or Rust (sqlx macros), by its
+    /// language id, or else its file extension; `None` for a SQL document
+    pub fn embedding_code(&self, uri: &Url) -> Option<EmbeddingCode> {
         match self.document_languages.get(uri) {
-            Some(language) if EMBEDDED_SQL_LANGUAGES.contains(&language.as_str()) => true,
-            Some(language) if language == "sql" || JINJA_LANGUAGES.contains(&language.as_str()) => {
-                false
+            Some(language) if EMBEDDED_SQL_LANGUAGES.contains(&language.as_str()) => {
+                Some(EmbeddingCode::Script)
             }
-            _ => is_embedded_sql_file(Path::new(uri.path())),
+            Some(language) if language == RUST_LANGUAGE => Some(EmbeddingCode::Rust),
+            Some(language) if language == "sql" || JINJA_LANGUAGES.contains(&language.as_str()) => {
+                None
+            }
+            _ => {
+                let path = Path::new(uri.path());
+                if is_embedded_sql_file(path) {
+                    Some(EmbeddingCode::Script)
+                } else if is_rust_file(path) {
+                    Some(EmbeddingCode::Rust)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -306,14 +351,20 @@ impl ServerState {
         if self.is_ignored(uri) {
             return Vec::new();
         }
-        let embedded = self.is_embedded_sql_document(uri);
+        let embedded = self.embedding_code(uri);
         let diagnostics = self.analyze_with(text, self.document_templating(uri), embedded);
         match (&self.baseline, uri.to_file_path()) {
             (Some((filter, dir)), Ok(path)) => {
                 let key = baseline::file_key(&path, dir);
                 // The SQL the diagnostics are reported on, as in `sqlsift check`
-                let sql = if embedded {
-                    baseline::sql_text(&path, text, &self.embedded_sql_tags, self.dialect)
+                let sql = if embedded.is_some() {
+                    baseline::sql_text(
+                        &path,
+                        text,
+                        &self.embedded_sql_tags,
+                        &self.embedded_sql_macros,
+                        self.dialect,
+                    )
                 } else {
                     text.to_string()
                 };

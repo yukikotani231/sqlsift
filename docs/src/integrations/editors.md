@@ -5,11 +5,12 @@ sqlsift ships a language server, `sqlsift-lsp`, that shows diagnostics as you ty
 Besides `.sql` files, the server checks:
 
 - **TypeScript and JavaScript** (`typescript`, `typescriptreact`, `javascript`, `javascriptreact` documents, or `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts` files): the SQL in tagged template literals whose tag is in `embedded_sql_tags` (default `["sql"]`), as `sqlsift check` does. Files without such a template get no diagnostics, and hover and completion are only offered in SQL documents.
+- **Rust** (`rust` documents, or `.rs` files): the SQL passed to sqlx's query macros and `sqlx::` query functions named in `embedded_sql_macros`, as `sqlsift check` does (see [SQL in Rust (sqlx)](../guide/queries.md#sql-in-rust-sqlx)). Files without such a query get no diagnostics.
 - **dbt models**: Jinja templates are masked in `jinja-sql` documents (the language the "dbt Power User" extension sets) and in any document with a `dbt_project.yml` in one of its parent directories, so a dbt project in a subdirectory of the workspace works too. An explicit `templating` in `sqlsift.toml` applies to every document.
 
 ## VS Code
 
-Install the **sqlsift** extension (`sqlsift.sqlsift`) from the Marketplace. Platform builds bundle the language server, so no extra setup is required. See [`editors/vscode`](https://github.com/yukikotani231/sqlsift/tree/main/editors/vscode) for settings. It activates on SQL, `jinja-sql`, Jinja `.sql` files and, unless `sqlsift.embeddedSql.enable` is `false`, TypeScript and JavaScript files.
+Install the **sqlsift** extension (`sqlsift.sqlsift`) from the Marketplace. Platform builds bundle the language server, so no extra setup is required. See [`editors/vscode`](https://github.com/yukikotani231/sqlsift/tree/main/editors/vscode) for settings. It activates on SQL, `jinja-sql`, Jinja `.sql` files and, unless `sqlsift.embeddedSql.enable` is `false`, TypeScript, JavaScript and Rust files.
 
 ## Other editors
 

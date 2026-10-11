@@ -8,7 +8,7 @@ The repository's [`examples/`](https://github.com/yukikotani231/sqlsift/tree/mai
 | [prisma-typedsql](https://github.com/yukikotani231/sqlsift/tree/main/examples/prisma-typedsql) | Prisma Migrate + TypedSQL, `$queryRaw` | `schema_dir = "prisma/migrations"`, `files = ["prisma/sql/*.sql", "src/**/*.ts"]`, `embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]` |
 | [aiosql](https://github.com/yukikotani231/sqlsift/tree/main/examples/aiosql) | aiosql (Python) + yoyo-migrations, PostgreSQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
 | [postgres-js](https://github.com/yukikotani231/sqlsift/tree/main/examples/postgres-js) | postgres.js tagged templates + dbmate | `schema_dir = "db/migrations"`, `files = ["src/**/*.ts"]` |
-| [sqlx](https://github.com/yukikotani231/sqlsift/tree/main/examples/sqlx) | sqlx `query_file!` / `query_file_as!` + `migrate!()` | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
+| [sqlx](https://github.com/yukikotani231/sqlsift/tree/main/examples/sqlx) | sqlx `query_file!` / `query_file_as!`, inline `query_as!` / `sqlx::query_scalar` + `migrate!()` | `schema_dir = "migrations"`, `files = ["queries/**/*.sql", "src/**/*.rs"]` |
 | [postgres-migrations](https://github.com/yukikotani231/sqlsift/tree/main/examples/postgres-migrations) | Plain SQL + migrations, PostgreSQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
 | [mysql](https://github.com/yukikotani231/sqlsift/tree/main/examples/mysql) | Flyway-style migrations, MySQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]`, `dialect = "mysql"` |
 | [dbt-postgres](https://github.com/yukikotani231/sqlsift/tree/main/examples/dbt-postgres) | dbt on PostgreSQL | `schema = ["warehouse/raw.sql"]`, `files = ["models/**/*.sql"]` |

@@ -4036,6 +4036,65 @@ fn globs_skip_node_modules_and_build_output_for_typescript() {
 }
 
 #[test]
+fn rust_sqlx_queries_are_checked() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.rs"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.rs:13:23")
+        .assert_stderr_contains(
+            "13 |         r#\"SELECT id, titel AS \"title\" FROM posts WHERE author_id = $1\"#,",
+        )
+        .assert_stderr_contains("queries.rs:29:56")
+        .assert_stderr_contains("Found 2 error(s)");
+}
+
+#[test]
+fn embedded_sql_macros_config_selects_the_macros() {
+    let t = TempDir::new("embedded-macros");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nembedded_sql_macros = [\"fetch_sql\"]\n",
+    );
+    t.write(
+        "src/db.rs",
+        "let a = sqlx::query!(\"SELECT nme FROM users\");\nlet b = fetch_sql!(\"SELECT nme FROM users WHERE id = $1\", id);\n",
+    );
+    let run = t.run(&["check", "-f", "json", "src/db.rs"]);
+    run.assert_code(1).assert_stderr_lacks("unknown key");
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["line"], 2);
+    assert_eq!(diagnostics[0]["column"], 28);
+}
+
+#[test]
+fn globs_skip_target_for_rust() {
+    let t = with_users_schema("embedded-target");
+    t.write("src/db.rs", "sqlx::query!(\"SELECT name FROM users\");\n");
+    t.write(
+        "target/debug/build/x/out/db.rs",
+        "sqlx::query!(\"SELECT nme FROM users\");\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "**/*.rs"])
+        .assert_code(0);
+}
+
+#[test]
+fn describe_reports_rust_queries() {
+    let t = with_users_schema("embedded-describe-rs");
+    t.write(
+        "src/db.rs",
+        "let u = sqlx::query_as!(User, \"SELECT id, name FROM users WHERE id = $1\", id);\n",
+    );
+    t.run(&["describe", "-s", "schema.sql", "src/db.rs"])
+        .assert_code(0)
+        .assert_stdout_contains("name");
+}
+
+#[test]
 fn vue_and_svelte_components_check_their_scripts() {
     let t = with_users_schema("embedded-vue");
     t.write(

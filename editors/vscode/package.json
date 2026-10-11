@@ -33,7 +33,8 @@
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:javascript",
-    "onLanguage:javascriptreact"
+    "onLanguage:javascriptreact",
+    "onLanguage:rust"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -48,7 +49,7 @@
         "sqlsift.embeddedSql.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Check SQL in tagged template literals (sql`...`) of TypeScript and JavaScript files. Only templates whose tag is in `embedded_sql_tags` (sqlsift.toml, default [\"sql\"]) are checked, so other files get no diagnostics. Takes effect after reloading the window."
+          "description": "Check SQL in tagged template literals (sql`...`) of TypeScript and JavaScript files and in sqlx queries (query!(\"...\")) of Rust files. Only templates whose tag is in `embedded_sql_tags` and macros in `embedded_sql_macros` (sqlsift.toml) are checked, so other files get no diagnostics. Takes effect after reloading the window."
         }
       }
     },

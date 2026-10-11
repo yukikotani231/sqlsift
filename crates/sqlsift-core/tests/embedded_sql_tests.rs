@@ -355,3 +355,75 @@ fn vue_and_svelte_script_blocks() {
         vec![(DiagnosticKind::ColumnNotFound, 5, 28)]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rust: sqlx macros and functions
+// ---------------------------------------------------------------------------
+
+const QUERIES_RS: &str = include_str!("../../../tests/fixtures/embedded/queries.rs");
+
+fn analyze_rs(source: &str, macros: &[&str]) -> Vec<Diagnostic> {
+    Analyzer::new(&catalog()).analyze_rust(source, macros)
+}
+
+#[test]
+fn sqlx_queries_are_checked_at_their_location() {
+    assert_eq!(
+        locations(&analyze_rs(QUERIES_RS, sqlsift_core::sqlx::DEFAULT_MACROS)),
+        vec![
+            (DiagnosticKind::ColumnNotFound, 13, 23),
+            (DiagnosticKind::TableNotFound, 29, 56),
+        ]
+    );
+}
+
+#[test]
+fn configured_macros_select_the_queries() {
+    assert_eq!(
+        locations(&analyze_rs(QUERIES_RS, &["query_as"])),
+        vec![(DiagnosticKind::ColumnNotFound, 13, 23)]
+    );
+    assert!(analyze_rs(QUERIES_RS, &["sql"]).is_empty());
+}
+
+#[test]
+fn sqlx_byte_offsets_point_into_the_original_source() {
+    let source = "let s = \"Ünïcode\";\nlet r = query!(\"SELECT nme FROM authors\");\n";
+    let diagnostics = analyze_rs(source, &["query"]);
+    assert_eq!(diagnostics.len(), 1);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!((span.line, span.column), (2, 24));
+    assert_eq!(&source[span.offset..span.offset + 3], "nme");
+}
+
+#[test]
+fn sqlx_parameters_are_bind_parameters() {
+    let source = r#"
+        query!("INSERT INTO posts (author_id, title) VALUES ($1, $2)", a, t);
+        query!("SELECT id FROM posts WHERE id = ANY($1) LIMIT $2", ids, n);
+    "#;
+    let diagnostics = analyze_rs(source, &["query"]);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let mysql = "query!(\"SELECT id FROM posts WHERE id = ? AND title = ?\", a, b);";
+    let diagnostics =
+        Analyzer::with_dialect(&catalog(), SqlDialect::MySQL).analyze_rust(mysql, &["query"]);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn sqlx_type_overrides_are_quoted_aliases() {
+    let source =
+        r##"query_as!(Post, r#"SELECT id AS "id!", title AS "title: String" FROM posts"#);"##;
+    let diagnostics = analyze_rs(source, &["query_as"]);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn escaped_quotes_keep_identifiers_whole() {
+    let source = "query!(\"SELECT \\\"titel\\\" FROM posts\");";
+    let diagnostics = analyze_rs(source, &["query"]);
+    assert_eq!(
+        locations(&diagnostics),
+        vec![(DiagnosticKind::ColumnNotFound, 1, 16)]
+    );
+}

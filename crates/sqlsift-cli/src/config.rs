@@ -26,6 +26,7 @@ const KNOWN_KEYS: &[&str] = &[
     "dbt_catalog",
     "baseline",
     "embedded_sql_tags",
+    "embedded_sql_macros",
 ];
 
 /// Configuration for sqlsift
@@ -77,6 +78,12 @@ pub struct Config {
     /// so `"sql"` also matches `db.sql` and `"$queryRaw"` matches `prisma.$queryRaw`
     #[serde(default)]
     pub embedded_sql_tags: Option<Vec<String>>,
+
+    /// sqlx macros (and `sqlx::` functions) whose string literal argument is
+    /// checked as SQL in Rust files (default: `query`, `query_as`, `query_scalar`
+    /// and their `_unchecked` variants)
+    #[serde(default)]
+    pub embedded_sql_macros: Option<Vec<String>>,
 
     /// Rules to disable (e.g., `["E0001", "E0002"]`)
     #[serde(default)]
@@ -265,6 +272,16 @@ impl Config {
     pub fn embedded_sql_tags(&self) -> Vec<String> {
         self.embedded_sql_tags.clone().unwrap_or_else(|| {
             sqlsift_core::embedded::DEFAULT_TAGS
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+    }
+
+    /// sqlx macros whose SQL is checked in Rust files
+    pub fn embedded_sql_macros(&self) -> Vec<String> {
+        self.embedded_sql_macros.clone().unwrap_or_else(|| {
+            sqlsift_core::sqlx::DEFAULT_MACROS
                 .iter()
                 .map(ToString::to_string)
                 .collect()

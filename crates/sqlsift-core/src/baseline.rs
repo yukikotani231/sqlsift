@@ -365,8 +365,9 @@ impl BaselineFilter {
 /// [`Baseline`] and [`BaselineFilter`]: the file's text, or for TypeScript /
 /// JavaScript files (by `name`, see
 /// [`is_embedded_sql_file`](crate::embedded::is_embedded_sql_file)) the SQL of
-/// its templates tagged with one of `tags`, so that the code around a
-/// template is not part of its statement.
+/// its templates tagged with one of `tags`, and for Rust files (see
+/// [`is_rust_file`](crate::sqlx::is_rust_file)) the SQL passed to one of
+/// `macros`, so that the code around a query is not part of its statement.
 ///
 /// ```
 /// use std::path::Path;
@@ -374,24 +375,29 @@ impl BaselineFilter {
 /// use sqlsift_core::SqlDialect;
 ///
 /// let ts = "const rows = await sql`SELECT 1`;";
-/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], SqlDialect::PostgreSQL);
+/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], &["query"], SqlDialect::PostgreSQL);
 /// assert_eq!(sql.trim(), ";SELECT 1;");
 /// ```
-pub fn sql_text<S: AsRef<str>>(
+pub fn sql_text<S: AsRef<str>, M: AsRef<str>>(
     name: &Path,
     source: &str,
     tags: &[S],
+    macros: &[M],
     dialect: SqlDialect,
 ) -> String {
+    // As `Analyzer::analyze_embedded` / `analyze_rust`: the BOM is not part of the
+    // code
+    let (script, bom) = crate::analyzer::strip_bom(source);
     if crate::embedded::is_embedded_sql_file(name) {
-        // As `Analyzer::analyze_embedded`: the BOM is not part of the script
-        let (script, bom) = crate::analyzer::strip_bom(source);
         let host = if crate::embedded::is_component_file(name) {
             crate::embedded::Host::Component
         } else {
             crate::embedded::Host::Script
         };
         let text = crate::embedded::extract(script, tags, dialect, host).text;
+        format!("{}{text}", &source[..bom])
+    } else if crate::sqlx::is_rust_file(name) {
+        let text = crate::sqlx::extract(script, macros).text;
         format!("{}{text}", &source[..bom])
     } else {
         source.to_string()
@@ -1258,7 +1264,13 @@ mod tests {
     #[test]
     fn embedded_sql_is_hashed_without_the_code_around_it() {
         let hash_of = |source: &str| {
-            let sql = sql_text(Path::new("a.ts"), source, &["sql"], SqlDialect::PostgreSQL);
+            let sql = sql_text(
+                Path::new("a.ts"),
+                source,
+                &["sql"],
+                &["query"],
+                SqlDialect::PostgreSQL,
+            );
             let mut baseline = Baseline::default();
             let line = 2;
             let column = source.lines().nth(1).unwrap().find("frist").unwrap() + 1;

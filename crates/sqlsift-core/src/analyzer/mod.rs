@@ -302,6 +302,40 @@ impl<'a> Analyzer<'a> {
         diagnostics
     }
 
+    /// Analyze the SQL in a Rust file: the string literals passed to sqlx's query
+    /// macros and functions named in `macros` (see [`crate::sqlx`]). Diagnostics
+    /// point at the query's location in `source`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    /// use sqlsift_core::sqlx::DEFAULT_MACROS;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = r#"let user = sqlx::query!("SELECT nme FROM users WHERE id = $1", id);"#;
+    /// let diagnostics = Analyzer::new(&catalog).analyze_rust(source, DEFAULT_MACROS);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// assert_eq!(diagnostics[0].span.unwrap().column, 33);
+    /// ```
+    pub fn analyze_rust<S: AsRef<str>>(&mut self, source: &str, macros: &[S]) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
+        let extracted = crate::sqlx::extract(source, macros);
+        let mut diagnostics = self.analyze_text(
+            &extracted.text,
+            source,
+            &extracted.identifiers,
+            &extracted.fragments,
+        );
+        shift_offsets(&mut diagnostics, bom);
+        self.shift_references(bom);
+        diagnostics
+    }
+
     /// Describe what each statement of `sql` returns: its output columns and their
     /// types, as far as the schema tells (see [`QueryDescription`]). The file is
     /// analyzed as [`Analyzer::analyze`] does, and its diagnostics are returned too.
@@ -339,6 +373,12 @@ impl<'a> Analyzer<'a> {
         tags: &[S],
     ) -> Description {
         self.describing(|analyzer| analyzer.analyze_embedded_component(source, tags))
+    }
+
+    /// [`Analyzer::describe`] for the SQL in a Rust file (see
+    /// [`Analyzer::analyze_rust`])
+    pub fn describe_rust<S: AsRef<str>>(&mut self, source: &str, macros: &[S]) -> Description {
+        self.describing(|analyzer| analyzer.analyze_rust(source, macros))
     }
 
     /// Run `analyze`, collecting the statements it describes

@@ -3,3 +3,4 @@
 broken/create_todo.sql:1:13 E0008
 broken/overdue_todos.sql:7:11 E0002
 broken/set_priority.sql:2:5 E0003
+broken/admin.rs:8:80 E0002

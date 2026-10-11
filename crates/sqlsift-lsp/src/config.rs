@@ -55,6 +55,11 @@ pub struct Config {
     /// JavaScript documents (default `["sql"]`)
     #[serde(default)]
     pub embedded_sql_tags: Option<Vec<String>>,
+
+    /// sqlx macros whose string literal argument is checked as SQL in Rust
+    /// documents (default [`sqlsift_core::sqlx::DEFAULT_MACROS`])
+    #[serde(default)]
+    pub embedded_sql_macros: Option<Vec<String>>,
 }
 
 impl Config {
@@ -64,6 +69,13 @@ impl Config {
         self.embedded_sql_tags
             .clone()
             .unwrap_or_else(default_embedded_sql_tags)
+    }
+
+    /// sqlx macros whose SQL is checked in Rust documents
+    pub fn embedded_sql_macros(&self) -> Vec<String> {
+        self.embedded_sql_macros
+            .clone()
+            .unwrap_or_else(default_embedded_sql_macros)
     }
 
     /// Rule levels from `[categories]`, `[rules]` and `disable`, with a message for
@@ -119,6 +131,14 @@ impl Config {
         }
         None
     }
+}
+
+/// The default `embedded_sql_macros`
+pub fn default_embedded_sql_macros() -> Vec<String> {
+    sqlsift_core::sqlx::DEFAULT_MACROS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The default `embedded_sql_tags`

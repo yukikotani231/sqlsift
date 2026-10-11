@@ -48,6 +48,7 @@ Looks at the project, writes a commented `sqlsift.toml` in `DIR`, runs a first `
 | `dbt_project.yml` | `files` for the models (`model-paths`); the dialect from `profiles.yml` in the project or the `dbt-<adapter>` requirement |
 | Other `.sql` files | `files`, grouped by directory and kept clear of the schema files (with `ignore` where needed) |
 | `.ts` / `.js` / `.vue` / `.svelte` files with `` sql`...` `` or Prisma `` $queryRaw`...` `` templates | `files`, and `embedded_sql_tags` for `$queryRaw` / `$executeRaw` |
+| `.rs` files with sqlx `query!("...")` / `query_as!(T, "...")` macros or `sqlx::query("...")` calls | `files` |
 
 When several schema sources are found, the most specific one is used and the others are written as comments. The dialect comes from the most specific source: the tool's own configuration first, then `DATABASE_URL` in `.env.example` / `.env.sample` / `.env`, database images in `docker-compose.yml`, database drivers in `package.json`, `go.mod`, `Gemfile`, Python requirements or `Cargo.toml`, and finally the syntax of the schema files; otherwise PostgreSQL. Disagreeing hints are printed. When the first check reports many diagnostics, `init` suggests [a baseline](../guide/suppression.md#an-existing-backlog-baseline).
 

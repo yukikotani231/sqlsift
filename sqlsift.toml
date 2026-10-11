@@ -19,6 +19,11 @@ schema = [
 # "$queryRaw" matches prisma.$queryRaw`...`. Default: ["sql"].
 # embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]
 
+# sqlx macros (query!("..."), query_as!(T, "...")) and sqlx:: functions
+# (sqlx::query("...")) whose SQL is checked in Rust query files (.rs).
+# Default: query, query_as, query_scalar and their _unchecked variants.
+# embedded_sql_macros = ["query", "query_as", "query_scalar", "my_query"]
+
 # Query files to skip, whether they come from `files` or the command line
 # (glob patterns; `**` matches any number of directories, and a directory
 # pattern skips everything below it). `--ignore <PATTERN>` adds to this list.

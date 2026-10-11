@@ -321,6 +321,35 @@ fn drizzle_migrations_and_sql_templates() {
 }
 
 #[test]
+fn sqlx_migrations_and_query_macros() {
+    let p = Project::new("sqlx");
+    p.write(
+        "Cargo.toml",
+        "[package]\nname = \"app\"\n\n[dependencies]\nsqlx = { version = \"0.8\", features = [\"postgres\", \"runtime-tokio\"] }\n",
+    )
+    .write("migrations/20260101000000_create_users.sql", USERS)
+    .write(
+        "src/db.rs",
+        "pub async fn email(pool: &sqlx::PgPool, id: i32) -> sqlx::Result<String> {\n    \
+         let row = sqlx::query!(\"SELECT email FROM users WHERE id = $1\", id)\n        \
+         .fetch_one(pool)\n        .await?;\n    Ok(row.email)\n}\n",
+    )
+    .write("src/main.rs", "fn main() {}\n");
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("postgresql"));
+    assert_eq!(string(&table, "schema_dir").as_deref(), Some("migrations"));
+    assert_eq!(strings(&table, "files"), ["src/**/*.rs"]);
+    assert!(run.stdout.contains("sqlx query!"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("All 2 file(s) passed"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn rails_structure_sql_without_queries() {
     let p = Project::new("rails");
     p.write("db/structure.sql", USERS)

@@ -701,6 +701,26 @@ pub fn detect(root: &Path) -> Detection {
             count: embedded_count,
         });
     }
+
+    // SQL in Rust: sqlx's query macros and `sqlx::` functions
+    let rust: BTreeSet<String> = tree
+        .files
+        .iter()
+        .filter(|file| sqlsift_core::sqlx::is_rust_file(Path::new(file)))
+        .filter(|file| tree.read(file).is_some_and(|text| uses_sqlx_queries(&text)))
+        .cloned()
+        .collect();
+    if !rust.is_empty() {
+        queries.push(QueryGroup {
+            label: "sqlx query!(\"...\") in .rs".to_string(),
+            patterns: group_by_top_dir(&rust, "rs")
+                .into_iter()
+                .map(|(pattern, _)| pattern)
+                .collect(),
+            count: rust.len(),
+        });
+    }
+
     if prisma_raw {
         detection.embedded_sql_tags = Some(
             ["sql", "$queryRaw", "$executeRaw"]
@@ -928,6 +948,21 @@ fn template_tags(text: &str) -> TemplateTags {
         .iter()
         .any(|tag| text.contains(tag));
     tags
+}
+
+/// Whether Rust code passes SQL to one of sqlx's query macros (`query!("...")`,
+/// `sqlx::query_as!(T, "...")`) or functions (`sqlx::query("...")`); not
+/// `query_file!`, whose files are found as `.sql` files
+fn uses_sqlx_queries(text: &str) -> bool {
+    sqlsift_core::sqlx::DEFAULT_MACROS.iter().any(|name| {
+        text.match_indices(&format!("{name}!")).any(|(i, m)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + m.len()..].trim_start();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && after.starts_with(['(', '[', '{'])
+        }) || text.contains(&format!("sqlx::{name}("))
+            || text.contains(&format!("sqlx::{name}::<"))
+    })
 }
 
 /// The dialect of a sqlc `engine`
@@ -1381,6 +1416,22 @@ mod tests {
         assert!(!template_tags("const sql = 'SELECT 1'; if (a<b) {}").sql);
         let prisma = template_tags("await prisma.$queryRaw<User[]>`SELECT 1`");
         assert!(prisma.prisma_raw && !prisma.sql);
+    }
+
+    #[test]
+    fn finds_sqlx_queries() {
+        assert!(uses_sqlx_queries("sqlx::query!(\"SELECT 1\")"));
+        assert!(uses_sqlx_queries("query_as! (User, \"SELECT 1\")"));
+        assert!(uses_sqlx_queries(
+            "sqlx::query_scalar::<_, i64>(\"SELECT 1\")"
+        ));
+        assert!(uses_sqlx_queries(
+            "sqlx::query_as_unchecked!(User, \"SELECT 1\")"
+        ));
+        assert!(!uses_sqlx_queries("sqlx::query_file!(\"q.sql\")"));
+        assert!(!uses_sqlx_queries(
+            "let q = query(\"SELECT 1\"); my_query!(x)"
+        ));
     }
 
     #[test]
