@@ -2,8 +2,8 @@
 
 use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
-    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint, Use,
-    UserDefinedTypeRepresentation, Value,
+    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint,
+    TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
 };
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
@@ -259,6 +259,48 @@ impl SchemaBuilder {
             return;
         }
 
+        // A trigger sqlparser doesn't parse (MySQL's `FOR EACH ROW SET NEW.x = ...`,
+        // PostgreSQL's `WHEN (...)` forms): `[BEFORE | INSTEAD OF] events ON table`
+        if word(0) == "CREATE" {
+            let trigger = (1..words.len().min(12))
+                .take_while(|&i| !matches!(word(i), "FUNCTION" | "PROCEDURE" | "RETURNS"))
+                .find(|&i| word(i) == "TRIGGER");
+            if let Some(trigger) = trigger {
+                let on = (trigger + 1..words.len()).find(|&i| word(i) == "ON");
+                let period = (trigger + 1..on.unwrap_or(0))
+                    .find(|&i| matches!(word(i), "BEFORE" | "AFTER" | "INSTEAD"));
+                if let (Some(on), Some(period)) = (on, period) {
+                    if word(period) != "AFTER" {
+                        let events = period + 1..on;
+                        let insert = events.clone().any(|i| word(i) == "INSERT");
+                        let update = events.clone().any(|i| word(i) == "UPDATE");
+                        let end = (on + 1..sig_tokens.len())
+                            .find(|&i| {
+                                matches!(
+                                    word(i),
+                                    "FOR"
+                                        | "REFERENCING"
+                                        | "WHEN"
+                                        | "EXECUTE"
+                                        | "FROM"
+                                        | "NOT"
+                                        | "DEFERRABLE"
+                                        | "INITIALLY"
+                                        | "FOLLOWS"
+                                        | "PRECEDES"
+                                )
+                            })
+                            .unwrap_or(sig_tokens.len());
+                        if let Some(name) = split_object_names(&sig_tokens[on + 1..end]).first() {
+                            let name = self.catalog.qualified_name(name);
+                            self.note_before_trigger(&name, insert, update);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
         // Which definition statement is this, and where does its name start?
         let (kind, name_start) = if word(0) == "CREATE" {
             // Find the object keyword, skipping modifiers such as OR REPLACE, TEMP,
@@ -299,7 +341,7 @@ impl SchemaBuilder {
 
         // Retry `CREATE TABLE c (LIKE p INCLUDING ...)` / `... WITH NO DATA` without
         // those clauses
-        if matches!(kind, "CREATE TABLE" | "CREATE VIEW")
+        if matches!(kind, "CREATE TABLE" | "CREATE VIEW" | "ALTER TABLE")
             && self.retry_without_unsupported_clauses(stmt)
         {
             return;
@@ -605,6 +647,17 @@ impl SchemaBuilder {
             } => {
                 self.process_alter_table(name, operations);
             }
+            Statement::CreateTrigger {
+                period: TriggerPeriod::Before | TriggerPeriod::InsteadOf,
+                events,
+                table_name,
+                ..
+            } => {
+                let insert = events.iter().any(|e| matches!(e, TriggerEvent::Insert));
+                let update = events.iter().any(|e| matches!(e, TriggerEvent::Update(_)));
+                let name = self.catalog.qualified_name(table_name);
+                self.note_before_trigger(&name, insert, update);
+            }
             // `SELECT ... INTO [TEMP] t` creates `t`
             Statement::Query(query) => {
                 if let Some(into) = select_into(query) {
@@ -672,6 +725,14 @@ impl SchemaBuilder {
     }
 
     /// Whether a table or view with this name exists
+    /// Record a BEFORE / INSTEAD OF row trigger on `table` for INSERT and / or UPDATE
+    fn note_before_trigger(&mut self, table: &QualifiedName, insert: bool, update: bool) {
+        if let Some(table) = self.catalog.get_table_mut(table) {
+            table.before_insert_trigger |= insert;
+            table.before_update_trigger |= update;
+        }
+    }
+
     fn relation_exists(&self, name: &QualifiedName) -> bool {
         self.catalog.relation_exists_exactly(name)
     }
@@ -1412,7 +1473,10 @@ pub(crate) fn mask_unsupported_clauses(
             .get(n)
             .is_some_and(|&i| is_word(&tokens[i].token, kw))
     };
-    if !word(0, "CREATE") {
+    // PostgreSQL `ALTER TABLE ... ADD COLUMN c varchar ARRAY`, `... MATCH SIMPLE`,
+    // `... NOT VALID`
+    let alter = dialect.is_psql() && word(0, "ALTER") && word(1, "TABLE");
+    if !word(0, "CREATE") && !alter {
         return None;
     }
     let mut drop = vec![false; tokens.len()];
@@ -1493,8 +1557,18 @@ pub(crate) fn mask_unsupported_clauses(
             t.span.start.column as usize,
         )
     };
-    let edits =
-        super::warehouse::mask_table_attributes(dialect, &tokens, &significant, &offset, &mut drop);
+    let mut edits = if alter {
+        Vec::new()
+    } else {
+        super::warehouse::mask_table_attributes(dialect, &tokens, &significant, &offset, &mut drop)
+    };
+    edits.extend(mask_table_elements(
+        dialect,
+        &tokens,
+        &significant,
+        &offset,
+        &mut drop,
+    ));
     if !drop.contains(&true) && edits.is_empty() {
         return None;
     }
@@ -1527,6 +1601,175 @@ pub(crate) fn mask_unsupported_clauses(
         })
         .collect();
     Some((masked, parents))
+}
+
+/// Mark for dropping the parts of a CREATE TABLE's column and constraint list that
+/// sqlparser can't parse and that don't change its columns:
+///
+/// - PostgreSQL exclusion constraints (`[CONSTRAINT name] EXCLUDE USING gist (...)`),
+///   with the comma before them, a foreign key's `MATCH SIMPLE | FULL | PARTIAL`, a
+///   constraint's `NOT VALID`, and the SQL-standard array type suffix
+///   (`varchar ARRAY`, which becomes `varchar[]`); these also in ALTER TABLE
+/// - MySQL key parts with a direction or a prefix length (`INDEX (a DESC)`,
+///   `KEY k (name(10))`), the index name of a foreign key
+///   (`FOREIGN KEY fk_name (col)`) and the precision of floating-point types
+///   (`DOUBLE(8,2)`, `FLOAT(5,2)`, `REAL(8,2)`)
+fn mask_table_elements(
+    dialect: SqlDialect,
+    tokens: &[TokenWithSpan],
+    significant: &[usize],
+    offset: &dyn Fn(&TokenWithSpan) -> Option<usize>,
+    drop: &mut [bool],
+) -> Vec<super::warehouse::Edit> {
+    let mut edits = Vec::new();
+    let mysql = dialect == SqlDialect::MySQL;
+    if !(mysql || dialect.is_psql()) {
+        return edits;
+    }
+    let token = |n: usize| significant.get(n).map(|&i| &tokens[i].token);
+    let word = |n: usize| match token(n) {
+        Some(Token::Word(w)) if w.quote_style.is_none() => w.value.to_ascii_uppercase(),
+        _ => String::new(),
+    };
+    let is = |n: usize, t: &Token| token(n) == Some(t);
+    if dialect.is_psql() {
+        for n in 1..significant.len() {
+            match word(n).as_str() {
+                "MATCH" if matches!(word(n + 1).as_str(), "SIMPLE" | "FULL" | "PARTIAL") => {
+                    drop[significant[n]] = true;
+                    drop[significant[n + 1]] = true;
+                }
+                "NOT" if word(n + 1) == "VALID" => {
+                    drop[significant[n]] = true;
+                    drop[significant[n + 1]] = true;
+                }
+                // `varchar ARRAY` / `varchar(10) ARRAY` (not the ARRAY[...] / ARRAY(...)
+                // constructors)
+                "ARRAY"
+                    if matches!(token(n - 1), Some(Token::Word(_) | Token::RParen))
+                        && !matches!(token(n + 1), Some(Token::LBracket | Token::LParen)) =>
+                {
+                    if let Some(start) = offset(&tokens[significant[n]]) {
+                        edits.push(super::warehouse::Edit {
+                            range: start..start + "ARRAY".len(),
+                            text: "[]",
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // The column list: the first `(` after CREATE ... TABLE name
+    let Some(table) = (0..significant.len()).find(|&n| word(n) == "TABLE") else {
+        return edits;
+    };
+    let Some(open) = (table..significant.len()).find(|&n| is(n, &Token::LParen)) else {
+        return edits;
+    };
+    // The elements of the list: (first, last) significant-token indexes
+    let mut elements = Vec::new();
+    let mut depth = 0usize;
+    let mut start = open + 1;
+    for n in open..significant.len() {
+        match token(n) {
+            Some(Token::LParen) => depth += 1,
+            Some(Token::RParen) => {
+                depth -= 1;
+                if depth == 0 {
+                    if n > start {
+                        elements.push((start, n - 1));
+                    }
+                    break;
+                }
+            }
+            Some(Token::Comma) if depth == 1 => {
+                if n > start {
+                    elements.push((start, n - 1));
+                }
+                start = n + 1;
+            }
+            _ => {}
+        }
+    }
+    let mut mark = |first: usize, last: usize| {
+        for &i in &significant[first..=last] {
+            drop[i] = true;
+        }
+    };
+    for (first, last) in elements {
+        // Skip `CONSTRAINT [name]`
+        let mut n = first;
+        if word(n) == "CONSTRAINT" {
+            n += 1;
+            if !matches!(
+                word(n).as_str(),
+                "PRIMARY" | "UNIQUE" | "FOREIGN" | "CHECK" | "EXCLUDE"
+            ) {
+                n += 1;
+            }
+        }
+        let kind = word(n);
+        if dialect.is_psql() {
+            if kind == "EXCLUDE" {
+                // With the comma before it
+                mark(first - 1, last);
+            }
+            continue;
+        }
+        match kind.as_str() {
+            "PRIMARY" | "UNIQUE" | "KEY" | "INDEX" | "FULLTEXT" | "SPATIAL" => {
+                // The key part list: the element's first `(`
+                let Some(list) = (n..=last).find(|&k| is(k, &Token::LParen)) else {
+                    continue;
+                };
+                let mut depth = 0usize;
+                let mut k = list;
+                while k <= last {
+                    match token(k) {
+                        Some(Token::LParen) => depth += 1,
+                        Some(Token::RParen) => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    if depth == 1 {
+                        if matches!(word(k).as_str(), "ASC" | "DESC") {
+                            mark(k, k);
+                        } else if matches!(token(k), Some(Token::Word(_)))
+                            && is(k + 1, &Token::LParen)
+                            && matches!(token(k + 2), Some(Token::Number(..)))
+                            && is(k + 3, &Token::RParen)
+                        {
+                            // A prefix length: `name(10)`
+                            mark(k + 1, k + 3);
+                            k += 3;
+                        }
+                    }
+                    k += 1;
+                }
+            }
+            "FOREIGN" if word(n + 1) == "KEY" => {
+                if matches!(token(n + 2), Some(Token::Word(_))) && is(n + 3, &Token::LParen) {
+                    mark(n + 2, n + 2);
+                }
+            }
+            _ => {
+                // A column: `name DOUBLE(M,D)`, `name FLOAT(M,D)`, `name REAL(M,D)`
+                if matches!(word(n + 1).as_str(), "DOUBLE" | "FLOAT" | "REAL")
+                    && is(n + 2, &Token::LParen)
+                    && matches!(token(n + 3), Some(Token::Number(..)))
+                    && is(n + 4, &Token::Comma)
+                    && matches!(token(n + 5), Some(Token::Number(..)))
+                    && is(n + 6, &Token::RParen)
+                {
+                    mark(n + 2, n + 6);
+                }
+            }
+        }
+    }
+    edits
 }
 
 /// Kind (`CREATE TABLE` / `CREATE VIEW`) and name of the table or view a statement

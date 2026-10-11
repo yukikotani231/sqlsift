@@ -629,6 +629,14 @@ pub struct TableDef {
     /// expression unique indexes, or indexes a partition gets from its parent
     #[serde(default)]
     pub unknown_unique_keys: bool,
+    /// A `BEFORE INSERT` (or `INSTEAD OF INSERT`) row trigger may set columns, so an
+    /// INSERT may leave NOT NULL columns out or NULL
+    #[serde(default)]
+    pub before_insert_trigger: bool,
+    /// A `BEFORE UPDATE` (or `INSTEAD OF UPDATE`) row trigger may set columns, so an
+    /// UPDATE may set NOT NULL columns to NULL
+    #[serde(default)]
+    pub before_update_trigger: bool,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -651,6 +659,8 @@ impl TableDef {
             check_constraints: Vec::new(),
             former_columns: Vec::new(),
             unknown_unique_keys: false,
+            before_insert_trigger: false,
+            before_update_trigger: false,
         }
     }
 

@@ -1,4 +1,5 @@
-# Real-world SQL corpus for sqlsift (dbt projects and warehouse dialects).
+# Real-world SQL corpus for sqlsift (dbt projects, warehouse dialects, and application
+# repositories: sqlc, Prisma TypedSQL, postgres.js, MySQL).
 #
 # Nothing here is vendored: `fetch.py` clones each project with `git clone --depth 1`
 # into `tests/corpus/repos/` (git-ignored) and records the checked-out commit in
@@ -10,7 +11,8 @@
 #   sha         commit the last report was produced from (fetch.py warns when HEAD moved)
 #   license     SPDX id of the project's license ("none" = no license file; the project
 #               is only read, never vendored)
-#   kind        "dbt" (Jinja models: --templating jinja) or "sql" (plain SQL files)
+#   kind        "dbt" (Jinja models: --templating jinja) or "sql" (plain SQL files, and
+#               TypeScript/JavaScript files whose `sql` tagged templates sqlsift extracts)
 #   dialects    dialects the files are checked with. dbt packages that support several
 #               warehouses (dispatch macros) are checked with each of them
 #   root        directory of the project inside the repo (default: repo root)
@@ -22,9 +24,20 @@
 #                           models are checked too ("compiled" mode, PostgreSQL)
 #                 "yml"     columns declared in sources/models .yml files (type
 #                           `data_type` when given, else unknown) + seed CSV headers
-#                 "ddl"     CREATE TABLE files of the repo (`schema_files` globs)
+#                 "ddl"     CREATE TABLE files of the repo (`schema_files` globs, loaded
+#                           in the order given; each glob's matches in filename order)
+#                 "ts-sql"  migrations written as `sql\`...\`` tagged templates in the
+#                           TypeScript files `schema_files` (templates without
+#                           interpolations, in file order)
 #                 "bq-yaml" bigquery-etl schema.yaml files next to each query
 #                 "none"    no schema: only parse coverage is measured
+#   schema_dir  migrations directory (relative to `root`) passed as `--schema-dir`:
+#               sqlsift loads it in filename order and skips rollback migrations.
+#               Combines with any `schema`
+#   schema_rewrite  [[old, new], ...] text replacements applied to a copy of
+#               `schema_dir`, for applications that rewrite their migrations at
+#               runtime (lightninglabs/loop: SQLite `INTEGER PRIMARY KEY` becomes
+#               `SERIAL PRIMARY KEY` on PostgreSQL)
 #   dbt_project directory (relative to `root`) dbt is run from for "dbt-run"
 #               (fivetran packages: integration_tests)
 #   dbt_schema  target schema of the dbt profile (default "corpus")
@@ -321,6 +334,316 @@ kind = "sql"
 dialects = ["redshift"]
 models = ["src/AdminViews/*.sql", "src/AdminScripts/*.sql"]
 schema = "none"
+
+# --- app-developer projects: sqlc, Prisma TypedSQL, postgres.js, Supabase, MySQL ---------
+#
+# Application repositories whose queries run against a schema built from their own
+# migrations (`schema_dir`) or schema files, the way an app developer runs sqlsift.
+# Every one of these queries is run by the application, so a diagnostic is a real bug,
+# a false positive, or a gap in the schema the harness gives (see README.md).
+
+# sqlc (Go), PostgreSQL
+
+[[project]]
+name = "loop"
+url = "https://github.com/lightninglabs/loop"
+sha = "6c28841284af"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["loopdb/sqlc/queries/*.sql"]
+schema = "none"
+schema_dir = "loopdb/sqlc/migrations"
+# loopdb/postgres.go replaces these in the (SQLite-flavored) migrations on PostgreSQL
+schema_rewrite = [["BLOB", "BYTEA"], ["INTEGER PRIMARY KEY", "SERIAL PRIMARY KEY"]]
+
+[[project]]
+name = "xmtpd"
+url = "https://github.com/xmtp/xmtpd"
+sha = "822ddc956a44"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["pkg/db/sqlc/*.sql"]
+schema = "none"
+schema_dir = "pkg/db/migrations"
+
+[[project]]
+name = "hatchet"
+url = "https://github.com/hatchet-dev/hatchet"
+sha = "82fce9703e35"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["pkg/repository/sqlcv1/*.sql"]
+exclude = ["pkg/repository/sqlcv1/concurrency-additional-tables.sql"]
+# the schema of sqlc.yaml
+schema = "ddl"
+schema_files = [
+  "sql/schema/v0.sql",
+  "sql/schema/v1-core.sql",
+  "sql/schema/v1-olap.sql",
+  "sql/schema/pg-stubs.sql",
+  "pkg/repository/sqlcv1/concurrency-additional-tables.sql",
+]
+
+[[project]]
+# the same queries against hatchet's goose migrations (`-- +goose Down` sections)
+name = "hatchet-goose"
+url = "https://github.com/hatchet-dev/hatchet"
+clone = "hatchet"
+sha = "82fce9703e35"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["pkg/repository/sqlcv1/*.sql"]
+exclude = ["pkg/repository/sqlcv1/concurrency-additional-tables.sql"]
+schema = "ddl"
+schema_files = ["pkg/repository/sqlcv1/concurrency-additional-tables.sql"]
+schema_dir = "cmd/hatchet-migrate/migrate/migrations"
+
+[[project]]
+name = "simplebank"
+url = "https://github.com/techschool/simplebank"
+sha = "97f000fe58ad"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["db/query/*.sql"]
+schema = "none"
+schema_dir = "db/migration"
+
+[[project]]
+# query files also hold the schema (sqlc reads the same files as both)
+name = "river"
+url = "https://github.com/riverqueue/river"
+sha = "36159a833c2a"
+license = "MPL-2.0"
+kind = "sql"
+dialects = ["postgresql"]
+root = "riverdriver/riverpgxv5/internal/dbsqlc"
+models = ["*.sql"]
+schema = "ddl"
+schema_files = ["pg_misc.sql", "river_job.sql", "river_leader.sql", "river_migration.sql", "river_notification.sql", "river_queue.sql", "schema.sql"]
+
+[[project]]
+name = "sqlc-authors-pg"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "examples/authors/postgresql"
+models = ["query.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+[[project]]
+name = "sqlc-booktest-pg"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "examples/booktest/postgresql"
+models = ["query.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+[[project]]
+name = "sqlc-jets-pg"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "examples/jets/postgresql"
+models = ["query-building.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+[[project]]
+name = "sqlc-ondeck-pg"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "examples/ondeck/postgresql"
+models = ["query/*.sql"]
+schema = "none"
+schema_dir = "schema"
+
+[[project]]
+# goose migrations (`-- +goose Up` / `-- +goose Down`), the schema of its sqlc.yaml
+name = "bcc-media-platform"
+url = "https://github.com/bcc-code/bcc-media-platform"
+sha = "02a8b6b692e1"
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["queries/*.sql"]
+schema = "none"
+schema_dir = "migrations"
+
+[[project]]
+name = "flowctl"
+url = "https://github.com/cvhariharan/flowctl"
+sha = "c675bc5b818d"
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["internal/repo/queries/*.sql"]
+schema = "none"
+schema_dir = "migrations"
+
+# sqlc (Go), MySQL
+
+[[project]]
+name = "nanomdm"
+url = "https://github.com/micromdm/nanomdm"
+sha = "274519294b83"
+license = "MIT"
+kind = "sql"
+dialects = ["mysql"]
+root = "storage/mysql"
+models = ["bstoken.sql", "certauth.sql", "mdm.sql", "mysql.sql", "push.sql", "pushcert.sql", "queue.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+[[project]]
+name = "ranger-ims-go"
+url = "https://github.com/burningmantech/ranger-ims-go"
+sha = "a0a3f97da202"
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["mysql"]
+models = ["store/queries.sql"]
+schema = "ddl"
+schema_files = ["store/schema/current.sql"]
+
+[[project]]
+name = "ranger-ims-go-directory"
+url = "https://github.com/burningmantech/ranger-ims-go"
+clone = "ranger-ims-go"
+sha = "a0a3f97da202"
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["mysql"]
+models = ["directory/queries.sql"]
+schema = "ddl"
+schema_files = ["directory/schema/current.sql"]
+
+[[project]]
+name = "sqlc-booktest-mysql"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["mysql"]
+root = "examples/booktest/mysql"
+models = ["query.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+[[project]]
+name = "sqlc-ondeck-mysql"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["mysql"]
+root = "examples/ondeck/mysql"
+models = ["query/*.sql"]
+schema = "none"
+schema_dir = "schema"
+
+[[project]]
+name = "sqlc-authors-mysql"
+url = "https://github.com/sqlc-dev/sqlc"
+clone = "sqlc"
+sha = "0942ad2723b5"
+license = "MIT"
+kind = "sql"
+dialects = ["mysql"]
+root = "examples/authors/mysql"
+models = ["query.sql"]
+schema = "ddl"
+schema_files = ["schema.sql"]
+
+# Prisma TypedSQL (`prisma/sql/*.sql`), schema from prisma/migrations
+
+[[project]]
+name = "teerank"
+url = "https://github.com/needs/teerank"
+sha = "774c41585b43"
+license = "GPL-3.0"
+kind = "sql"
+dialects = ["postgresql"]
+root = "libs/prisma/prisma"
+models = ["sql/*.sql"]
+schema = "none"
+schema_dir = "migrations"
+
+[[project]]
+name = "monoweb"
+url = "https://github.com/dotkom/monoweb"
+sha = "1dfe804c99b9"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "packages/db/prisma"
+models = ["sql/*.sql"]
+schema = "none"
+schema_dir = "migrations"
+
+[[project]]
+name = "ddex-processor"
+url = "https://github.com/AudiusProject/ddex-processor"
+sha = "5292f917c3a4"
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["src/**/*.ts", "src/**/*.tsx", "cli.ts"]
+# src/reporting/ queries another database (`postgres(process.env.DISCOVERY_DB)`),
+# whose schema isn't in the repository
+exclude = ["src/**/*.test.ts", "src/db/migrations.ts", "src/reporting/**"]
+schema = "ts-sql"
+schema_files = ["src/db/migrations.ts"]
+
+[[project]]
+name = "podcst-web"
+url = "https://github.com/shantanuraj/podcst-web"
+sha = "9a2b18d94aff"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+models = ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts"]
+# tests run against schemas they build themselves (partial migration chains,
+# synthetic tables, the migration runner's own tables)
+exclude = ["**/*.test.ts"]
+schema = "none"
+schema_dir = "migrations/active"
+
+# Supabase project: migrations + pgTAP tests (auth.* tables are Supabase's own)
+
+[[project]]
+name = "basejump"
+url = "https://github.com/usebasejump/basejump"
+sha = "7a1f95ccef74"
+license = "MIT"
+kind = "sql"
+dialects = ["postgresql"]
+root = "supabase"
+models = ["tests/**/*.sql", "seed.sql"]
+schema = "none"
+schema_dir = "migrations"
 
 # --- dependencies (dbt packages for "dbt-run") ------------------------------------------
 

@@ -27,6 +27,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -276,6 +277,58 @@ def bq_yaml_ddl(p, dialect):
     return [path] + views
 
 
+# --- schema from DDL files ---------------------------------------------------------
+
+
+def ddl_files(p):
+    """The `schema_files` globs in the manifest's order (each glob's matches sorted)."""
+    root = project_root(p)
+    files = []
+    for g in p.get("schema_files", []):
+        for f in sorted(glob.glob(str(root / g), recursive=True)):
+            if f not in files:
+                files.append(f)
+    return files
+
+
+def schema_dir(p):
+    """The migrations directory, or a copy of it with the manifest's `schema_rewrite`
+    replacements applied (what the application does to its migrations at runtime)"""
+    root = project_root(p)
+    src = root / p["schema_dir"]
+    if not p.get("schema_rewrite"):
+        return src
+    dest = SCHEMAS / p["name"] / "migrations"
+    if dest.exists():
+        shutil.rmtree(dest)
+    for f in sorted(src.rglob("*.sql")):
+        text = f.read_text(errors="replace")
+        for old, new in p["schema_rewrite"]:
+            text = text.replace(old, new)
+        out = dest / f.relative_to(src)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+    return dest
+
+
+TS_SQL_TAG = re.compile(r"\bsql`((?:[^`\\]|\\.)*)`", re.S)
+
+
+def ts_sql_schema(p):
+    """DDL of migrations written as tagged templates in TypeScript (`sql\\`CREATE ...\\``):
+    the templates of the `schema_files`, one statement each, written to a .sql file."""
+    parts = []
+    for f in ddl_files(p):
+        for m in TS_SQL_TAG.finditer(Path(f).read_text(errors="replace")):
+            body = m.group(1).strip().rstrip(";")
+            if "${" not in body:
+                parts.append(body + ";\n")
+    path = SCHEMAS / p["name"] / "ts-schema.sql"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(parts))
+    return path
+
+
 # --- driver --------------------------------------------------------------------------
 
 
@@ -314,14 +367,19 @@ def run_project(p):
         elif p["schema"] == "yml":
             schema = [write_ddl(SCHEMAS / p["name"] / f"yml-{dialect}.sql", yml_tables(p), dialect)]
         elif p["schema"] == "ddl":
-            schema = sorted({str(Path(f)) for g in p["schema_files"] for f in glob.glob(str(root / g), recursive=True)})
+            schema = ddl_files(p)
+        elif p["schema"] == "ts-sql":
+            schema = [ts_sql_schema(p)]
         elif p["schema"] == "bq-yaml":
             schema = bq_yaml_ddl(p, dialect)
         else:
             schema = [SCHEMAS / "empty.sql"]
             schema[0].parent.mkdir(parents=True, exist_ok=True)
             schema[0].write_text("-- no schema\n")
-        result = run_sqlsift(files, schema, dialect, templating, cwd=root)
+        # a migrations directory is loaded by sqlsift itself (`--schema-dir`: filename
+        # order, rollback migrations skipped), the way an app developer runs it
+        extra = ["--schema-dir", str(schema_dir(p))] if p.get("schema_dir") else []
+        result = run_sqlsift(files, schema, dialect, templating, cwd=root, extra=extra)
         rows.append(save(p, "raw", dialect, result))
         if not (dbtp and dbtp.ok):
             continue

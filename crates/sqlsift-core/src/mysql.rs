@@ -13,6 +13,7 @@
 //!   `SQL_NO_CACHE`, ...) are blanked and `DISTINCTROW` becomes `DISTINCT`.
 //! - The `STRAIGHT_JOIN` join operator becomes `JOIN`.
 //! - Index hints (`USE | FORCE | IGNORE {INDEX | KEY} [FOR ...] (...)`) are blanked.
+//! - The trailing `ORDER BY` and `LIMIT` of a single-table UPDATE are blanked.
 //!
 //! Every rewritten character becomes one character, so lines and character columns
 //! are kept (byte lengths are kept too unless a blanked name has non-ASCII characters).
@@ -162,6 +163,7 @@ fn rewrite_tokens(sql: &str) -> Option<String> {
         "INDEX",
         "KEY",
         "DISTINCTROW",
+        "LIMIT",
     ]
     .iter()
     .chain(SELECT_MODIFIERS)
@@ -215,8 +217,16 @@ fn rewrite_tokens(sql: &str) -> Option<String> {
         });
     };
 
+    // The trailing ORDER BY / LIMIT of the UPDATE being rewritten: (first, last)
+    let mut update_tail: Option<(usize, usize)> = None;
     let mut k = 0;
     while k < tokens.len() {
+        if let Some((first, last)) = update_tail.filter(|&(first, _)| first == k) {
+            blank(first, last, "");
+            update_tail = None;
+            k = last + 1;
+            continue;
+        }
         match word(k).as_str() {
             "CREATE" => {
                 let mut j = k + 1;
@@ -276,6 +286,34 @@ fn rewrite_tokens(sql: &str) -> Option<String> {
             }
             "STRAIGHT_JOIN" => {
                 blank(k, k, "JOIN");
+                k += 1;
+            }
+            // Single-table `UPDATE ... [ORDER BY ...] LIMIT n`: the trailing ORDER BY and
+            // LIMIT only choose which rows are updated
+            "UPDATE" if k == 0 || is(k - 1, &Token::SemiColon) => {
+                let mut depth = 0usize;
+                let mut seen_set = false;
+                let mut tail = None;
+                let mut j = k + 1;
+                while j < tokens.len() && !(depth == 0 && is(j, &Token::SemiColon)) {
+                    match &tokens[j].0 {
+                        Token::LParen => depth += 1,
+                        Token::RParen => depth = depth.saturating_sub(1),
+                        _ if depth > 0 => {}
+                        _ => match word(j).as_str() {
+                            "SET" => seen_set = true,
+                            "ORDER" if seen_set && word(j + 1) == "BY" => {
+                                tail.get_or_insert(j);
+                            }
+                            "LIMIT" if seen_set => {
+                                tail.get_or_insert(j);
+                            }
+                            _ => {}
+                        },
+                    }
+                    j += 1;
+                }
+                update_tail = tail.map(|first| (first, j - 1));
                 k += 1;
             }
             "USE" | "FORCE" | "IGNORE" if matches!(word(k + 1).as_str(), "INDEX" | "KEY") => {

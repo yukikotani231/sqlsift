@@ -36,6 +36,10 @@
 //!   `SET ${sql(patch)}` becomes `SET <identifier>=$1`.
 //! - `${expr}` after a value or a name (`WHERE a = 1 ${filter}`,
 //!   `FROM users ${where}`) is a query fragment between clauses, and is dropped.
+//!   It may join tables, so names the query can't resolve are not reported.
+//! - `${expr}` where a subquery goes (`FROM (${q}) a`, `WITH f AS (${q})`,
+//!   `IN (${q} UNION ...)`) becomes `SELECT*FROM <identifier>`, a relation of unknown
+//!   columns.
 //! - Templates nested in an extracted template's `${...}` are not extracted (they
 //!   usually are query fragments).
 //!
@@ -145,6 +149,9 @@ pub(crate) struct Extracted {
     /// Identifiers substituted for interpolations: (line, first column, end
     /// column), 1-indexed and end-exclusive
     pub identifiers: Vec<(usize, usize, usize)>,
+    /// Interpolations dropped as query fragments between clauses: (line, column,
+    /// whether it is in a FROM clause, where it may join relations), 1-indexed
+    pub fragments: Vec<(usize, usize, bool)>,
 }
 
 /// Lexer state: what an open backtick or `${` belongs to
@@ -323,6 +330,8 @@ pub(crate) fn extract<S: AsRef<str>>(
         .collect();
     // Substituted identifiers as character index ranges
     let mut identifiers = Vec::new();
+    // Dropped fragments as character indexes
+    let mut fragments = Vec::new();
     let mut directives = Vec::new();
 
     let mut stack: Vec<Frame> = Vec::new();
@@ -425,8 +434,13 @@ pub(crate) fn extract<S: AsRef<str>>(
                         let (start, sql) = (*start, *sql);
                         stack.pop();
                         if sql {
-                            let identifier = placeholder(&chars, &mut out, start, i + 1, dialect);
-                            identifiers.extend(identifier);
+                            match placeholder(&chars, &mut out, start, i + 1, dialect) {
+                                Interpolation::Identifier(range) => identifiers.push(range),
+                                Interpolation::Fragment { joins } => {
+                                    fragments.push((start, joins));
+                                }
+                                Interpolation::Value => {}
+                            }
                         }
                     }
                     Some(Frame::Interpolation { depth, .. }) => *depth -= 1,
@@ -512,9 +526,18 @@ pub(crate) fn extract<S: AsRef<str>>(
         })
         .collect();
 
+    let fragments = fragments
+        .into_iter()
+        .map(|(start, joins)| {
+            let (line, column) = position(start);
+            (line, column, joins)
+        })
+        .collect();
+
     Extracted {
         text: out.into_iter().collect(),
         identifiers,
+        fragments,
     }
 }
 
@@ -610,6 +633,15 @@ fn starts_with_statement(chars: &[char], mut i: usize) -> bool {
         .iter()
         .collect::<String>()
         .to_ascii_lowercase();
+    // `DESC` alone is an ORDER BY direction (`sortDir ? sql`ASC` : sql`DESC``), not
+    // MySQL's `DESC table`
+    let alone = chars[end..]
+        .iter()
+        .take_while(|&&c| c != '`')
+        .all(|c| c.is_whitespace());
+    if word == "desc" && alone {
+        return false;
+    }
     STATEMENT_KEYWORDS.contains(&word.as_str())
         // A misspelled statement (`SELEC id FROM t`) is reported as a syntax error
         || ["select", "insert", "update", "delete"]
@@ -765,15 +797,29 @@ fn regex_allowed(previous: &Previous) -> bool {
     }
 }
 
-/// Write the SQL for the interpolation `chars[start..end]` (`${...}`) to `out`,
-/// returning the character range of an identifier substituted for it
+/// What a query interpolated where a subquery goes becomes, before an identifier
+/// (sqlparser reads `IN (TABLE t ...)` as a list, not a subquery)
+const SELECT_FROM: &str = "SELECT*FROM ";
+
+/// What an interpolation became in the SQL text
+enum Interpolation {
+    /// An identifier, over this character range
+    Identifier((usize, usize)),
+    /// Nothing: a query fragment between clauses; `joins` if it is in a FROM
+    /// clause, where it may join relations
+    Fragment { joins: bool },
+    /// A value (a bind parameter)
+    Value,
+}
+
+/// Write the SQL for the interpolation `chars[start..end]` (`${...}`) to `out`
 fn placeholder(
     chars: &[char],
     out: &mut [char],
     start: usize,
     end: usize,
     dialect: SqlDialect,
-) -> Option<(usize, usize)> {
+) -> Interpolation {
     let parameter = dialect.bind_parameter();
 
     // The SQL word before the interpolation
@@ -799,7 +845,43 @@ fn placeholder(
                 name_end += 1;
             }
         }
-        return Some((start, name_end));
+        return Interpolation::Identifier((start, name_end));
+    }
+
+    // A query where a subquery goes: after `(` following FROM, JOIN, AS (a CTE),
+    // LATERAL or EXISTS and closed right after it (`FROM (${q}) a`,
+    // `WITH f AS (${q})`), or followed by a set operator (`IN (${q} UNION ...)`), is
+    // `SELECT*FROM <identifier>`: a relation of unknown columns
+    if word_start == word_end && word_end > 0 && out[word_end - 1] == '(' {
+        let paren = word_end - 1;
+        let before_end = skip_space_back(out, paren);
+        let mut before_start = before_end;
+        while before_start > 0 && is_sql_word_char(out[before_start - 1]) {
+            before_start -= 1;
+        }
+        let before: String = out[before_start..before_end].iter().collect();
+        let mut after = end;
+        while after < chars.len() && chars[after].is_whitespace() {
+            after += 1;
+        }
+        let mut after_end = after;
+        while after_end < chars.len() && is_sql_word_char(chars[after_end]) {
+            after_end += 1;
+        }
+        let next_word: String = chars[after..after_end].iter().collect();
+        let subquery = (chars.get(after) == Some(&')')
+            && ["from", "join", "as", "lateral", "exists"]
+                .iter()
+                .any(|k| before.eq_ignore_ascii_case(k)))
+            || ["union", "intersect", "except"]
+                .iter()
+                .any(|k| next_word.eq_ignore_ascii_case(k));
+        if subquery && width >= SELECT_FROM.len() + 2 {
+            write(out, start, SELECT_FROM);
+            let name_start = start + SELECT_FROM.len();
+            write_identifier(chars, out, name_start, first_line_end);
+            return Interpolation::Identifier((name_start, first_line_end));
+        }
     }
 
     // postgres.js helpers: columns and values the query doesn't show
@@ -808,7 +890,7 @@ fn placeholder(
         let name_end = first_line_end - parameter.len() - 1;
         write_identifier(chars, out, start, name_end);
         write(out, name_end, &format!("={parameter}"));
-        return Some((start, name_end));
+        return Interpolation::Identifier((start, name_end));
     }
     // Rows of unknown columns are `TABLE <schema>.<name>` (sqlparser 0.53 reads a
     // `TABLE` query as three tokens, so the name is qualified)
@@ -816,7 +898,7 @@ fn placeholder(
         // `VALUES ${sql(rows)}`: `TABLE  _.<identifier>`
         write(out, word_start, "TABLE ");
         write_qualified_identifier(chars, out, start, first_line_end);
-        return Some((start, first_line_end));
+        return Interpolation::Identifier((start, first_line_end));
     }
     if (word_start == word_end || !VALUE_KEYWORDS.iter().any(is_word))
         && width >= "TABLE _.x".len()
@@ -826,7 +908,7 @@ fn placeholder(
         write(out, start, "TABLE ");
         let name_start = start + "TABLE ".len();
         write_qualified_identifier(chars, out, name_start, first_line_end);
-        return Some((name_start, first_line_end));
+        return Interpolation::Identifier((name_start, first_line_end));
     }
 
     // After a value or a name, an interpolation is a fragment between clauses
@@ -839,7 +921,9 @@ fn placeholder(
                 || (out[word_end - 1] == '?' && dialect != SqlDialect::PostgreSQL))
     };
     if after_value {
-        return None;
+        return Interpolation::Fragment {
+            joins: in_from_clause(out, start),
+        };
     }
 
     // A list after IN (`IN ${ids}`) needs parentheses
@@ -849,7 +933,53 @@ fn placeholder(
         parameter.to_string()
     };
     write(out, start, &text);
-    None
+    Interpolation::Value
+}
+
+/// Whether `out[..end]` ends in a FROM clause: the last clause keyword before `end`
+/// (outside parentheses closed before it) is FROM, JOIN, ON, USING or LATERAL, or
+/// there is none
+fn in_from_clause(out: &[char], end: usize) -> bool {
+    let mut depth = 0usize;
+    let mut k = end;
+    while k > 0 {
+        let c = out[k - 1];
+        if c == ')' {
+            depth += 1;
+            k -= 1;
+        } else if c == '(' {
+            if depth == 0 {
+                // The start of the subquery the interpolation is in
+                return true;
+            }
+            depth -= 1;
+            k -= 1;
+        } else if is_sql_word_char(c) {
+            let word_end = k;
+            while k > 0 && is_sql_word_char(out[k - 1]) {
+                k -= 1;
+            }
+            if depth > 0 {
+                continue;
+            }
+            let word: String = out[k..word_end]
+                .iter()
+                .collect::<String>()
+                .to_ascii_lowercase();
+            match word.as_str() {
+                "from" | "join" | "on" | "using" | "lateral" => return true,
+                "where" | "group" | "having" | "order" | "limit" | "offset" | "select" | "set"
+                | "returning" | "values" | "window" | "qualify" | "union" | "intersect"
+                | "except" | "fetch" | "for" => return false,
+                _ => {}
+            }
+        } else if c == ';' {
+            return true;
+        } else {
+            k -= 1;
+        }
+    }
+    true
 }
 
 fn is_sql_word_char(c: char) -> bool {

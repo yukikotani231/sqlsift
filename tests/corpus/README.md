@@ -1,7 +1,7 @@
 # Real-world corpus
 
-A harness that checks sqlsift against public dbt projects and warehouse SQL
-(`manifest.toml`) to find false positives and measure false negatives. Nothing is
+A harness that checks sqlsift against public dbt projects, warehouse SQL and
+application repositories (`manifest.toml`) to find false positives and measure false negatives. Nothing is
 vendored: the projects are cloned into `repos/` and all output goes to `out/` (both
 git-ignored). It is not part of `cargo test` or CI; the minimal reproductions it found
 are in `crates/sqlsift-core/tests/corpus_regression_tests.rs`.
@@ -21,6 +21,23 @@ python3 tests/corpus/blank_retry.py           # parse rate if Jinja tags at pars
 ```
 
 All scripts take project names to limit the run (`python3 tests/corpus/run.py dbt_stripe`).
+
+## Application repositories
+
+The `kind = "sql"` projects with a `schema_dir` are applications: sqlc queries
+(`-- name:`, `@param`, `sqlc.arg()`), Prisma TypedSQL (`prisma/sql/*.sql`), postgres.js
+tagged templates in TypeScript, and MySQL queries. They are checked the way their
+developers would run sqlsift: the migrations directory with `--schema-dir` (golang-migrate,
+dbmate, goose and sql-migrate down sections are skipped) and the query files, or the
+`.ts` files for postgres.js. `schema = "ts-sql"` reads migrations written as `sql\`...\``
+templates in TypeScript, and `schema_rewrite` patches a copy of the migrations for
+applications that rewrite them at runtime.
+
+Each diagnostic in these projects is triaged as a real bug (confirmed with `EXPLAIN` on
+PostgreSQL, `EXPLAIN (GENERIC_PLAN)` for queries with `$n` parameters), a false positive
+(fixed in sqlsift, with a minimal rewrite in `corpus_regression_tests.rs`), or a harness
+gap (the schema isn't in the repository: excluded in the manifest with a comment). Every
+project's license is recorded in the manifest and projects without one are not used.
 
 ## Modes
 

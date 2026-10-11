@@ -402,6 +402,7 @@ impl Resolver<'_> {
                     && col_def.data_type.is_integer();
                 if !col_def.nullable
                     && !generates_key
+                    && !table_def.before_insert_trigger
                     && matches!(value_expr, Expr::Value(Value::Null))
                 {
                     // NULL literals carry no source location: point at the
@@ -462,7 +463,10 @@ impl Resolver<'_> {
             };
             let target_span = Span::from_sqlparser(&target.span);
 
-            if !col_def.nullable && matches!(&assignment.value, Expr::Value(Value::Null)) {
+            if !col_def.nullable
+                && !table_def.before_update_trigger
+                && matches!(&assignment.value, Expr::Value(Value::Null))
+            {
                 // NULL literals carry no source location: point at the target column
                 self.diagnostics
                     .push(not_null_violation(&target.value, target_span));

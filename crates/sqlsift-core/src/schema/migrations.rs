@@ -1,6 +1,5 @@
-//! Support for migration tool conventions: rollback (down/undo) files,
-//! dbmate's `-- migrate:up` / `-- migrate:down` sections and goose's
-//! `-- +goose Up` / `-- +goose Down` sections.
+//! Support for migration tool conventions: rollback (down/undo) files and the
+//! down sections of dbmate, goose and sql-migrate files.
 //!
 //! Only the "up" direction describes the schema, so rollback SQL must not be
 //! applied when building the catalog.
@@ -47,15 +46,33 @@ fn is_flyway_undo(name: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c == '.' || c == '_')
 }
 
-/// Blank out dbmate and goose "down" sections: every line after a
-/// `-- migrate:down` (dbmate) or `-- +goose Down` (goose) marker, up to the
-/// next `-- migrate:up` / `-- +goose Up` marker (or the end of the file).
+/// Blank out the "down" sections of migration files that hold both directions:
+/// every line after a down marker, up to the next up marker (or the end of the
+/// file). The markers are those of
+///
+/// - dbmate: `-- migrate:down` / `-- migrate:up`
+/// - goose: `-- +goose Down` / `-- +goose Up`
+/// - sql-migrate: `-- +migrate Down` / `-- +migrate Up`
 ///
 /// Removed text is replaced with spaces (newlines are kept), so byte offsets
 /// and line numbers of the remaining statements are unchanged. Input without
 /// a down marker is returned as is.
+///
+/// ```
+/// use sqlsift_core::schema::strip_down_migrations;
+///
+/// let sql = "-- +goose Up\nCREATE TABLE t (id INT);\n-- +goose Down\nDROP TABLE t;\n";
+/// assert_eq!(
+///     strip_down_migrations(sql),
+///     "-- +goose Up\nCREATE TABLE t (id INT);\n              \n             \n"
+/// );
+/// ```
 pub fn strip_down_migrations(sql: &str) -> Cow<'_, str> {
-    if !sql.contains("migrate:down") && !sql.contains("+goose") {
+    let has_down = sql.contains("migrate:down") || {
+        let lower = sql.to_ascii_lowercase();
+        lower.contains("+goose down") || lower.contains("+migrate down")
+    };
+    if !has_down {
         return Cow::Borrowed(sql);
     }
 
@@ -81,19 +98,23 @@ enum Marker {
     Down,
 }
 
-/// Recognize a dbmate marker line (`-- migrate:up` or `-- migrate:down`,
-/// optionally followed by options such as `transaction:false`) or a goose one
-/// (`-- +goose Up` or `-- +goose Down`).
+/// Recognize a marker line: dbmate's `-- migrate:up` or `-- migrate:down`,
+/// optionally followed by options such as `transaction:false`, or goose's and
+/// sql-migrate's `-- +goose Up` / `-- +migrate Down` (any case, optionally
+/// followed by options such as `notransaction`).
 fn migrate_marker(line: &str) -> Option<Marker> {
     let rest = line.trim_start().strip_prefix("--")?.trim_start();
-    if let Some(goose) = rest.strip_prefix("+goose") {
-        let word = goose.split_whitespace().next()?;
-        return if word.eq_ignore_ascii_case("down") {
-            Some(Marker::Down)
-        } else if word.eq_ignore_ascii_case("up") {
+    if let Some(rest) = rest.strip_prefix('+') {
+        let (tool, rest) = rest.split_once(char::is_whitespace)?;
+        if !(tool.eq_ignore_ascii_case("goose") || tool.eq_ignore_ascii_case("migrate")) {
+            return None;
+        }
+        let direction = rest.split_whitespace().next()?;
+        return if direction.eq_ignore_ascii_case("up") {
             Some(Marker::Up)
+        } else if direction.eq_ignore_ascii_case("down") {
+            Some(Marker::Down)
         } else {
-            // `StatementBegin`, `StatementEnd`, `NO TRANSACTION`, ...
             None
         };
     }

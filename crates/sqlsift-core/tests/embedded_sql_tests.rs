@@ -210,8 +210,12 @@ fn interpolated_fragments_between_clauses_are_dropped() {
         sql`SELECT p.id FROM posts p WHERE p.title ILIKE ${t} ${cond ? sql`AND p.published` : sql``} ORDER BY p.id`;
         prisma.$queryRaw`SELECT id FROM authors ${where}`;
         sql`SELECT id FROM posts WHERE ${cond ? sql`published` : sql`true`} ORDER BY id ${dir}`;
-        sql`SELECT titel FROM posts ${where}`;
+        sql`SELECT titel FROM posts WHERE id > 0 ${and}`;
+        sql`SELECT titel, x.name FROM posts ${join}`;
     ";
+    // A fragment after a WHERE adds no relations; one in the FROM clause may join a
+    // table that has `titel` (or is `x`), so names that resolve to nothing aren't
+    // reported there
     assert_eq!(
         locations(&analyze_ts(source, &["sql", "$queryRaw"])),
         vec![(DiagnosticKind::ColumnNotFound, 5, 20)]

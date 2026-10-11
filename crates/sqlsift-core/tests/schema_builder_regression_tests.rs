@@ -704,12 +704,11 @@ fn partition_of_missing_parent_warns() {
 }
 
 #[test]
-fn mysql_prefix_index_warns() {
-    let w = single_warning(
-        SqlDialect::MySQL,
-        "CREATE TABLE `t` (`name` VARCHAR(100), KEY `idx` (`name`(50)));",
-    );
-    assert!(w.message.contains('t'), "{}", w.message);
+fn mysql_prefix_index_is_loaded() {
+    // sqlparser doesn't parse a key part's prefix length, which doesn't change the
+    // table's columns
+    let c = mysql("CREATE TABLE `t` (`name` VARCHAR(100), KEY `idx` (`name`(50)));");
+    assert_eq!(table(&c, "t").column_names(), vec!["name"]);
 }
 
 #[test]

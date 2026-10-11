@@ -147,7 +147,7 @@ impl<'a> Analyzer<'a> {
     /// ```
     pub fn analyze(&mut self, sql: &str) -> Vec<Diagnostic> {
         let (sql, bom) = strip_bom(sql);
-        let mut diagnostics = self.analyze_text(sql, sql, &[]);
+        let mut diagnostics = self.analyze_text(sql, sql, &[], &[]);
         shift_offsets(&mut diagnostics, bom);
         diagnostics
     }
@@ -175,7 +175,12 @@ impl<'a> Analyzer<'a> {
         let (source, bom) = strip_bom(source);
         let extracted =
             crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Script);
-        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        let mut diagnostics = self.analyze_text(
+            &extracted.text,
+            source,
+            &extracted.identifiers,
+            &extracted.fragments,
+        );
         shift_offsets(&mut diagnostics, bom);
         diagnostics
     }
@@ -205,19 +210,27 @@ impl<'a> Analyzer<'a> {
         let (source, bom) = strip_bom(source);
         let extracted =
             crate::embedded::extract(source, tags, self.dialect, crate::embedded::Host::Component);
-        let mut diagnostics = self.analyze_text(&extracted.text, source, &extracted.identifiers);
+        let mut diagnostics = self.analyze_text(
+            &extracted.text,
+            source,
+            &extracted.identifiers,
+            &extracted.fragments,
+        );
         shift_offsets(&mut diagnostics, bom);
         diagnostics
     }
 
     /// Analyze `sql`, which has the same lines and character columns as `original`
     /// (where byte offsets point). Name diagnostics on the `substituted` identifiers
-    /// ((line, first column, end column)) are dropped.
+    /// ((line, first column, end column)) are dropped. A statement with one of the
+    /// `fragments` ((line, column, whether it may join relations) of a dropped query
+    /// fragment) may have clauses, and relations, the text doesn't show.
     fn analyze_text(
         &mut self,
         sql: &str,
         original: &str,
         substituted: &[(usize, usize, usize)],
+        fragments: &[(usize, usize, bool)],
     ) -> Vec<Diagnostic> {
         self.diagnostics.clear();
 
@@ -317,10 +330,21 @@ impl<'a> Analyzer<'a> {
                 let text = sql.get(starts[index]..end).unwrap_or_default();
                 text.contains("{{") || text.contains("{%")
             };
+            // Query fragments interpolated between clauses may join relations
+            let next = statements.get(index + 1).map(|(_, o)| (o.line, o.column));
+            let statement_fragments: Vec<bool> = fragments
+                .iter()
+                .filter(|&&(line, column, _)| {
+                    (line, column) >= (origin.line, origin.column)
+                        && next.map_or(true, |next| (line, column) < next)
+                })
+                .map(|&(_, _, joins)| joins)
+                .collect();
             let mut resolver = Resolver::new(catalog, self.dialect)
                 .with_variables(&variables)
                 .with_templated_names(&templated_name);
-            resolver.templated_statement = templated;
+            resolver.templated_statement = templated || !statement_fragments.is_empty();
+            resolver.hidden_relations = statement_fragments.contains(&true);
             resolver.restrictions = restrictions;
             resolver.statement(stmt);
             if let Statement::Declare { stmts } = stmt {
@@ -522,10 +546,27 @@ impl<'a> Analyzer<'a> {
                         snowflake::mask_positional_columns(dialect.as_ref(), text)
                             .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
                     }
+                    // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
+                    dialect_kind if dialect_kind.is_psql() => {
+                        mask_row_lock_strength(dialect.as_ref(), text)
+                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                    }
                     _ => None,
                 });
             if let Some(parsed) = retried {
                 statements.extend(parsed.into_iter().map(|s| (s, origin)));
+                continue;
+            }
+            // PostgreSQL's `ANALYZE [VERBOSE] [table]` (sqlparser wants `ANALYZE TABLE`):
+            // statistics only, nothing to check
+            if self.dialect.is_psql() && first_word_is(dialect.as_ref(), text, "ANALYZE") {
+                continue;
+            }
+            // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
+            // functions and types only, no relation to check
+            if self.dialect.is_psql()
+                && starts_with_words(dialect.as_ref(), text, &["CREATE", "EXTENSION"])
+            {
                 continue;
             }
             // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
@@ -550,6 +591,72 @@ impl<'a> Analyzer<'a> {
         }
         (statements, skipped)
     }
+}
+
+/// Significant tokens of `text` with their byte ranges (`None` if it can't be
+/// tokenized)
+fn significant_tokens(dialect: &dyn Dialect, text: &str) -> Option<Vec<(Token, Range<usize>)>> {
+    let lines = LineIndex::new(text);
+    let tokens = Tokenizer::new(dialect, text)
+        .tokenize_with_location()
+        .ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+            .map(|t| {
+                let start = lines.byte_offset(t.span.start.line, t.span.start.column);
+                let end = lines.byte_offset(t.span.end.line, t.span.end.column);
+                (t.token, start..end)
+            })
+            .collect(),
+    )
+}
+
+/// Whether the first word of `text` (after comments) is the keyword `keyword`
+fn first_word_is(dialect: &dyn Dialect, text: &str, keyword: &str) -> bool {
+    starts_with_words(dialect, text, &[keyword])
+}
+
+/// Whether `text` (after comments) starts with the keywords `keywords`
+fn starts_with_words(dialect: &dyn Dialect, text: &str, keywords: &[&str]) -> bool {
+    significant_tokens(dialect, text).is_some_and(|tokens| {
+        tokens.len() >= keywords.len()
+            && tokens.iter().zip(keywords).all(|((token, _), keyword)| {
+                matches!(token, Token::Word(w)
+                    if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(keyword))
+            })
+    })
+}
+
+/// `text` with the row-level lock strengths sqlparser doesn't parse blanked to the
+/// ones it does: `FOR NO KEY UPDATE` becomes `FOR UPDATE` and `FOR KEY SHARE`
+/// becomes `FOR SHARE` (`None` if there are none)
+fn mask_row_lock_strength(dialect: &dyn Dialect, text: &str) -> Option<String> {
+    let tokens = significant_tokens(dialect, text)?;
+    let is = |i: usize, kw: &str| {
+        matches!(tokens.get(i), Some((Token::Word(w), _))
+            if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(kw))
+    };
+    let mut blank = Vec::new();
+    for i in 0..tokens.len() {
+        if !is(i, "FOR") {
+            continue;
+        }
+        if is(i + 1, "NO") && is(i + 2, "KEY") && is(i + 3, "UPDATE") {
+            blank.push(tokens[i + 1].1.start..tokens[i + 2].1.end);
+        } else if is(i + 1, "KEY") && is(i + 2, "SHARE") {
+            blank.push(tokens[i + 1].1.clone());
+        }
+    }
+    if blank.is_empty() {
+        return None;
+    }
+    let mut masked = text.to_string();
+    for range in blank {
+        masked.replace_range(range.clone(), &" ".repeat(range.len()));
+    }
+    Some(masked)
 }
 
 /// Whether `d` reports a qualifier missing from FROM (`a_o.v`) whose name may be an

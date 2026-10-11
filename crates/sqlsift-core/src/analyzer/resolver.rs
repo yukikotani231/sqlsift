@@ -51,6 +51,10 @@ pub(super) struct Resolver<'a> {
     pub(super) duplicate_names: Vec<String>,
     /// The statement has template tags, which may expand to columns or clauses
     pub(super) templated_statement: bool,
+    /// The statement has query fragments the text doesn't show (interpolated
+    /// between clauses), which may join relations: qualifiers and columns that
+    /// resolve to nothing are not reported
+    pub(super) hidden_relations: bool,
     /// Subqueries compared with or assigned to a row, by address (they may return
     /// several columns)
     pub(super) row_subqueries: Vec<usize>,
@@ -73,6 +77,7 @@ impl<'a> Resolver<'a> {
             templated_name: None,
             duplicate_names: Vec::new(),
             templated_statement: false,
+            hidden_relations: false,
             row_subqueries: Vec::new(),
             in_subquery: None,
             restrictions: false,
@@ -1498,7 +1503,7 @@ impl<'a> Resolver<'a> {
                     {
                         // `struct_col.*` / `alias.struct_col.field.*`: the STRUCT's
                         // fields, which sqlsift doesn't model
-                    } else {
+                    } else if !self.hidden_relations {
                         self.diagnostics.push(relation_not_in_from(schema, table));
                     }
                 }
@@ -1945,8 +1950,10 @@ impl<'a> Resolver<'a> {
                 .scope
                 .qualified_relation(self.catalog, schema_id, table_id)
             else {
-                self.diagnostics
-                    .push(relation_not_in_from(schema_id, table_id));
+                if !self.hidden_relations {
+                    self.diagnostics
+                        .push(relation_not_in_from(schema_id, table_id));
+                }
                 return;
             };
             match relation.column(column_name, self.dialect) {
@@ -2055,7 +2062,7 @@ impl<'a> Resolver<'a> {
                     .variables
                     .iter()
                     .any(|v| v.eq_ignore_ascii_case(column_name));
-                if is_alias || is_relation || is_keyword || is_variable {
+                if is_alias || is_relation || is_keyword || is_variable || self.hidden_relations {
                     return;
                 }
 
@@ -2117,6 +2124,8 @@ impl<'a> Resolver<'a> {
             || col.identity.is_some()
             || col.auto_increment
             || col.generated
+            // A BEFORE INSERT trigger may set it
+            || table.before_insert_trigger
         {
             return true;
         }

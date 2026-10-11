@@ -31,7 +31,7 @@ The [example projects](../integrations/examples.md) show complete setups for sql
 When reading migrations, sqlsift applies only the "up" direction:
 
 - `--schema-dir` skips rollback files: `*.down.sql` (sqlx, golang-migrate) and Flyway undo files `U<version>__*.sql`.
-- In any schema file, everything after a dbmate `-- migrate:down` or goose `-- +goose Down` marker (up to the next `-- migrate:up` / `-- +goose Up`) is ignored.
+- In any schema file, everything after a down marker (up to the next up marker) is ignored: dbmate's `-- migrate:down` / `-- migrate:up`, goose's `-- +goose Down` / `-- +goose Up` and sql-migrate's `-- +migrate Down` / `-- +migrate Up`.
 - Files passed explicitly with `--schema` are always loaded, even if their name looks like a rollback.
 
 ## What sqlsift understands
