@@ -10,6 +10,7 @@
 //! - CTEs are visible in the query that defines them and everything nested in it
 
 use indexmap::IndexMap;
+use sqlparser::ast::Ident;
 use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;
@@ -95,6 +96,9 @@ pub(super) struct Relation {
     pub(super) merged: HashSet<String>,
     /// Columns of a catalog table that ALTER TABLE renamed or dropped
     pub(super) former_columns: Vec<FormerColumn>,
+    /// Schema-qualified name of a catalog table or view referenced without an
+    /// alias (`schema.table.column` refers to it); `None` for anything else
+    pub(super) qualified: Option<QualifiedName>,
 }
 
 /// Whether a relation has a column
@@ -118,6 +122,7 @@ impl Relation {
             columns,
             merged: HashSet::new(),
             former_columns: Vec::new(),
+            qualified: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl Relation {
             .collect();
         let mut relation = Self::new(RelationKind::Table, name.to_string(), Some(columns));
         relation.former_columns.clone_from(&table.former_columns);
+        relation.qualified = catalog.resolve_relation(name);
         Some(relation)
     }
 
@@ -169,7 +175,9 @@ impl Relation {
                 })
                 .collect()
         });
-        Some(Self::new(RelationKind::View, name.to_string(), columns))
+        let mut relation = Self::new(RelationKind::View, name.to_string(), columns);
+        relation.qualified = catalog.resolve_relation(name);
+        Some(relation)
     }
 
     /// Apply an explicit column list (`AS t(a, b)`, `WITH t(a, b)`): it renames the
@@ -252,6 +260,50 @@ pub(super) struct Frame {
     pub(super) hides_parent: bool,
 }
 
+impl Frame {
+    /// The relation of this query block that `[schema.]name` refers to.
+    ///
+    /// Without a schema, the relation with that alias or name. With one, the
+    /// unaliased catalog table or view of that schema and name (`FROM auth.users JOIN
+    /// public.users` holds two `users`); failing that, the relation registered
+    /// under `name` unless it is a catalog table of another schema (with
+    /// [`Catalog::strict_schemas`]: elsewhere the qualifier may name a database
+    /// the schema input leaves unnamed).
+    pub(super) fn qualified_relation(
+        &self,
+        catalog: &Catalog,
+        schema: Option<&Ident>,
+        name: &Ident,
+    ) -> Option<&Relation> {
+        let Some(schema) = schema else {
+            return lookup_ignore_case(&self.relations, &name.value);
+        };
+        let (schema, table) = (catalog.ident_name(schema), catalog.ident_name(name));
+        let by_qualified_name = self.relations.values().find(|r| {
+            r.qualified.as_ref().is_some_and(|q| {
+                q.schema
+                    .as_deref()
+                    .is_some_and(|s| catalog.names_match(s, &schema))
+                    && catalog.names_match(&q.name, &table)
+            })
+        });
+        by_qualified_name.or_else(|| {
+            lookup_ignore_case(&self.relations, &name.value)
+                .filter(|r| r.qualified.is_none() || !catalog.strict_schemas)
+        })
+    }
+}
+
+/// The `[[database.]schema.]table` qualifier and the column of a column reference
+/// (`t.c`, `s.t.c`, `db.s.t.c`); `None` for other compound identifiers
+pub(super) fn split_column_ref(parts: &[Ident]) -> Option<(Option<&Ident>, &Ident, &Ident)> {
+    match parts {
+        [table, column] => Some((None, table, column)),
+        [schema, table, column] | [_, schema, table, column] => Some((Some(schema), table, column)),
+        _ => None,
+    }
+}
+
 /// Result of looking up an unqualified column
 pub(super) enum ColumnLookup<'s> {
     /// Found in exactly one relation (or merged by USING)
@@ -313,6 +365,18 @@ impl Scope {
     pub(super) fn relation(&self, name: &str) -> Option<&Relation> {
         self.visible()
             .find_map(|frame| lookup_ignore_case(&frame.relations, name))
+    }
+
+    /// A relation by `[schema.]name` as a column reference or `schema.table.*`
+    /// qualifies it, innermost first (see [`Frame::qualified_relation`])
+    pub(super) fn qualified_relation(
+        &self,
+        catalog: &Catalog,
+        schema: Option<&Ident>,
+        name: &Ident,
+    ) -> Option<&Relation> {
+        self.visible()
+            .find_map(|frame| frame.qualified_relation(catalog, schema, name))
     }
 
     /// A CTE by name, following the catalog's identifier case rules

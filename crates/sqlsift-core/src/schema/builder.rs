@@ -2,7 +2,7 @@
 
 use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, ColumnOption, ColumnOptionDef, DataType, Expr,
-    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint,
+    Ident, ObjectName, ObjectType, Query, SelectInto, SetExpr, Statement, TableConstraint, Use,
     UserDefinedTypeRepresentation, Value,
 };
 use sqlparser::parser::{Parser, ParserError};
@@ -37,6 +37,7 @@ impl SchemaBuilder {
     pub fn with_dialect(dialect: SqlDialect) -> Self {
         let mut catalog = Catalog::new();
         catalog.case_sensitive_names = dialect == SqlDialect::PostgreSQL;
+        catalog.strict_schemas = dialect == SqlDialect::PostgreSQL;
         Self {
             catalog,
             diagnostics: Vec::new(),
@@ -87,6 +88,7 @@ impl SchemaBuilder {
             } => true,
             Statement::Query(query) => select_into(query).is_some(),
             Statement::SetVariable { variables, .. } => is_search_path(variables),
+            Statement::Use(use_stmt) => used_schema(use_stmt).is_some(),
             _ => false,
         }
     }
@@ -586,6 +588,13 @@ impl SchemaBuilder {
             Statement::SetVariable {
                 variables, value, ..
             } if is_search_path(variables) => self.process_search_path(value),
+            // MySQL `USE db` / `USE SCHEMA s`: unqualified names are in that
+            // database for the rest of the file
+            Statement::Use(use_stmt) => {
+                if let Some(schema) = used_schema(use_stmt) {
+                    self.catalog.search_path = vec![self.catalog.ident_name(schema)];
+                }
+            }
             Statement::Drop {
                 object_type, names, ..
             } => {
@@ -610,7 +619,7 @@ impl SchemaBuilder {
 
     /// Whether a table or view with this name exists
     fn relation_exists(&self, name: &QualifiedName) -> bool {
-        self.catalog.table_exists(name) || self.catalog.view_exists(name)
+        self.catalog.relation_exists_exactly(name)
     }
 
     /// Process CREATE TABLE statement
@@ -1181,6 +1190,15 @@ fn build_column(
 fn select_into(query: &Query) -> Option<&SelectInto> {
     match query.body.as_ref() {
         SetExpr::Select(select) => select.into.as_ref(),
+        _ => None,
+    }
+}
+
+/// The schema (MySQL database) a `USE` statement makes current: the last part of
+/// `USE db` / `USE SCHEMA db.schema`
+fn used_schema(use_stmt: &Use) -> Option<&Ident> {
+    match use_stmt {
+        Use::Object(name) | Use::Schema(name) => name.0.last(),
         _ => None,
     }
 }

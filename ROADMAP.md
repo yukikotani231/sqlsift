@@ -26,7 +26,7 @@ Picked by demand after v0.2, roughly in this order:
 | Item | Issue |
 | --- | --- |
 | Baseline strict mode and maintenance tooling | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
-| Fully resolve schema-qualified names | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
+| Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
 | SQL in Rust code (sqlx `query!` / `query_as!`) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
 | dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
 | Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
