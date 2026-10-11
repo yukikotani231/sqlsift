@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>sqlsift 0.2: schema-aware static analysis for SQL, no database needed | sqlsift</title>
+  <title>Introducing sqlsift: schema-aware static analysis for SQL, no database needed | sqlsift</title>
   <meta name="description" content="sqlsift replays your migrations into an in-memory schema and checks every query against it, like a type checker for your SQL.">
   <meta name="color-scheme" content="light dark">
-  <link rel="canonical" href="https://sqlsift.dev/blog/sqlsift-0-2/">
-  <meta property="og:title" content="sqlsift 0.2: schema-aware static analysis for SQL, no database needed | sqlsift">
+  <link rel="canonical" href="https://sqlsift.dev/blog/introducing-sqlsift/">
+  <meta property="og:title" content="Introducing sqlsift: schema-aware static analysis for SQL, no database needed | sqlsift">
   <meta property="og:description" content="sqlsift replays your migrations into an in-memory schema and checks every query against it, like a type checker for your SQL.">
-  <meta property="og:url" content="https://sqlsift.dev/blog/sqlsift-0-2/">
+  <meta property="og:url" content="https://sqlsift.dev/blog/introducing-sqlsift/">
   <meta property="og:type" content="article">
-  <meta property="og:image" content="https://sqlsift.dev/blog/sqlsift-0-2/cover.png">
+  <meta property="og:image" content="https://sqlsift.dev/blog/introducing-sqlsift/cover.png">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Cpath d='M8 10h16l-6 7v6l-4 2v-8z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="../../style.css">
@@ -34,7 +34,7 @@
   </header>
   <main class="post">
     <article>
-      <h1>sqlsift 0.2: schema-aware static analysis for SQL, no database needed</h1>
+      <h1>Introducing sqlsift: schema-aware static analysis for SQL, no database needed</h1>
       <p class="meta">October 2026 · Yuki Kotani</p>
 <p>SQL is usually the one part of a codebase nothing checks before it
 runs. The compiler checks the code around a query, tests check the paths
@@ -70,8 +70,8 @@ error[E0002]: Column &#39;site_id&#39; not found in table &#39;page_views&#39;
     |           ^^^^^^^
     = help: &#39;site_id&#39; was renamed to &#39;website_id&#39; in migrations/002_rename_site_id.sql:1</code></pre>
 <h2 id="more-than-renames">More than renames</h2>
-<p>The goal is to catch everything the schema alone can tell you. 0.2
-has 27 rules in three categories:</p>
+<p>The goal is to catch everything the schema alone can tell you. There
+are 27 rules so far, in three categories:</p>
 <ul>
 <li><strong>correctness</strong> (errors): missing tables and columns,
 type mismatches, NOT NULL columns left out of an INSERT,
@@ -91,7 +91,7 @@ join</li>
 <h2 id="no-false-positives">No false positives</h2>
 <p>A linter that cries wolf gets turned off. sqlsift's rule is: if it
 can't work something out, it says nothing.</p>
-<p>Before 0.2, I ran it the way a user would on 16 open-source apps
+<p>To check that, I ran it the way a user would on 16 open-source apps
 using sqlc, Prisma TypedSQL, postgres.js, MySQL and Supabase (687
 files), and fixed it until it reported zero false positives. Along the
 way it found a real bug in <a
