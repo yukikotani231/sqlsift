@@ -3421,6 +3421,58 @@ fn baseline_matches_files_reached_through_a_symlink() {
         .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline");
 }
 
+/// What the GitHub Action's `diff-base` mode does: a baseline written in a
+/// checkout of the base commit, copied to the same place in the pull request's
+/// checkout, hides the problems the base already had and leaves the ones a new
+/// migration introduces
+#[test]
+fn baseline_written_in_a_copy_of_the_project_reports_only_new_problems() {
+    let t = TempDir::new("bl-diff-base");
+    for tree in ["base", "head"] {
+        t.write(
+            &format!("{tree}/db/001_init.sql"),
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);\n",
+        );
+        t.write(
+            &format!("{tree}/app/queries/users.sql"),
+            "SELECT id, name FROM users;\nSELECT nme FROM users;\nSELECT email FROM users;\n",
+        );
+    }
+    t.write(
+        "head/db/002_drop_email.sql",
+        "ALTER TABLE users DROP COLUMN email;\n",
+    );
+    let args = |extra: &[&'static str]| {
+        let mut args = vec!["check", "--schema-dir", "../db"];
+        args.extend_from_slice(extra);
+        args.push("queries/*.sql");
+        args
+    };
+    // Run from a subdirectory, like an Action used with a working directory
+    t.run_in(
+        &t.path().join("base/app"),
+        &args(&["--write-baseline", "--baseline", ".diff-baseline.json"]),
+    )
+    .assert_code(0)
+    .assert_stderr_contains("Wrote 1 baseline entry for 1 file(s)");
+    fs::copy(
+        t.path().join("base/app/.diff-baseline.json"),
+        t.path().join("head/app/.diff-baseline.json"),
+    )
+    .unwrap();
+    let run = t.run_in(
+        &t.path().join("head/app"),
+        &args(&["--baseline", ".diff-baseline.json", "-f", "json"]),
+    );
+    run.assert_code(1)
+        .assert_stderr_contains("Found 1 error(s), 0 warning(s) in 1 file(s)")
+        .assert_stderr_contains("1 known diagnostic(s) hidden by the baseline");
+    let json = run.json();
+    assert_eq!(diag_codes(&json), ["ColumnNotFound"]);
+    assert!(run.stdout.contains("'email'"), "{}", run.stdout);
+    assert!(!run.stdout.contains("'nme'"), "{}", run.stdout);
+}
+
 // ---------------------------------------------------------------------------
 // dbt / Jinja templating
 // ---------------------------------------------------------------------------

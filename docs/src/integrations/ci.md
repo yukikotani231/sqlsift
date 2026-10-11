@@ -28,6 +28,7 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 | `disable` | Rules to disable, e.g. `E0006 E0008` |
 | `sarif-file` | Also write a SARIF report (see below) |
 | `fail-on-error` | Fail the step on errors (default `true`) |
+| `diff-base` | Report only diagnostics that are new compared with this branch, tag or commit, e.g. `${{ github.base_ref }}` (see [below](#report-only-what-a-pull-request-introduces)) |
 | `version` | `sqlsift-cli` version from npm (default `latest`) |
 | `cli-path` | Use an existing `sqlsift` binary instead of installing from npm |
 
@@ -40,6 +41,34 @@ npx sqlsift-cli check --schema schema.sql 'queries/**/*.sql'
 ```
 
 The exit code is non-zero when errors are found. Inside a GitHub Actions job that runs sqlsift itself (a `make lint` step, a script, a container), add `--format github` to get annotations on the pull request diff.
+
+## Report only what a pull request introduces
+
+In a project that already has diagnostics, the ones a pull request adds are easy to miss among the old ones. With `diff-base`, the action checks the pull request's base too and reports only what is new, with no baseline file to commit or keep up to date:
+
+```yaml
+on: [push, pull_request]
+jobs:
+  sqlsift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: queries/**/*.sql
+          diff-base: ${{ github.base_ref }}
+```
+
+A pull request that drops or renames a column fails with the queries it breaks, even when other queries already had problems. `github.base_ref` is empty outside pull requests, so pushes to `main` still report every diagnostic.
+
+How it works: the action fetches the base (one commit, from the repository the workflow runs in), checks it out in a temporary `git worktree`, runs the same check there with `--write-baseline` into a temporary baseline file, and then checks the pull request against that baseline (see [Baseline](../guide/suppression.md#an-existing-backlog-baseline) for how diagnostics are matched). On a `pull_request` event the checkout is the merge commit, so this compares the result of merging with the base branch as it is now. No token beyond the default one is needed, and pull requests from forks work the same way. The SARIF file (`sarif-file`) has only the new diagnostics too.
+
+`diff-base` takes a branch or tag name (fetched from `origin`), or a commit SHA, e.g. `${{ github.event.pull_request.base.sha }}`. Good to know:
+
+- The base is checked with its own `sqlsift.toml` and the same inputs, run from the same directory. If it can't be checked at all (no `sqlsift.toml` or no query files there yet, a schema file named in `schema` that the pull request adds), the action prints a warning and reports every diagnostic. Prefer a glob or `schema-dir` for schema files, so that a new migration file doesn't make the base check fail.
+- Diagnostics are matched by file, rule and statement, so a renamed query file's existing problems are reported as new.
+- A committed baseline (`baseline` in `sqlsift.toml`) is not used in this mode: everything the base already reports is hidden anyway.
 
 ## Rolling out a rule gradually
 
