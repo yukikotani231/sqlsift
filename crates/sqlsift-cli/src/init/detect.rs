@@ -898,7 +898,7 @@ fn group_by_top_dir(files: &BTreeSet<String>, ext: &str) -> Vec<(String, usize)>
 /// Which tagged templates a TypeScript / JavaScript file uses
 #[derive(Default)]
 struct TemplateTags {
-    /// `sql\`...\``, `db.sql\`...\``, `sql<T>\`...\``, `sql.type(...)\`...\``
+    /// `sql\`...\``, `db.sql\`...\``, `` sql<T>`...` ``, `sql.type(...)\`...\``
     sql: bool,
     /// `prisma.$queryRaw\`...\`` / `$executeRaw`
     prisma_raw: bool,
