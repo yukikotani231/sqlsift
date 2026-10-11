@@ -1,0 +1,5 @@
+# dbmate migrations: only the `-- migrate:up` part of each file is applied.
+schema_dir = "db/migrations"
+# sql`...` templates in the TypeScript code (the default tag is "sql").
+files = ["src/**/*.ts"]
+dialect = "postgresql"

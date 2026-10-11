@@ -1,0 +1,5 @@
+# Diagnostics `sqlsift check broken/*` must report (checked in CI by
+# scripts/check-examples.sh): <file>:<line>:<column> <code>
+broken/books.sql:5:12 E0002
+broken/books.sql:11:5 E0003
+broken/books.sql:15:13 E0008

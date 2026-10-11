@@ -1,0 +1,5 @@
+# Migrations are applied in file name order, so the schema sqlsift checks
+# against is the one after the latest migration.
+schema_dir = "migrations"
+files = ["queries/**/*.sql"]
+dialect = "postgresql"

@@ -145,6 +145,8 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 
 Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
 
+**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [postgres.js](examples/postgres-js), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
+
 ## Editor Integration
 
 sqlsift ships a language server (`sqlsift-lsp`) that shows diagnostics as you type. Install the **sqlsift** VS Code extension (`sqlsift.sqlsift`), which bundles the server, or [set it up in Neovim, Helix and other editors](https://yukikotani231.github.io/sqlsift/docs/integrations/editors.html).
