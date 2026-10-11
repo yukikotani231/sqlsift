@@ -1,5 +1,6 @@
 //! SQL analyzer module
 
+pub(crate) mod bigquery;
 mod comment_directives;
 mod resolver;
 mod scope;

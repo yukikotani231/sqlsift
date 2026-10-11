@@ -111,6 +111,12 @@ impl SqlDialect {
         )
     }
 
+    /// Whether `a.b.c` can be a path into a STRUCT column (BigQuery): `a` may be a
+    /// column rather than a table, and the parts after the column are field names
+    pub fn struct_field_paths(self) -> bool {
+        matches!(self, SqlDialect::BigQuery)
+    }
+
     /// Whether query text may contain psql meta-commands and `:variables`
     /// (rewritten by [`crate::psql::preprocess`])
     pub(crate) fn is_psql(self) -> bool {

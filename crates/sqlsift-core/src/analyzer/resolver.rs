@@ -6,10 +6,10 @@
 //! them. The type checks themselves live in `type_check.rs`.
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, Expr, GroupByExpr, Ident,
-    Insert, JoinConstraint, JoinOperator, NamedWindowDefinition, NamedWindowExpr, OnConflictAction,
-    OnInsert, Query, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
-    TableWithJoins, Values,
+    Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem, Expr,
+    GroupByExpr, Ident, Insert, JoinConstraint, JoinOperator, NamedWindowDefinition,
+    NamedWindowExpr, OnConflictAction, OnInsert, Query, Select, SelectItem, SetExpr, Statement,
+    Subscript, TableFactor, TableWithJoins, Values, WildcardAdditionalOptions,
 };
 use std::collections::HashMap;
 
@@ -108,7 +108,12 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an INSERT statement in the current (statement) frame
     fn insert(&mut self, insert: &Insert) -> Option<Vec<Column>> {
-        let table_name = self.catalog.qualified_name(&insert.table_name);
+        let mut table_name = self.catalog.qualified_name(&insert.table_name);
+        if self.dialect == SqlDialect::BigQuery {
+            if let Some(bare) = self.bigquery_unqualified_fallback(&table_name) {
+                table_name = bare;
+            }
+        }
         let table_span = insert
             .table_name
             .0
@@ -141,7 +146,9 @@ impl<'a> Resolver<'a> {
                 if let Some(source) = &insert.source {
                     self.insert_source(source);
                 }
-            } else {
+            } else if !(self.dialect == SqlDialect::BigQuery
+                && self.bigquery_table_may_exist(&table_name))
+            {
                 let diag = self.table_not_found(&table_name, table_span);
                 self.diagnostics.push(diag);
             }
@@ -764,22 +771,81 @@ impl<'a> Resolver<'a> {
                     let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
                     columns.push(Column::new(name, self.infer_expr_type(expr)));
                 }
-                SelectItem::Wildcard(_) => {
+                SelectItem::Wildcard(options) => {
                     if frame.relations.is_empty() {
                         return None;
                     }
+                    let mut star = Vec::new();
                     for relation in frame.relations.values() {
-                        columns.extend(relation.star_columns()?.cloned());
+                        star.extend(relation.star_columns()?.cloned());
                     }
+                    columns.extend(self.wildcard_columns(star, options));
                 }
-                SelectItem::QualifiedWildcard(name, _) => {
+                SelectItem::QualifiedWildcard(name, options) => {
                     let qualifier = name.0.last()?;
                     let relation = lookup_ignore_case(&frame.relations, &qualifier.value)?;
-                    columns.extend(relation.columns.clone()?);
+                    columns.extend(self.wildcard_columns(relation.columns.clone()?, options));
                 }
             }
         }
         Some(columns)
+    }
+
+    /// Columns of `*` after `EXCEPT (...)` / `EXCLUDE (...)` drop columns and
+    /// `REPLACE (expr AS col)` replaces them
+    fn wildcard_columns(
+        &self,
+        mut columns: Vec<Column>,
+        options: &WildcardAdditionalOptions,
+    ) -> Vec<Column> {
+        let dropped = wildcard_dropped_columns(options);
+        columns.retain(|c| {
+            !dropped
+                .iter()
+                .any(|d| d.value.eq_ignore_ascii_case(&c.name))
+        });
+        for item in options.opt_replace.iter().flat_map(|r| &r.items) {
+            if let Some(col) = columns
+                .iter_mut()
+                .find(|c| c.name.eq_ignore_ascii_case(&item.column_name.value))
+            {
+                col.ty = self.infer_expr_type(&item.expr);
+            }
+        }
+        columns
+    }
+
+    /// Resolve the `EXCEPT (...)` columns and `REPLACE (...)` expressions of `*`
+    /// (or of `qualifier.*`): an EXCEPT column must be a column of the wildcard
+    fn wildcard_options(&mut self, options: &WildcardAdditionalOptions, qualifier: Option<&str>) {
+        for col in options
+            .opt_except
+            .iter()
+            .flat_map(|e| std::iter::once(&e.first_element).chain(&e.additional_elements))
+        {
+            let Some(frame) = self.scope.current_ref() else {
+                return;
+            };
+            let mut relations = frame
+                .relations
+                .iter()
+                .filter(|(k, _)| qualifier.map_or(true, |q| k.eq_ignore_ascii_case(q)));
+            let missing = relations.clone().next().is_some()
+                && relations
+                    .all(|(_, r)| matches!(r.column(&col.value, self.dialect), ColumnMatch::No));
+            if missing {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::ColumnNotFound,
+                        format!("Column '{}' in SELECT * EXCEPT not found", col.value),
+                    )
+                    .with_span(Span::from_sqlparser(&col.span)),
+                );
+            }
+        }
+        for item in options.opt_replace.iter().flat_map(|r| &r.items) {
+            self.expr(&item.expr);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -877,7 +943,7 @@ impl<'a> Resolver<'a> {
             TableFactor::Table {
                 name, alias, args, ..
             } => {
-                let table_name = self.catalog.qualified_name(name);
+                let mut table_name = self.catalog.qualified_name(name);
                 let alias_name = alias.as_ref().map(|a| a.name.value.clone());
                 let alias_columns: Vec<String> = alias
                     .iter()
@@ -905,6 +971,14 @@ impl<'a> Resolver<'a> {
                     .is_none()
                     .then(|| self.scope.cte(self.catalog, &table_name.name))
                     .flatten();
+                // BigQuery: a table of a dataset the schema doesn't define
+                let mut may_exist = false;
+                if self.dialect == SqlDialect::BigQuery {
+                    may_exist = self.bigquery_table_may_exist(&table_name);
+                    if let Some(bare) = self.bigquery_unqualified_fallback(&table_name) {
+                        table_name = bare;
+                    }
+                }
                 let mut relation = if let Some(cte) = cte {
                     Relation::new(RelationKind::Cte, cte.name.clone(), cte.columns.clone())
                 } else if let Some(table) = Relation::table(self.catalog, &table_name) {
@@ -912,7 +986,7 @@ impl<'a> Resolver<'a> {
                 } else if let Some(view) = Relation::view(self.catalog, &table_name) {
                     view
                 } else {
-                    if !is_system_table(self.dialect, &table_name) {
+                    if !is_system_table(self.dialect, &table_name) && !may_exist {
                         let span = name.0.last().map(|id| Span::from_sqlparser(&id.span));
                         let diag = self.table_not_found(&table_name, span);
                         self.diagnostics.push(diag);
@@ -952,6 +1026,12 @@ impl<'a> Resolver<'a> {
             TableFactor::TableFunction { alias, .. }
             | TableFactor::Function { alias, .. }
             | TableFactor::UNNEST { alias, .. } => {
+                // UNNEST(t.items) sees the FROM items before it
+                if let TableFactor::UNNEST { array_exprs, .. } = factor {
+                    for e in array_exprs {
+                        self.expr(e);
+                    }
+                }
                 // Table-valued functions (e.g., generate_series, unnest): columns are
                 // known only from an alias column list
                 let (key, names) = match alias {
@@ -1005,9 +1085,10 @@ impl<'a> Resolver<'a> {
             SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
                 self.expr(expr);
             }
-            SelectItem::QualifiedWildcard(name, _) => {
+            SelectItem::QualifiedWildcard(name, options) => {
                 // table.*
                 if let Some(ident) = name.0.last() {
+                    self.wildcard_options(options, Some(&ident.value));
                     let in_scope = self
                         .scope
                         .current_ref()
@@ -1026,7 +1107,8 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            SelectItem::Wildcard(_) => {
+            SelectItem::Wildcard(options) => {
+                self.wildcard_options(options, None);
                 // * - valid if we have at least one table
                 if self
                     .scope
@@ -1057,6 +1139,9 @@ impl<'a> Resolver<'a> {
     pub(super) fn expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Identifier(ident) => self.column(None, ident),
+            Expr::CompoundIdentifier(idents) if self.dialect.struct_field_paths() => {
+                self.bigquery_path(idents);
+            }
             Expr::CompoundIdentifier(idents) => match idents.as_slice() {
                 // table.column or schema.table.column
                 [table, column] | [_, table, column] => self.column(Some(table), column),
@@ -1314,7 +1399,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve a column reference
-    fn column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
+    pub(super) fn column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
         let column_name = &column_ident.value;
         let column_span = Span::from_sqlparser(&column_ident.span);
 
@@ -1391,6 +1476,8 @@ impl<'a> Resolver<'a> {
                 let is_keyword = column_ident.quote_style.is_none()
                     && (column_name.eq_ignore_ascii_case("DEFAULT")
                         || is_date_part_keyword(column_name)
+                        || (self.dialect == SqlDialect::BigQuery
+                            && super::bigquery::is_date_part(column_name))
                         || column_name.starts_with('@'));
                 if is_alias || is_relation || is_keyword {
                     return;
@@ -1589,6 +1676,21 @@ pub(super) fn is_comparison_operator(op: &sqlparser::ast::BinaryOperator) -> boo
 fn is_logical_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
     use sqlparser::ast::BinaryOperator::*;
     matches!(op, And | Or)
+}
+
+/// Columns a wildcard leaves out (`* EXCEPT (...)`, `* EXCLUDE (...)`)
+fn wildcard_dropped_columns(options: &WildcardAdditionalOptions) -> Vec<&Ident> {
+    let mut dropped: Vec<&Ident> = Vec::new();
+    if let Some(except) = &options.opt_except {
+        dropped.push(&except.first_element);
+        dropped.extend(&except.additional_elements);
+    }
+    match &options.opt_exclude {
+        Some(ExcludeSelectItem::Single(col)) => dropped.push(col),
+        Some(ExcludeSelectItem::Multiple(cols)) => dropped.extend(cols),
+        None => {}
+    }
+    dropped
 }
 
 /// Scope key (alias or table name) a FROM relation is registered under

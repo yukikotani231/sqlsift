@@ -8,11 +8,13 @@
 | MySQL | `--dialect mysql` | Backtick identifiers, inline `ENUM(...)`, `AUTO_INCREMENT`, `mysqldump` files, `INSERT ... SET`, index hints ([details](queries.md#mysql-syntax)); booleans are integers |
 | SQLite | `--dialect sqlite` | SQLite's loose typing: booleans are integers |
 | Snowflake (alpha) | `--dialect snowflake` | `QUALIFY`, lateral column aliases (`SELECT a + 1 AS b ... WHERE b > 0`), semi-structured paths (`v:a.b`) parse |
-| BigQuery (alpha) | `--dialect bigquery` | Backtick identifiers, `QUALIFY`, `SELECT * EXCEPT / REPLACE`, `UNNEST` parse; `_PARTITIONTIME` and friends are known |
+| BigQuery (alpha) | `--dialect bigquery` | `` `project.dataset.table` `` names (a dataset the schema doesn't define, or a wildcard table `` `events_*` ``, is never reported), BigQuery types (`INT64`, `STRING`, `NUMERIC`, `STRUCT<...>`, `ARRAY<...>`, `JSON`, ...), `UNNEST(...) [WITH OFFSET]`, STRUCT field paths (`o.shipping.city`), `SELECT * EXCEPT / REPLACE` columns, `QUALIFY`, return types of common functions (`SAFE_CAST`, `SAFE_DIVIDE`, `DATE_DIFF`, `FORMAT_DATE`, `COUNTIF`, `JSON_VALUE`, `SAFE.` prefix, ...) and date parts (`DAY`, `ISOWEEK`, `WEEK(MONDAY)`); `_PARTITIONTIME` and `_TABLE_SUFFIX` are known |
 | Redshift (alpha) | `--dialect redshift` | PostgreSQL-like, with lateral column aliases and Redshift system tables |
 | Databricks (alpha) | `--dialect databricks` | Spark SQL / Databricks SQL, backtick identifiers, lateral column aliases |
 
 The data warehouse dialects are alpha: queries parse with the warehouse's syntax and table and column names are checked, but many warehouse types (`VARIANT`, `STRUCT`, ...) and functions are not known yet. Like everything sqlsift can't work out, they are left unreported rather than guessed. For dbt projects on a warehouse, see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates).
+
+In BigQuery, the fields of a STRUCT and of an `UNNEST` element are not modelled, so they are never reported, and a query that uses `UNNEST` doesn't report unqualified column names (they may be fields of the element). Table names are matched case-insensitively. Quote a wildcard table with backticks (`` `dataset.events_*` ``): unquoted, it doesn't parse yet.
 
 Set it once in `sqlsift.toml` with `dialect = "mysql"`.
 

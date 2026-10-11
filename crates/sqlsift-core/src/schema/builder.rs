@@ -159,7 +159,19 @@ impl SchemaBuilder {
             }
 
             // Parse the untrimmed text so parser locations are relative to `raw_stmt`
-            match Parser::parse_sql(dialect.as_ref(), raw_stmt) {
+            let parsed = Parser::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
+                // BigQuery: retry with nested type parameter lists closed by `> >`
+                // (sqlparser rejects some `>>`); only locations past them shift
+                match self.dialect {
+                    SqlDialect::BigQuery => {
+                        crate::analyzer::bigquery::split_closing_angle_brackets(raw_stmt)
+                            .and_then(|split| Parser::parse_sql(dialect.as_ref(), &split).ok())
+                            .ok_or(err)
+                    }
+                    _ => Err(err),
+                }
+            });
+            match parsed {
                 Ok(stmts) => {
                     for stmt in stmts {
                         self.process_statement(&stmt);

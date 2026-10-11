@@ -17,6 +17,7 @@ use sqlparser::ast::{
     Insert, SetExpr, Spanned, Value,
 };
 
+use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 #[cfg(test)]
 use crate::schema::Catalog;
@@ -62,7 +63,7 @@ impl Resolver<'_> {
             SqlType::Enum(values) => match column {
                 Some(column) => (format!("enum column '{column}'"), values.as_slice()),
                 None => (
-                    format!("enum type '{}'", enum_type.display_name()),
+                    format!("enum type '{}'", enum_type.display_name_in(self.dialect)),
                     values.as_slice(),
                 ),
             },
@@ -109,14 +110,29 @@ impl Resolver<'_> {
                 }
                 let compatible = lt.is_compatible_with(rt) != TypeCompatibility::ExplicitCast
                     || rt.is_compatible_with(lt) != TypeCompatibility::ExplicitCast;
-                (!compatible).then(|| (lt.display_name(), rt.display_name()))
+                (!compatible).then(|| {
+                    (
+                        lt.display_name_in(self.dialect),
+                        rt.display_name_in(self.dialect),
+                    )
+                })
             }
-            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => (!t
-                .accepts_string_literal(lit))
-            .then(|| (t.display_name(), SqlType::Text.display_name())),
-            (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => (!t
-                .accepts_string_literal(lit))
-            .then(|| (SqlType::Text.display_name(), t.display_name())),
+            (ExpressionType::Known(t), ExpressionType::StringLiteral(lit)) => {
+                (!t.accepts_string_literal(lit)).then(|| {
+                    (
+                        t.display_name_in(self.dialect),
+                        SqlType::Text.display_name_in(self.dialect),
+                    )
+                })
+            }
+            (ExpressionType::StringLiteral(lit), ExpressionType::Known(t)) => {
+                (!t.accepts_string_literal(lit)).then(|| {
+                    (
+                        SqlType::Text.display_name_in(self.dialect),
+                        t.display_name_in(self.dialect),
+                    )
+                })
+            }
             _ => None,
         }
     }
@@ -231,7 +247,7 @@ impl Resolver<'_> {
                         format!(
                             "Type mismatch: '{}' is not a valid {} in arithmetic",
                             lit,
-                            t.display_name()
+                            t.display_name_in(self.dialect)
                         ),
                     )
                     .with_span(
@@ -261,7 +277,7 @@ impl Resolver<'_> {
                         DiagnosticKind::TypeMismatch,
                         format!(
                             "Arithmetic operation requires numeric types, but got {}",
-                            ty.display_name()
+                            ty.display_name_in(self.dialect)
                         ),
                     )
                     .with_span(Span::from_sqlparser(&expr.span())),
@@ -460,6 +476,9 @@ impl Resolver<'_> {
                 ColumnLookup::Found(ty) => ty.clone(),
                 _ => ExpressionType::Unknown,
             },
+            Expr::CompoundIdentifier(parts) if self.dialect.struct_field_paths() => {
+                self.infer_bigquery_path(parts)
+            }
             Expr::CompoundIdentifier(parts) => match parts.as_slice() {
                 // table.column or schema.table.column
                 [.., table, column] if parts.len() <= 3 => {
@@ -520,7 +539,7 @@ impl Resolver<'_> {
         Some(format!("{}.{}", relation.name, column.value))
     }
 
-    fn infer_qualified_column(
+    pub(super) fn infer_qualified_column(
         &self,
         table: &sqlparser::ast::Ident,
         column: &sqlparser::ast::Ident,
@@ -561,6 +580,11 @@ impl Resolver<'_> {
         let func_name = func.name.to_string().to_uppercase();
         // Strip schema prefix (e.g., "PG_CATALOG.COUNT" → "COUNT")
         let name = func_name.rsplit('.').next().unwrap_or(&func_name);
+        if self.dialect == SqlDialect::BigQuery {
+            if let Some(ty) = self.bigquery_function_type(name, func) {
+                return ty;
+            }
+        }
 
         match name {
             // Aggregate functions returning INTEGER/BIGINT

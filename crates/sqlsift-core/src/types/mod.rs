@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::DataType;
 
+use crate::dialect::SqlDialect;
+
 /// Internal representation of SQL types
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SqlType {
@@ -79,6 +81,8 @@ impl SqlType {
             DataType::Int4(_) => SqlType::Integer,
             DataType::BigInt(_) | DataType::UnsignedBigInt(_) => SqlType::BigInt,
             DataType::Int8(_) => SqlType::BigInt,
+            // BigQuery INT64 (and its aliases INT, INTEGER, BIGINT, ...)
+            DataType::Int64 => SqlType::BigInt,
 
             DataType::Real => SqlType::Real,
             DataType::Float4 => SqlType::Real,
@@ -91,7 +95,12 @@ impl SqlType {
             DataType::Float(Some(p)) if *p <= 24 => SqlType::Real,
             DataType::Float(_) => SqlType::DoublePrecision,
 
-            DataType::Decimal(info) | DataType::Numeric(info) => {
+            // BigQuery BIGNUMERIC / BIGDECIMAL are wider NUMERICs
+            DataType::Decimal(info)
+            | DataType::Numeric(info)
+            | DataType::Dec(info)
+            | DataType::BigNumeric(info)
+            | DataType::BigDecimal(info) => {
                 let (precision, scale) = match info {
                     sqlparser::ast::ExactNumberInfo::None => (None, None),
                     sqlparser::ast::ExactNumberInfo::Precision(p) => (Some(*p), None),
@@ -124,6 +133,8 @@ impl SqlType {
             DataType::Bytea => SqlType::Bytea,
             DataType::Binary(_) | DataType::Varbinary(_) | DataType::Blob(_) => SqlType::Bytea,
             DataType::TinyBlob | DataType::MediumBlob | DataType::LongBlob => SqlType::Bytea,
+            // BigQuery BYTES
+            DataType::Bytes(_) => SqlType::Bytea,
 
             DataType::Date => SqlType::Date,
 
@@ -175,6 +186,10 @@ impl SqlType {
                     SqlType::Array(Box::new(SqlType::Unknown))
                 }
             },
+
+            // BigQuery STRUCT<...>: fields aren't modelled, so a struct is a type
+            // sqlsift never reports (see `Custom`)
+            DataType::Struct(..) => SqlType::Custom(data_type.to_string()),
 
             DataType::Custom(name, _) => {
                 let type_name = name
@@ -340,6 +355,29 @@ impl SqlType {
             (Interval, Multiply | Divide, r) if r.is_numeric() => Some(Interval),
             (l, Multiply, Interval) if l.is_numeric() => Some(Interval),
             _ => None,
+        }
+    }
+
+    /// Name of this type in the given dialect's terms, for diagnostics (BigQuery
+    /// calls BIGINT `INT64`, TEXT `STRING`, ...); other dialects use
+    /// [`Self::display_name`]
+    pub fn display_name_in(&self, dialect: SqlDialect) -> String {
+        if dialect != SqlDialect::BigQuery {
+            return self.display_name();
+        }
+        match self {
+            t if t.is_integer() => "INT64".to_string(),
+            SqlType::Real | SqlType::DoublePrecision => "FLOAT64".to_string(),
+            SqlType::Decimal { .. } => "NUMERIC".to_string(),
+            SqlType::Char { .. } | SqlType::Varchar { .. } | SqlType::Text => "STRING".to_string(),
+            SqlType::Bytea => "BYTES".to_string(),
+            SqlType::Boolean => "BOOL".to_string(),
+            SqlType::Time { .. } => "TIME".to_string(),
+            SqlType::Timestamp { .. } => "TIMESTAMP".to_string(),
+            SqlType::Json | SqlType::Jsonb => "JSON".to_string(),
+            SqlType::Array(inner) => format!("ARRAY<{}>", inner.display_name_in(dialect)),
+            SqlType::Custom(name) => name.clone(),
+            other => other.display_name().to_uppercase(),
         }
     }
 
