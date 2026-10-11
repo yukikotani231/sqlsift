@@ -26,6 +26,7 @@ use super::scope::{
     lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
     Relation, RelationKind, Scope, UNNAMED_COLUMN,
 };
+use super::structure::Clause;
 
 /// Resolves names and checks types in SQL statements
 pub(super) struct Resolver<'a> {
@@ -45,6 +46,8 @@ pub(super) struct Resolver<'a> {
     variables: Vec<String>,
     /// Whether a name at this location is made from a template tag (`AS {{ c }}`)
     templated_name: Option<&'a dyn Fn(&Span) -> bool>,
+    /// Relation names the FROM clause being resolved gives twice (E0009)
+    pub(super) duplicate_names: Vec<String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -58,6 +61,7 @@ impl<'a> Resolver<'a> {
             unaliased_subqueries: 0,
             variables: Vec::new(),
             templated_name: None,
+            duplicate_names: Vec::new(),
         }
     }
 
@@ -187,6 +191,8 @@ impl<'a> Resolver<'a> {
             return None;
         };
 
+        self.check_duplicate_insert_columns(&insert.columns);
+
         // Check if specified columns exist
         for col_ident in &insert.columns {
             if !table_def.column_exists(&col_ident.value) {
@@ -299,6 +305,7 @@ impl<'a> Resolver<'a> {
                 }
                 for expr in row {
                     self.expr(expr);
+                    self.check_aggregates_in(expr, Clause::Values);
                 }
             }
             self.check_insert_values(insert, table_def, rows);
@@ -444,6 +451,7 @@ impl<'a> Resolver<'a> {
             }
             self.expr(&assignment.value);
         }
+        self.check_duplicate_assignments(assignments);
         self.check_assignments(table_def, assignments);
     }
 
@@ -529,10 +537,13 @@ impl<'a> Resolver<'a> {
                 }
             }
             self.expr(&assignment.value);
+            self.check_aggregates_in(&assignment.value, Clause::UpdateSet);
         }
+        self.check_duplicate_assignments(assignments);
 
         if let Some(where_expr) = selection {
             self.expr(where_expr);
+            self.check_aggregates_in(where_expr, Clause::Where);
         }
 
         if let Some(def) = table_def {
@@ -570,6 +581,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(where_expr) = &delete.selection {
             self.expr(where_expr);
+            self.check_aggregates_in(where_expr, Clause::Where);
         }
 
         self.returning(delete.returning.as_deref())
@@ -594,6 +606,7 @@ impl<'a> Resolver<'a> {
         recursive_cte: Option<(&str, &[String])>,
     ) -> Option<Vec<Column>> {
         self.scope.push(hides_parent);
+        self.check_duplicate_cte_names(query);
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
                 // Snowflake: a CTE is recursive when it references itself, with or
@@ -629,6 +642,9 @@ impl<'a> Resolver<'a> {
                 );
                 self.query_tail(query);
                 self.scope.pop();
+                if let Some(columns) = &columns {
+                    self.check_order_by_positions(query, columns.len(), None);
+                }
                 columns
             }
         };
@@ -759,9 +775,12 @@ impl<'a> Resolver<'a> {
         self.scope.push(false);
 
         // FROM first: it builds the scope for every other clause
+        let duplicates = self.check_duplicate_relation_names(&select.from);
+        let outer_duplicates = std::mem::replace(&mut self.duplicate_names, duplicates);
         for table_with_joins in &select.from {
             self.table_with_joins(table_with_joins);
         }
+        self.duplicate_names = outer_duplicates;
 
         // Hive / Databricks `LATERAL VIEW [OUTER] explode(expr) alias AS c1, ...`: the
         // generator's argument sees the FROM clause, and its output is a relation with
@@ -815,6 +834,9 @@ impl<'a> Resolver<'a> {
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
         for item in &select.projection {
             self.select_item(item, &select_span);
+            if let SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } = item {
+                self.check_nested_aggregates(expr);
+            }
             if let (true, SelectItem::ExprWithAlias { alias, .. }) = (lateral, item) {
                 self.scope
                     .current()
@@ -825,6 +847,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(selection) = &select.selection {
             self.expr(selection);
+            self.check_aggregates_in(selection, Clause::Where);
         }
         if lateral {
             self.scope.current().select_aliases.clear();
@@ -835,11 +858,13 @@ impl<'a> Resolver<'a> {
             self.scope.current().select_aliases = aliases;
             for expr in exprs {
                 self.expr(expr);
+                self.check_aggregates_in(expr, Clause::GroupBy);
             }
             aliases = std::mem::take(&mut self.scope.current().select_aliases);
         }
 
         if let Some(having) = &select.having {
+            self.check_aggregates_in(having, Clause::Having);
             // Every dialect but PostgreSQL also resolves output column aliases in HAVING
             if self.dialect.aliases_in_having() {
                 self.scope.current().select_aliases = aliases;
@@ -859,10 +884,16 @@ impl<'a> Resolver<'a> {
         }
 
         let columns = self.projection_columns(&select.projection);
+        if let Some(columns) = &columns {
+            self.check_group_by_positions(select, columns.len());
+        }
 
         if let Some(query) = query {
             self.scope.current().select_aliases = aliases;
             self.query_tail(query);
+            if let Some(columns) = &columns {
+                self.check_order_by_positions(query, columns.len(), Some(select_span));
+            }
         }
 
         self.scope.pop();
@@ -1018,8 +1049,10 @@ impl<'a> Resolver<'a> {
     /// Resolve a FROM item with its joins, registering its relations in the current frame
     fn table_with_joins(&mut self, table: &TableWithJoins) {
         self.table_factor(&table.relation);
+        self.forget_duplicate_relations();
         for join in &table.joins {
             self.table_factor(&join.relation);
+            self.forget_duplicate_relations();
             self.join_constraint(&join.join_operator, &join.relation);
         }
     }
@@ -1036,7 +1069,10 @@ impl<'a> Resolver<'a> {
 
         let right_key = relation_key(relation);
         match constraint {
-            JoinConstraint::On(expr) => self.join_on(expr),
+            JoinConstraint::On(expr) => {
+                self.join_on(expr);
+                self.check_aggregates_in(expr, Clause::JoinOn);
+            }
             JoinConstraint::Using(columns) => {
                 // USING columns exist in both sides by definition and are merged
                 // into a single unqualified column, so only check they exist

@@ -32,4 +32,8 @@ CREATE TABLE orders (
 | [E0006](E0006.md) | `ambiguous-column` | Column reference is ambiguous across tables |
 | [E0007](E0007.md) | `join-type-mismatch` | JOIN condition compares incompatible types |
 | [E0008](E0008.md) | `missing-required-column` | INSERT omits a NOT NULL column without a default |
+| [E0009](E0009.md) | `duplicate-name` | Table alias or CTE name given twice in one query |
+| [E0010](E0010.md) | `duplicate-target-column` | Column given twice in an INSERT column list or UPDATE SET |
+| [E0011](E0011.md) | `position-out-of-range` | ORDER BY / GROUP BY position is not in the select list |
+| [E0012](E0012.md) | `misplaced-aggregate` | Aggregate or window function where it is not allowed |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

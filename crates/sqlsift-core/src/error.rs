@@ -166,6 +166,14 @@ pub enum DiagnosticKind {
     JoinTypeMismatch,
     /// E0008: INSERT omits a NOT NULL column that has no default
     MissingRequiredColumn,
+    /// E0009: A table alias or CTE name given twice in one query block
+    DuplicateName,
+    /// E0010: A column given twice in an INSERT column list or UPDATE SET
+    DuplicateTargetColumn,
+    /// E0011: ORDER BY / GROUP BY position past the end of the select list
+    PositionOutOfRange,
+    /// E0012: Aggregate or window function in a clause that doesn't allow it
+    MisplacedAggregate,
     /// Parse error
     ParseError,
 }

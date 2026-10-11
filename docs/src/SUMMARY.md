@@ -36,6 +36,10 @@
   - [E0006 ambiguous-column](rules/E0006.md)
   - [E0007 join-type-mismatch](rules/E0007.md)
   - [E0008 missing-required-column](rules/E0008.md)
+  - [E0009 duplicate-name](rules/E0009.md)
+  - [E0010 duplicate-target-column](rules/E0010.md)
+  - [E0011 position-out-of-range](rules/E0011.md)
+  - [E0012 misplaced-aggregate](rules/E0012.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

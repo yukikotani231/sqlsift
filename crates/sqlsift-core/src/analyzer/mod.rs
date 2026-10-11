@@ -5,6 +5,7 @@ mod comment_directives;
 mod resolver;
 mod scope;
 mod snowflake;
+mod structure;
 mod type_check;
 
 use std::ops::Range;

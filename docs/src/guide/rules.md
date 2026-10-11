@@ -15,6 +15,10 @@ E0005  column-count-mismatch    correctness  error    INSERT column count doesn'
 E0006  ambiguous-column         correctness  error    Column reference is ambiguous across tables
 E0007  join-type-mismatch       correctness  error    JOIN condition compares incompatible types
 E0008  missing-required-column  correctness  error    INSERT omits a NOT NULL column without a default
+E0009  duplicate-name           correctness  error    Table alias or CTE name given twice in one query
+E0010  duplicate-target-column  correctness  error    Column given twice in an INSERT column list or UPDATE SET
+E0011  position-out-of-range    correctness  error    ORDER BY / GROUP BY position is not in the select list
+E0012  misplaced-aggregate      correctness  error    Aggregate or window function where it is not allowed
 E1000  parse-error              correctness  error    SQL could not be parsed
 ```
 

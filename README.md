@@ -180,6 +180,10 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0006](https://yukikotani231.github.io/sqlsift/docs/rules/E0006.html) | ambiguous-column | Column reference is ambiguous across tables |
 | [E0007](https://yukikotani231.github.io/sqlsift/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
 | [E0008](https://yukikotani231.github.io/sqlsift/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
+| [E0009](https://yukikotani231.github.io/sqlsift/docs/rules/E0009.html) | duplicate-name | Table alias or CTE name given twice in one query |
+| [E0010](https://yukikotani231.github.io/sqlsift/docs/rules/E0010.html) | duplicate-target-column | Column given twice in an INSERT column list or UPDATE SET |
+| [E0011](https://yukikotani231.github.io/sqlsift/docs/rules/E0011.html) | position-out-of-range | ORDER BY / GROUP BY position is not in the select list |
+| [E0012](https://yukikotani231.github.io/sqlsift/docs/rules/E0012.html) | misplaced-aggregate | Aggregate or window function where it is not allowed |
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

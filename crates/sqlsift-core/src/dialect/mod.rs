@@ -114,6 +114,12 @@ impl SqlDialect {
         matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
     }
 
+    /// Whether `ORDER BY 2` / `GROUP BY 2` always name select list positions
+    /// (Databricks can be configured to read them as constants)
+    pub fn checks_ordinal_positions(self) -> bool {
+        !matches!(self, SqlDialect::Databricks)
+    }
+
     /// Whether HAVING can reference output column aliases (PostgreSQL's can't)
     pub fn aliases_in_having(self) -> bool {
         !matches!(self, SqlDialect::PostgreSQL)
