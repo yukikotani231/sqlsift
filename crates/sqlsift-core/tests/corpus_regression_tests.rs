@@ -244,7 +244,6 @@ fn snowflake_recursive_cte_without_keyword() {
 /// Class bq-unpivot: UNPIVOT output keeps the other input columns (bigquery-etl
 /// ga_desktop_conversions_v1)
 #[test]
-#[ignore = "known false positive (corpus report: bq-unpivot)"]
 fn bigquery_unpivot_columns() {
     assert_clean(&check(
         SqlDialect::BigQuery,
@@ -256,7 +255,6 @@ fn bigquery_unpivot_columns() {
 /// Class bq-groupby-alias: in BigQuery a GROUP BY name matching a SELECT alias is the
 /// alias, not an ambiguous input column (bigquery-etl braze_derived/fxa_services_v1)
 #[test]
-#[ignore = "known false positive (corpus report: bq-groupby-alias)"]
 fn bigquery_group_by_output_alias() {
     assert_clean(&check(
         SqlDialect::BigQuery,
@@ -267,7 +265,6 @@ fn bigquery_group_by_output_alias() {
 
 /// Class bq-struct-star: `struct_column.*`
 #[test]
-#[ignore = "known false positive (corpus report: bq-struct-star)"]
 fn bigquery_struct_star() {
     assert_clean(&check(
         SqlDialect::BigQuery,
@@ -334,12 +331,36 @@ fn unknown_type_in_arithmetic() {
 /// Class bq-script-variables: variables of a BigQuery script (`DECLARE x ...`) used as
 /// bare names (bigquery-utils storage_billing_model_savings_ddl.sql)
 #[test]
-#[ignore = "known false positive (corpus report: bq-script-variables)"]
 fn bigquery_script_variables() {
     assert_clean(&check(
         SqlDialect::BigQuery,
         "CREATE TABLE ds.t (a FLOAT64);",
         "DECLARE price FLOAT64 DEFAULT 0.02;\nSELECT a * price AS cost FROM ds.t;",
+    ));
+}
+
+/// Parse gaps (bigquery-etl, bigquery-utils): `ANY TYPE` parameters, `<<`, field
+/// access and `.*` on function results, typed `ARRAY<STRUCT<...>>[...]` literals
+#[test]
+fn bigquery_syntax_sqlparser_does_not_parse() {
+    assert_clean(&check(
+        SqlDialect::BigQuery,
+        "CREATE TABLE ds.t (a INT64, v STRING);",
+        "CREATE TEMP FUNCTION f(x ANY TYPE) AS (x);\n\
+         SELECT 1 << 0 AS m, mozfun.norm.browser_version_info(v).major_version AS major,\n\
+         IF(a > 0, f(v), NULL).* REPLACE (1 AS b),\n\
+         ARRAY<STRUCT<k STRING, n INT64>>[('a', 1)] AS kv FROM ds.t;",
+    ));
+}
+
+/// Class harness-bq-project: `moz-fx-data-bq-fivetran.google_ads.x` is not the
+/// `google_ads.x` of the project the schema describes
+#[test]
+fn bigquery_table_of_another_project() {
+    assert_clean(&check(
+        SqlDialect::BigQuery,
+        "CREATE VIEW `moz-fx-data-shared-prod.google_ads.campaigns` AS SELECT 1 AS id;",
+        "SELECT campaign_name FROM `moz-fx-data-bq-fivetran.google_ads.campaigns`;",
     ));
 }
 

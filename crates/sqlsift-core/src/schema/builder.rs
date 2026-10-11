@@ -580,6 +580,7 @@ impl SchemaBuilder {
                 if_not_exists,
                 ..
             } => {
+                self.catalog.note_database(name);
                 let qualified = self.catalog.qualified_name(name);
                 if *if_not_exists && self.relation_exists(&qualified) {
                     return;
@@ -636,6 +637,7 @@ impl SchemaBuilder {
 
     /// Process CREATE TABLE statement
     fn process_create_table(&mut self, create: &sqlparser::ast::CreateTable) {
+        self.catalog.note_database(&create.name);
         let name = self.catalog.qualified_name(&create.name);
         self.catalog.restore_relation(&name);
         if create.if_not_exists && self.relation_exists(&name) {

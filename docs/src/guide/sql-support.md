@@ -14,7 +14,9 @@
 
 The data warehouse dialects are alpha: queries parse with the warehouse's syntax and table and column names are checked, but many warehouse types (`VARIANT`, `STRUCT`, ...) and functions are not known yet. Like everything sqlsift can't work out, they are left unreported rather than guessed. For dbt projects on a warehouse, see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates).
 
-In BigQuery, the fields of a STRUCT and of an `UNNEST` element are not modelled, so they are never reported, and a query that uses `UNNEST` doesn't report unqualified column names (they may be fields of the element). Table names are matched case-insensitively. Quote a wildcard table with backticks (`` `dataset.events_*` ``): unquoted, it doesn't parse yet.
+In BigQuery, the fields of a STRUCT and of an `UNNEST` element are not modelled, so they are never reported (`struct_col.*` and `f(x).*` have unknown columns), and a query that uses `UNNEST` doesn't report unqualified column names (they may be fields of the element). Table names are matched case-insensitively. Quote a wildcard table with backticks (`` `dataset.events_*` ``): unquoted, it doesn't parse yet.
+
+When the schema names projects (`` CREATE TABLE `my-project.dataset.t` ``), a table of another project is unknown and never reported, even if a dataset of the schema has a table with its name; a schema that names no project matches any project. In scripts, variables declared with `DECLARE` are known names in the statements after it. A `GROUP BY`, `HAVING`, `QUALIFY` or `ORDER BY` name that is an output column (`SELECT a.uid AS uid ... GROUP BY uid`, or the implicit name of `a.uid`) is that column, as in BigQuery. `UNPIVOT` output columns are checked; `PIVOT` columns are unknown. `ANY TYPE` function parameters, `<<` / `>>`, field access on function results (`f(x).field`) and typed array literals (`` ARRAY<STRUCT<a INT64>>[...] ``) are supported; procedural blocks (`FOR ... IN`, `BEGIN ... EXCEPTION`, `EXECUTE IMMEDIATE`) don't parse yet.
 
 Set it once in `sqlsift.toml` with `dialect = "mysql"`.
 

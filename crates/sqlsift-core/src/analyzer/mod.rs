@@ -232,6 +232,12 @@ impl<'a> Analyzer<'a> {
         };
         // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
         let text = sqlc::mask_parameters(&source.text, self.dialect);
+        // BigQuery syntax sqlparser doesn't parse, rewritten (diagnostics are moved
+        // back over the characters it inserts below)
+        let rewritten = (self.dialect == SqlDialect::BigQuery)
+            .then(|| bigquery::rewrite_query(&text))
+            .flatten();
+        let text: &str = rewritten.as_ref().map_or(&text, |r| r.text.as_str());
         // A file that looks like a template but isn't masked doesn't parse
         let template_hint =
             self.templating == Templating::None && templating::looks_like_jinja(sql);
@@ -242,8 +248,8 @@ impl<'a> Analyzer<'a> {
         let query_names = QueryNames::parse(sql);
 
         // Parse the SQL
-        let lines = LineIndex::new(&text);
-        let (statements, mut skipped) = self.parse_statements(&text, &lines);
+        let lines = LineIndex::new(text);
+        let (statements, mut skipped) = self.parse_statements(text, &lines);
         // Applied in source order, before the statements that follow them
         skipped.reverse();
 
@@ -251,6 +257,8 @@ impl<'a> Analyzer<'a> {
         // statements, applied to a copy of the catalog made on the first such
         // statement, so they are visible to the later statements of this file only
         let mut file_schema: Option<SchemaBuilder> = None;
+        // Script variables declared so far (`DECLARE x INT64 DEFAULT 0`)
+        let mut variables: Vec<String> = Vec::new();
 
         // Analyze each statement
         for (stmt, origin) in &statements {
@@ -273,8 +281,15 @@ impl<'a> Analyzer<'a> {
                 .map_or(self.catalog, SchemaBuilder::catalog);
 
             // Name resolution and type checking in one walk over the statement
-            let mut resolver = Resolver::new(catalog, self.dialect);
+            let mut resolver = Resolver::new(catalog, self.dialect).with_variables(&variables);
             resolver.statement(stmt);
+            if let Statement::Declare { stmts } = stmt {
+                variables.extend(
+                    stmts
+                        .iter()
+                        .flat_map(|d| d.names.iter().map(|n| n.value.clone())),
+                );
+            }
 
             // Locations relative to the input
             for mut diagnostic in resolver.into_diagnostics() {
@@ -334,6 +349,15 @@ impl<'a> Analyzer<'a> {
             }
         }
 
+        if let Some(rewritten) = &rewritten {
+            for diagnostic in &mut self.diagnostics {
+                let labels = diagnostic.labels.iter_mut().map(|l| &mut l.span);
+                for span in diagnostic.span.iter_mut().chain(labels) {
+                    rewritten.map_span(span);
+                }
+            }
+        }
+
         // Report diagnostics in source order (parse errors are found before analysis)
         self.diagnostics
             .sort_by_key(|d| d.span.map_or((usize::MAX, 0), |s| (s.line, s.column)));
@@ -343,7 +367,8 @@ impl<'a> Analyzer<'a> {
         // byte lengths, never lines or character columns)
         let original_lines = (!std::ptr::eq(original, sql)
             || template.masked.text.len() != sql.len()
-            || source.text.len() != sql.len())
+            || source.text.len() != sql.len()
+            || rewritten.is_some())
         .then(|| LineIndex::new(original));
         let offsets = original_lines.as_ref().unwrap_or(&lines);
         for diagnostic in &mut self.diagnostics {

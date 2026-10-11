@@ -152,7 +152,6 @@ fn project_and_dataset_qualified_names() {
         "`my-project.analytics.orders`",
         "`my-project`.analytics.orders",
         "`my-project`.`analytics`.`orders`",
-        "my_project.analytics.orders",
     ] {
         assert_clean(&format!(
             "SELECT o.order_id, o.status FROM {from} AS o WHERE o.amount > 0"
@@ -164,6 +163,28 @@ fn project_and_dataset_qualified_names() {
     }
     assert_clean("SELECT c.full_name FROM `my-project.analytics.customers` AS c");
     assert_clean("SELECT analytics.orders.order_id FROM analytics.orders");
+}
+
+#[test]
+fn tables_of_another_project_are_unknown() {
+    // The schema describes `my-project`: a table of another project is another table,
+    // even when a dataset of the schema has a table with its name
+    assert_clean("SELECT o.order_total FROM my_project.analytics.orders AS o");
+    assert_clean("SELECT order_total FROM `other-project.analytics.orders`");
+    assert_clean("INSERT INTO `other-project.analytics.orders` (order_total) VALUES (1)");
+    assert_clean("UPDATE `other-project.analytics.orders` SET order_total = 1 WHERE true");
+    assert_reports(
+        "SELECT order_total FROM `my-project.analytics.orders`",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+
+    // A schema that names no project: any project may be the one it describes
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::BigQuery);
+    builder.parse("CREATE TABLE ds.t (a INT64);").unwrap();
+    let catalog = builder.build().0;
+    let found = Analyzer::with_dialect(&catalog, SqlDialect::BigQuery)
+        .analyze("SELECT b FROM `any-project.ds.t`");
+    assert_eq!(found.len(), 1, "{found:#?}");
 }
 
 #[test]
@@ -485,4 +506,140 @@ fn mistakes_in_a_dbt_model_are_reported() {
         &DBT_MODEL.replace("where renamed.is_paid", "where renamed.order_status = 1"),
         &[DiagnosticKind::TypeMismatch],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Corpus false positives (bigquery-etl, bigquery-utils)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn struct_column_star_expands_to_unknown_columns() {
+    assert_clean("SELECT shipping.* FROM analytics.orders");
+    assert_clean("SELECT o.shipping.*, o.shipping.geo.* FROM analytics.orders AS o");
+    assert_clean("SELECT shipping.* EXCEPT (zip) FROM analytics.orders");
+    // Its columns are unknown, so a set operation can't count them
+    assert_clean("SELECT shipping.* FROM analytics.orders UNION ALL SELECT 1, 2, 3, 4");
+    // A misspelled STRUCT column, or neither a column nor a table
+    assert_reports(
+        "SELECT o.shiping.* FROM analytics.orders AS o",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+    assert_reports(
+        "SELECT shiping.* FROM analytics.orders",
+        &[DiagnosticKind::TableNotFound],
+    );
+}
+
+#[test]
+fn unpivot_output_columns() {
+    let sql = "SELECT order_id, amount_kind, value FROM analytics.orders \
+               UNPIVOT (value FOR amount_kind IN (amount, discount_rate))";
+    assert_clean(sql);
+    assert_clean(
+        "SELECT u.order_id, u.value FROM analytics.orders \
+         UNPIVOT (value FOR amount_kind IN (amount, discount_rate)) AS u",
+    );
+    // The unpivoted columns are gone, and must exist in the input
+    assert_reports(
+        "SELECT amount FROM analytics.orders UNPIVOT (value FOR kind IN (amount, discount_rate))",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+    assert_reports(
+        "SELECT kind FROM analytics.orders UNPIVOT (value FOR kind IN (amount, discont_rate))",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+    // PIVOT: columns named after the values, unknown
+    assert_clean(
+        "SELECT * FROM (SELECT status, amount FROM analytics.orders) \
+         PIVOT (SUM(amount) FOR status IN ('paid', 'open')) AS p WHERE p.paid > 0",
+    );
+}
+
+#[test]
+fn script_variables_are_known_names() {
+    assert_clean(
+        "DECLARE min_amount NUMERIC DEFAULT 10;\n\
+         DECLARE first_day, last_day DATE;\n\
+         SELECT order_id, amount * min_amount AS a FROM analytics.orders\n\
+         WHERE order_date BETWEEN first_day AND last_day;",
+    );
+    // Only after the DECLARE, and a misspelled variable is still reported
+    assert_reports(
+        "SELECT amount * min_amount FROM analytics.orders;\n\
+         DECLARE min_amount NUMERIC DEFAULT 10;\n\
+         SELECT amount * min_amont FROM analytics.orders;",
+        &[
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ColumnNotFound,
+        ],
+    );
+}
+
+#[test]
+fn group_by_name_of_an_output_alias_is_the_alias() {
+    let join = "FROM analytics.orders AS o JOIN `my-project.analytics.customers` AS c \
+                ON o.customer_id = c.customer_id";
+    assert_clean(&format!(
+        "SELECT o.customer_id AS customer_id, COUNT(*) AS n {join} GROUP BY customer_id \
+         HAVING n > 1 ORDER BY customer_id"
+    ));
+    // So is the implicit name of a path
+    assert_clean(&format!(
+        "SELECT o.customer_id, COUNT(*) AS n {join} GROUP BY customer_id"
+    ));
+    // Without the alias it is ambiguous
+    assert_reports(
+        &format!("SELECT COUNT(*) AS n {join} GROUP BY customer_id"),
+        &[DiagnosticKind::AmbiguousColumn],
+    );
+    // PostgreSQL's GROUP BY prefers input columns: still ambiguous there
+    let mut builder = SchemaBuilder::new();
+    builder
+        .parse("CREATE TABLE a (uid INT, s TEXT); CREATE TABLE e (uid INT, email TEXT);")
+        .unwrap();
+    let catalog = builder.build().0;
+    let found = Analyzer::new(&catalog)
+        .analyze("SELECT a.uid AS uid, MIN(e.email) FROM a JOIN e ON a.uid = e.uid GROUP BY uid");
+    let kinds: Vec<DiagnosticKind> = found.iter().map(|d| d.kind).collect();
+    assert_eq!(kinds, [DiagnosticKind::AmbiguousColumn]);
+}
+
+#[test]
+fn syntax_sqlparser_does_not_parse_is_rewritten() {
+    // Field access on a function result, `expr.*`, typed array literals, shifts and
+    // `ANY TYPE` parameters
+    assert_clean(
+        "CREATE TEMP FUNCTION first_sku(items ANY TYPE) AS (items[SAFE_OFFSET(0)].sku);\n\
+         SELECT\n\
+           first_sku(items) AS sku,\n\
+           mozfun.norm.version_info(status).major_version AS major,\n\
+           CAST(udf.parse(status).code.value AS INT64) AS code,\n\
+           IF(is_paid, shipping, NULL).* REPLACE (UPPER(city) AS city),\n\
+           ARRAY_AGG(items ORDER BY order_id LIMIT 1)[OFFSET(0)].*,\n\
+           ARRAY<STRUCT<k STRING, v ARRAY<STRUCT<x INT64>>>>[('a', [STRUCT(1)])] AS kv,\n\
+           ARRAY<STRING>[] AS no_tags,\n\
+           CAST(NULL AS ARRAY<STRUCT<x INT64>>) AS empty,\n\
+           1 << 3 AS flag, order_id >> 1 AS half\n\
+         FROM analytics.orders\n\
+         WHERE `my-project.udf.parse`(status).code > 0;",
+    );
+    // Columns after the rewritten text on the same line keep their location
+    let found = assert_reports(
+        "SELECT f(order_id).a.b, `p.udf.g`(status).*, ARRAY<STRING>[] AS e, 1 << 2, nope \
+         FROM analytics.orders",
+        &[DiagnosticKind::ColumnNotFound],
+    );
+    let span = found[0].span.expect("span");
+    assert_eq!(span.column, 76);
+    assert_eq!(span.offset, 75);
+    // Names inside the rewritten expressions are still resolved
+    assert_reports(
+        "SELECT f(order_idd).a, g(statuss).* FROM analytics.orders",
+        &[
+            DiagnosticKind::ColumnNotFound,
+            DiagnosticKind::ColumnNotFound,
+        ],
+    );
+    // Strings and comments are left alone
+    assert_clean("SELECT 'f(x).* << ARRAY<STRING>[]' AS s -- f(x).y\nFROM analytics.orders");
 }

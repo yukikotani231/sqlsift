@@ -42,6 +42,10 @@ pub struct Catalog {
     /// diagnostics on queries that reference them)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_relations: Vec<DroppedRelation>,
+    /// Databases (BigQuery projects) named by three-part names of tables and views
+    /// in the schema input (`project.dataset.table`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<String>,
 }
 
 /// A schema statement that could not be parsed and was skipped
@@ -75,6 +79,7 @@ impl Catalog {
             strict_schemas: false,
             skipped_definitions: Vec::new(),
             dropped_relations: Vec::new(),
+            databases: Vec::new(),
         };
         // Create default schema
         catalog.schemas.insert(
@@ -263,6 +268,36 @@ impl Catalog {
                 QualifiedName::with_schema(self.ident_name(schema), self.ident_name(table))
             }
             _ => QualifiedName::new(name.to_string()),
+        }
+    }
+
+    /// Record the database (BigQuery project) of a three-part table or view name
+    pub fn note_database(&mut self, name: &ObjectName) {
+        if let [database, _, _] = split_dotted_idents(&name.0).as_ref() {
+            let database = self.ident_name(database);
+            if !self
+                .databases
+                .iter()
+                .any(|d| self.names_match(d, &database))
+            {
+                self.databases.push(database);
+            }
+        }
+    }
+
+    /// Whether a three-part name's database may be one the schema input describes:
+    /// one that is named by a table or view of the schema, or any database when the
+    /// schema names none. Names with fewer parts always may.
+    pub fn database_is_known(&self, name: &ObjectName) -> bool {
+        match split_dotted_idents(&name.0).as_ref() {
+            [database, _, _] => {
+                self.databases.is_empty()
+                    || self
+                        .databases
+                        .iter()
+                        .any(|d| self.names_match(d, &self.ident_name(database)))
+            }
+            _ => true,
         }
     }
 

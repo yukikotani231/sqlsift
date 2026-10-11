@@ -9,8 +9,8 @@ use sqlparser::ast::{
     Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem, Expr,
     FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert, JoinConstraint,
     JoinOperator, NamedWindowDefinition, NamedWindowExpr, ObjectName, OnConflictAction, OnInsert,
-    Query, RenameSelectItem, Select, SelectItem, SetExpr, Statement, Subscript, TableFactor,
-    TableWithJoins, Values, WildcardAdditionalOptions,
+    Query, RenameSelectItem, Select, SelectItem, SetExpr, Statement, Subscript, TableAlias,
+    TableFactor, TableWithJoins, Values, WildcardAdditionalOptions,
 };
 use std::collections::HashMap;
 
@@ -40,6 +40,9 @@ pub(super) struct Resolver<'a> {
     pub(super) subquery_columns: HashMap<usize, Option<Vec<Column>>>,
     /// Number of unaliased derived tables seen (to give each a distinct scope key)
     unaliased_subqueries: usize,
+    /// Script variables declared by earlier statements of the file (`DECLARE x`):
+    /// names that are not columns may be these
+    variables: Vec<String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -51,7 +54,14 @@ impl<'a> Resolver<'a> {
             diagnostics: Vec::new(),
             subquery_columns: HashMap::new(),
             unaliased_subqueries: 0,
+            variables: Vec::new(),
         }
+    }
+
+    /// Script variables declared by earlier statements (`DECLARE x INT64`)
+    pub(super) fn with_variables(mut self, variables: &[String]) -> Self {
+        self.variables = variables.to_vec();
+        self
     }
 
     /// Consume the resolver and return collected diagnostics
@@ -118,6 +128,16 @@ impl<'a> Resolver<'a> {
             .0
             .last()
             .map(|id| Span::from_sqlparser(&id.span));
+
+        // BigQuery: a table of a project the schema doesn't describe is unknown
+        if self.dialect == SqlDialect::BigQuery
+            && !self.catalog.database_is_known(&insert.table_name)
+        {
+            if let Some(source) = &insert.source {
+                self.insert_source(source);
+            }
+            return None;
+        }
 
         let Some(table_def) = self.catalog.get_table(&table_name) else {
             if let Some(view) = self.catalog.get_view(&table_name) {
@@ -430,7 +450,11 @@ impl<'a> Resolver<'a> {
         }
 
         let table_name = match &table.relation {
-            TableFactor::Table { name, .. } => Some(self.catalog.qualified_name(name)),
+            TableFactor::Table { name, .. }
+                if self.dialect != SqlDialect::BigQuery || self.catalog.database_is_known(name) =>
+            {
+                Some(self.catalog.qualified_name(name))
+            }
             _ => None,
         };
         let table_def = table_name.as_ref().and_then(|n| self.catalog.get_table(n));
@@ -703,7 +727,7 @@ impl<'a> Resolver<'a> {
         // aliases); an alias is only used for a name no table in scope has.
         // Only explicit aliases of earlier items are lateral aliases: `SELECT nope`
         // must not resolve `nope` as its own alias.
-        let mut aliases = projection_aliases(&select.projection);
+        let mut aliases = projection_aliases(&select.projection, self.dialect);
         let lateral = self.dialect.lateral_column_aliases();
 
         let select_span = Span::from_sqlparser(&select.select_token.0.span);
@@ -772,6 +796,12 @@ impl<'a> Resolver<'a> {
             match item {
                 SelectItem::ExprWithAlias { expr, alias } => {
                     columns.push(Column::new(alias.value.clone(), self.infer_expr_type(expr)));
+                }
+                // BigQuery `f(x).*`: the fields of a STRUCT, which aren't modeled
+                SelectItem::UnnamedExpr(Expr::CompositeAccess { key, .. })
+                    if key.value == super::bigquery::STRUCT_STAR_FIELD =>
+                {
+                    return None;
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
@@ -1020,7 +1050,14 @@ impl<'a> Resolver<'a> {
                 // doesn't define
                 let may_exist = self.dialect == SqlDialect::BigQuery
                     && self.bigquery_table_may_exist(&table_name);
-                let mut relation = if let Some(cte) = cte {
+                // BigQuery: a table of another project than the ones the schema
+                // describes is unknown, even if a dataset of the schema has a table
+                // with its name
+                let other_project =
+                    self.dialect == SqlDialect::BigQuery && !self.catalog.database_is_known(name);
+                let mut relation = if other_project {
+                    Relation::new(RelationKind::Opaque, table_name.to_string(), None)
+                } else if let Some(cte) = cte {
                     Relation::new(RelationKind::Cte, cte.name.clone(), cte.columns.clone())
                 } else if let Some(table) = Relation::table(self.catalog, &table_name) {
                     table
@@ -1130,8 +1167,96 @@ impl<'a> Resolver<'a> {
                     );
                 }
             }
+            TableFactor::Unpivot {
+                table,
+                value,
+                name,
+                columns: unpivoted,
+                alias,
+            } => {
+                let start = self.scope.current().relations.len();
+                self.table_factor(table);
+                for column in unpivoted {
+                    self.column(None, column);
+                }
+                // The input's columns but the unpivoted ones, then the name and
+                // value columns
+                let (key, columns) = self.take_relations_since(start);
+                let columns = columns.map(|mut columns| {
+                    columns.retain(|c| {
+                        !unpivoted
+                            .iter()
+                            .any(|u| u.value.eq_ignore_ascii_case(&c.name))
+                    });
+                    columns.push(Column::new(
+                        name.value.clone(),
+                        ExpressionType::Known(SqlType::Text),
+                    ));
+                    columns.push(Column::new(value.value.clone(), ExpressionType::Unknown));
+                    columns
+                });
+                self.insert_pivot_relation(alias.as_ref(), key, columns);
+            }
+            TableFactor::Pivot {
+                table,
+                aggregate_functions,
+                value_column,
+                alias,
+                ..
+            } => {
+                let start = self.scope.current().relations.len();
+                self.table_factor(table);
+                for aggregate in aggregate_functions {
+                    self.expr(&aggregate.expr);
+                }
+                for column in value_column {
+                    self.column(None, column);
+                }
+                // Output columns are named after the pivoted values: unknown
+                let (key, _) = self.take_relations_since(start);
+                self.insert_pivot_relation(alias.as_ref(), key, None);
+            }
             _ => {}
         }
+    }
+
+    /// Remove the relations registered in the current frame since it had `start`
+    /// of them: the key of the first, and all their `SELECT *` columns (`None` if
+    /// unknown)
+    fn take_relations_since(&mut self, start: usize) -> (Option<String>, Option<Vec<Column>>) {
+        let inner = self.scope.current().relations.split_off(start);
+        let key = inner.keys().next().cloned();
+        let columns = inner
+            .values()
+            .map(|r| {
+                r.star_columns()
+                    .map(|cols| cols.cloned().collect::<Vec<_>>())
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|cols| cols.concat());
+        (key, columns)
+    }
+
+    /// Register the result of PIVOT / UNPIVOT under its alias, or else under the
+    /// name of its input
+    fn insert_pivot_relation(
+        &mut self,
+        alias: Option<&TableAlias>,
+        input_key: Option<String>,
+        columns: Option<Vec<Column>>,
+    ) {
+        let Some(key) = alias.map(|a| a.name.value.clone()).or(input_key) else {
+            return;
+        };
+        let names: Vec<String> = alias
+            .iter()
+            .flat_map(|a| a.columns.iter().map(|c| c.name.value.clone()))
+            .collect();
+        let columns = Relation::rename_columns(columns, &names);
+        self.scope.current().relations.insert(
+            key.clone(),
+            Relation::new(RelationKind::Subquery, key, columns),
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -1154,6 +1279,10 @@ impl<'a> Resolver<'a> {
                     });
                     if in_scope {
                         self.wildcard_options(Some((schema, table)), options);
+                    } else if self.dialect.struct_field_paths() && self.bigquery_struct_star(&parts)
+                    {
+                        // `struct_col.*` / `alias.struct_col.field.*`: the STRUCT's
+                        // fields, which sqlsift doesn't model
                     } else {
                         self.diagnostics.push(relation_not_in_from(schema, table));
                     }
@@ -1407,6 +1536,8 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
+            // `(expr).field` (BigQuery `f(x).field`, rewritten): fields aren't modeled
+            Expr::CompositeAccess { expr, .. } => self.expr(expr),
             Expr::Method(method) => {
                 self.expr(&method.expr);
                 for func in &method.method_chain {
@@ -1603,6 +1734,16 @@ impl<'a> Resolver<'a> {
         // Unqualified column reference: the innermost query block that has it wins
         match self.scope.column(column_name, self.dialect) {
             ColumnLookup::Found(_) | ColumnLookup::Unknown => {}
+            // BigQuery: in GROUP BY, HAVING, QUALIFY and ORDER BY a name that is an
+            // output column alias is the alias, even when input columns have it
+            // (PostgreSQL's GROUP BY prefers input columns, so it stays ambiguous)
+            ColumnLookup::Ambiguous(_)
+                if self.dialect == SqlDialect::BigQuery
+                    && self.scope.current_ref().is_some_and(|f| {
+                        f.select_aliases
+                            .iter()
+                            .any(|a| a.eq_ignore_ascii_case(column_name))
+                    }) => {}
             ColumnLookup::Ambiguous(tables) => {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -1637,7 +1778,12 @@ impl<'a> Resolver<'a> {
                         || (self.dialect == SqlDialect::BigQuery
                             && super::bigquery::is_date_part(column_name))
                         || column_name.starts_with('@'));
-                if is_alias || is_relation || is_keyword {
+                // A script variable (`DECLARE x ...` earlier in the file)
+                let is_variable = self
+                    .variables
+                    .iter()
+                    .any(|v| v.eq_ignore_ascii_case(column_name));
+                if is_alias || is_relation || is_keyword || is_variable {
                     return;
                 }
 
@@ -1875,13 +2021,19 @@ fn relation_key(factor: &TableFactor) -> Option<String> {
 }
 
 /// Output column names of a SELECT list usable as aliases in ORDER BY / GROUP BY
-fn projection_aliases(projection: &[SelectItem]) -> Vec<String> {
+fn projection_aliases(projection: &[SelectItem], dialect: SqlDialect) -> Vec<String> {
     projection
         .iter()
         .filter_map(|item| match item {
             SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.clone()),
             // Column name also acts as implicit alias
             SelectItem::UnnamedExpr(Expr::Identifier(ident)) => Some(ident.value.clone()),
+            // BigQuery: so does the last name of a path (`t.a` is `a`)
+            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents))
+                if dialect == SqlDialect::BigQuery =>
+            {
+                idents.last().map(|i| i.value.clone())
+            }
             _ => None,
         })
         .collect()
@@ -2103,6 +2255,7 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
         Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()),
         Expr::Function(func) => func.name.0.last().map(|i| i.value.to_lowercase()),
         Expr::Cast { expr, .. } | Expr::Nested(expr) => implicit_column_name(expr),
+        Expr::CompositeAccess { key, .. } => Some(key.value.clone()),
         Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }
