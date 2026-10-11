@@ -27,6 +27,16 @@ Set it once in `sqlsift.toml` with `dialect = "mysql"`.
 - `GROUPING SETS`, `CUBE`, `ROLLUP`, `DISTINCT ON`
 - Expressions: `CASE`, `CAST`, `EXTRACT`, JSON operators, `AT TIME ZONE`, `ARRAY`, …
 
+## Schemas and qualified names
+
+Tables, views and enum types are kept per schema, so `auth.users` and `public.users` are two tables (as in Supabase projects). Names can be written as `table`, `schema.table` or `database.schema.table`, and columns as `table.column`, `schema.table.column` or `database.schema.table.column`; the database part is not checked.
+
+- **PostgreSQL**: an unqualified name is looked up in the `search_path` (`public` unless a `SET search_path` in the file changes it). A table in a schema off the path must be qualified: `SELECT * FROM daily_signups` is [E0001](../rules/E0001.md) with a hint to write `analytics.daily_signups`. `schema.table.column` must name a table of the `FROM` clause, so `auth.users.email` is reported when `FROM users` is `public.users`.
+- **MySQL**: databases act as schemas (`shop.orders`, `USE shop;` in schema and query files). The current database is chosen when the query runs, so an unqualified name is found in any database, and a database name the schema doesn't use (a dump without `USE`) matches the tables created without one.
+- **SQLite**: `main.users` and `temp.users` refer to the tables of the schema; tables created as `archive.users` belong to the attached database `archive`.
+
+A backtick-quoted name containing dots (`` `shop.orders` ``) is split into its parts. A double-quoted one (`"a.b"`) stays one name, as in PostgreSQL.
+
 ## Type checking
 
 sqlsift infers expression types to report [E0003](../rules/E0003.md) and [E0007](../rules/E0007.md). It currently understands:
@@ -45,7 +55,6 @@ Anything sqlsift can't infer is treated as unknown and never reported, so missin
 
 ## Known limitations
 
-- Schema-qualified names (`public.users`) are not fully resolved.
 - Function bodies and stored procedures are skipped, not analyzed.
 - SQL embedded in application code is supported for tagged template literals in TypeScript, JavaScript, Vue and Svelte files (see [SQL in TypeScript and JavaScript](queries.md#sql-in-typescript-and-javascript)); strings in other languages (Python, Go, …) are not.
 - dbt / Jinja templates are masked, not rendered (see [dbt and Jinja templates](queries.md#dbt-and-jinja-templates)): macros aren't expanded, and the columns of `{{ ref(...) }}` models are unknown.

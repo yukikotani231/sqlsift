@@ -20,11 +20,11 @@ use sqlparser::ast::{
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 #[cfg(test)]
 use crate::schema::Catalog;
-use crate::schema::TableDef;
+use crate::schema::{split_dotted_idents, TableDef};
 use crate::types::{ArithmeticOp, SqlType, TypeCompatibility};
 
 use super::resolver::{is_comparison_operator, Resolver};
-use super::scope::{Column, ColumnLookup, ColumnMatch, ExpressionType};
+use super::scope::{split_column_ref, Column, ColumnLookup, ColumnMatch, ExpressionType};
 use crate::suggest::find_similar_name;
 
 impl Resolver<'_> {
@@ -460,13 +460,16 @@ impl Resolver<'_> {
                 ColumnLookup::Found(ty) => ty.clone(),
                 _ => ExpressionType::Unknown,
             },
-            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                // table.column or schema.table.column
-                [.., table, column] if parts.len() <= 3 => {
-                    self.infer_qualified_column(table, column)
+            Expr::CompoundIdentifier(parts) => {
+                // [[database.]schema.]table.column
+                let parts = split_dotted_idents(parts);
+                match split_column_ref(&parts) {
+                    Some((schema, table, column)) => {
+                        self.infer_qualified_column(schema, table, column)
+                    }
+                    None => ExpressionType::Unknown,
                 }
-                _ => ExpressionType::Unknown,
-            },
+            }
             Expr::Nested(inner) => self.infer_expr_type(inner),
             Expr::BinaryOp { .. } => self.infer_binary_chain_type(expr),
             Expr::Cast { data_type, .. } => match SqlType::from_ast(data_type) {
@@ -508,11 +511,11 @@ impl Resolver<'_> {
                 self.scope.column_relation(&ident.value, self.dialect)?,
                 ident,
             ),
-            Expr::CompoundIdentifier(parts) if (2..=3).contains(&parts.len()) => {
-                let [.., table, column] = parts.as_slice() else {
-                    return None;
-                };
-                (self.scope.relation(&table.value)?, column)
+            Expr::CompoundIdentifier(parts) => {
+                let parts = split_dotted_idents(parts);
+                let (schema, table, column) = split_column_ref(&parts)?;
+                let relation = self.scope.qualified_relation(self.catalog, schema, table)?;
+                return Some(format!("{}.{}", relation.name, column.value));
             }
             Expr::Nested(inner) => return self.column_label(inner),
             _ => return None,
@@ -522,12 +525,13 @@ impl Resolver<'_> {
 
     fn infer_qualified_column(
         &self,
+        schema: Option<&sqlparser::ast::Ident>,
         table: &sqlparser::ast::Ident,
         column: &sqlparser::ast::Ident,
     ) -> ExpressionType {
         match self
             .scope
-            .relation(&table.value)
+            .qualified_relation(self.catalog, schema, table)
             .map(|r| r.column(&column.value, self.dialect))
         {
             Some(ColumnMatch::Yes(ty)) => ty.clone(),

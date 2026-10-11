@@ -47,7 +47,10 @@ fn table_in_another_schema_is_suggested_qualified() {
     let d = single_pg(&c, "SELECT amount FROM charges");
     assert_eq!(d.kind, DiagnosticKind::TableNotFound);
     assert_eq!(d.message, "Table 'charges' not found");
-    assert_eq!(d.help.as_deref(), Some("Did you mean 'billing.charges'?"));
+    assert_eq!(
+        d.help.as_deref(),
+        Some("Did you mean 'billing.charges'? Schema 'billing' is not on the search_path, so its tables must be schema-qualified")
+    );
 
     let d = single_pg(&c, "SELECT amount FROM charge");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'billing.charges'?"));
