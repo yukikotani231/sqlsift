@@ -183,7 +183,6 @@ fn dbt_type_macro_in_arithmetic() {
 /// Class dbt-config-after-comment: `{{ config() }}` after a `--` comment line is not
 /// treated as the start of the statement (150 fivetran models fail to parse)
 #[test]
-#[ignore = "known parse gap (corpus report: dbt-config-after-comment)"]
 fn dbt_config_after_comment() {
     assert_clean(&dbt(
         SqlDialect::PostgreSQL,
@@ -196,7 +195,6 @@ fn dbt_config_after_comment() {
 /// Class dbt-clause-macro: macros that expand to `, column` lists or whole clauses
 /// (`apply_source_relation`, `partition_by_source_relation`, `dbt_utils.group_by`)
 #[test]
-#[ignore = "known parse gap (corpus report: dbt-clause-macro)"]
 fn dbt_macros_expanding_to_columns_or_clauses() {
     let schema = "CREATE TABLE t (a INT, b INT);";
     assert_clean(&dbt(
@@ -219,7 +217,6 @@ fn dbt_macros_expanding_to_columns_or_clauses() {
 /// Class dbt-loop-alias: join aliases built in a `{% for %}` loop
 /// (`{{ field }}_ordinal`) and referenced by their expanded names (dbt_quickbooks)
 #[test]
-#[ignore = "known false positive (corpus report: dbt-loop-alias)"]
 fn dbt_alias_built_in_for_loop() {
     assert_clean(&dbt(
         SqlDialect::PostgreSQL,

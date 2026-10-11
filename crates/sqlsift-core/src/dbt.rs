@@ -38,6 +38,113 @@ use crate::types::SqlType;
 /// by model name: `{{ ref('orders') }}` is masked to `ref.orders`
 pub const REF_SCHEMA: &str = "ref";
 
+/// The schema that relation variables are added to, by variable name:
+/// `{{ var('orders') }}` is masked to `var.orders`
+pub const VAR_SCHEMA: &str = "var";
+
+/// Variables of a dbt project whose value is a relation, from the `vars:` of its
+/// `dbt_project.yml` (fivetran packages: `netsuite_vendors: "{{ source('netsuite',
+/// 'vendors') }}"`). [`RelationVars::add_to_catalog`] adds each one whose relation
+/// the catalog has as `var.<name>`, so `FROM {{ var('netsuite_vendors') }}` is that
+/// relation. Variable name → the `ref(...)` / `source(...)` call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelationVars(HashMap<String, String>);
+
+impl RelationVars {
+    /// The relation variables of a `dbt_project.yml`. Only values that are a single
+    /// `{{ ref(...) }}` or `{{ source(...) }}` with literal arguments are kept;
+    /// variables nested under a package name are read like top-level ones.
+    pub fn from_dbt_project(yml: &str) -> Self {
+        let mut vars = HashMap::new();
+        let mut in_vars = false;
+        for line in yml.lines() {
+            let code = line.trim_end();
+            if code.trim_start().is_empty() || code.trim_start().starts_with('#') {
+                continue;
+            }
+            if !code.starts_with([' ', '\t']) {
+                in_vars = code.starts_with("vars:");
+                continue;
+            }
+            if !in_vars {
+                continue;
+            }
+            let Some((key, value)) = code.trim_start().split_once(':') else {
+                continue;
+            };
+            let key = key.trim().trim_matches(['\'', '"']);
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            let Some(call) = value
+                .strip_prefix("{{")
+                .and_then(|v| v.strip_suffix("}}"))
+                .map(str::trim)
+            else {
+                continue;
+            };
+            if crate::templating::relation_call(call).is_some() {
+                vars.insert(key.to_string(), call.to_string());
+            }
+        }
+        RelationVars(vars)
+    }
+
+    /// The `ref(...)` / `source(...)` call variable `name` holds
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+
+    /// Whether there are no relation variables
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Add the variables of `other` (a variable both define differently is left out:
+    /// it can't be told which one a model uses)
+    pub fn merge(&mut self, other: RelationVars) {
+        for (name, call) in other.0 {
+            match self.0.get(&name) {
+                Some(existing) if *existing != call => {
+                    self.0.insert(name, String::new());
+                }
+                _ => {
+                    self.0.insert(name, call);
+                }
+            }
+        }
+    }
+
+    /// Add each variable whose relation `catalog` has (a table: from the schema
+    /// files or a dbt catalog) as the table `var.<name>`. Returns how many were
+    /// added.
+    pub fn add_to_catalog(&self, catalog: &mut Catalog) -> usize {
+        let mut added = 0;
+        for (name, call) in &self.0 {
+            let Some((schema, table)) = crate::templating::relation_call(call) else {
+                continue;
+            };
+            let Some(columns) = catalog
+                .get_table(&QualifiedName::with_schema(schema, table))
+                .map(|t| t.columns.clone())
+            else {
+                continue;
+            };
+            if add(
+                catalog,
+                QualifiedName::with_schema(VAR_SCHEMA, name),
+                &columns,
+            ) {
+                added += 1;
+            }
+        }
+        added
+    }
+}
+
 /// What [`load_catalog_json`] added to the catalog
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DbtCatalogSummary {
@@ -286,6 +393,48 @@ mod tests {
             }
         }
     }"#;
+
+    #[test]
+    fn relation_vars_of_dbt_project() {
+        let yml = "name: 'shop'\nmodels:\n  shop:\n    orders: \"{{ ref('orders') }}\"\n\
+                   vars:\n  shop:\n    # comment\n    orders_table: \"{{ ref('orders') }}\"\n\
+                   \x20   raw_orders: '{{ source(\"shop\", \"raw_orders\") }}'\n\
+                   \x20   missing: \"{{ ref('missing') }}\"\n    flag: true\n\
+                   \x20   computed: \"{{ ref(var('x')) }}\"\n  top_level: \"{{ ref('orders') }}\"\n\
+                   seeds:\n  a: \"{{ ref('orders') }}\"\n";
+        let vars = RelationVars::from_dbt_project(yml);
+        assert_eq!(vars.get("orders_table"), Some("ref('orders')"));
+        assert_eq!(
+            vars.get("raw_orders"),
+            Some("source(\"shop\", \"raw_orders\")")
+        );
+        assert_eq!(vars.get("top_level"), Some("ref('orders')"));
+        assert_eq!(vars.get("flag"), None);
+        assert_eq!(vars.get("computed"), None);
+        // Only `vars:`
+        assert_eq!(vars.get("a"), None);
+
+        let mut catalog = Catalog::new();
+        load_catalog_json(CATALOG, &mut catalog).unwrap();
+        assert_eq!(vars.add_to_catalog(&mut catalog), 3);
+        let table = catalog
+            .get_table(&QualifiedName::with_schema(VAR_SCHEMA, "orders_table"))
+            .unwrap();
+        assert_eq!(table.column_names(), ["order_id", "status", "payload"]);
+        assert!(catalog.table_exists(&QualifiedName::with_schema(VAR_SCHEMA, "raw_orders")));
+        assert!(!catalog.table_exists(&QualifiedName::with_schema(VAR_SCHEMA, "missing")));
+
+        // A variable two projects define differently is left out
+        let mut merged = vars.clone();
+        merged.merge(RelationVars::from_dbt_project(
+            "vars:\n  orders_table: \"{{ ref('other') }}\"\n  top_level: \"{{ ref('orders') }}\"\n",
+        ));
+        let mut catalog = Catalog::new();
+        load_catalog_json(CATALOG, &mut catalog).unwrap();
+        merged.add_to_catalog(&mut catalog);
+        assert!(!catalog.table_exists(&QualifiedName::with_schema(VAR_SCHEMA, "orders_table")));
+        assert!(catalog.table_exists(&QualifiedName::with_schema(VAR_SCHEMA, "top_level")));
+    }
 
     #[test]
     fn loads_refs_sources_and_warehouse_names() {

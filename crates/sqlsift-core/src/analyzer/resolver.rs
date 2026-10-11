@@ -40,6 +40,8 @@ pub(super) struct Resolver<'a> {
     pub(super) subquery_columns: HashMap<usize, Option<Vec<Column>>>,
     /// Number of unaliased derived tables seen (to give each a distinct scope key)
     unaliased_subqueries: usize,
+    /// Whether a name at this location is made from a template tag (`AS {{ c }}`)
+    templated_name: Option<&'a dyn Fn(&Span) -> bool>,
 }
 
 impl<'a> Resolver<'a> {
@@ -51,7 +53,18 @@ impl<'a> Resolver<'a> {
             diagnostics: Vec::new(),
             subquery_columns: HashMap::new(),
             unaliased_subqueries: 0,
+            templated_name: None,
         }
+    }
+
+    /// Names at the locations `templated_name` accepts are made from template tags:
+    /// an output column with such an alias (`AS {{ c }}`) has an unknown name
+    pub(super) fn with_templated_names(
+        mut self,
+        templated_name: &'a dyn Fn(&Span) -> bool,
+    ) -> Self {
+        self.templated_name = Some(templated_name);
+        self
     }
 
     /// Consume the resolver and return collected diagnostics
@@ -771,7 +784,15 @@ impl<'a> Resolver<'a> {
         for item in projection {
             match item {
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    columns.push(Column::new(alias.value.clone(), self.infer_expr_type(expr)));
+                    let templated = self
+                        .templated_name
+                        .is_some_and(|f| f(&Span::from_sqlparser(&alias.span)));
+                    let name = if templated {
+                        UNNAMED_COLUMN.to_string()
+                    } else {
+                        alias.value.clone()
+                    };
+                    columns.push(Column::new(name, self.infer_expr_type(expr)));
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());

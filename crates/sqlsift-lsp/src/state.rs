@@ -209,6 +209,18 @@ impl ServerState {
             }
         }
 
+        // Relation variables of the workspace's dbt project (`FROM {{ var('x') }}`)
+        if self.templating == Templating::Jinja {
+            if let Some(yml) = self
+                .workspace_root
+                .as_ref()
+                .and_then(|root| std::fs::read_to_string(root.join("dbt_project.yml")).ok())
+            {
+                sqlsift_core::dbt::RelationVars::from_dbt_project(&yml)
+                    .add_to_catalog(&mut self.catalog);
+            }
+        }
+
         for d in schema_diags {
             errors.push(format!("Schema warning: {}", d.message));
         }

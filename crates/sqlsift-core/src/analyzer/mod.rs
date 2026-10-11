@@ -219,10 +219,14 @@ impl<'a> Analyzer<'a> {
         // every line and character column)
         let catalog = self.catalog;
         let template = match self.templating {
-            Templating::Jinja => templating::mask_jinja(sql, &|schema, table| {
-                let name = QualifiedName::with_schema(schema, table);
-                catalog.table_exists(&name) || catalog.view_exists(&name)
-            }),
+            Templating::Jinja => templating::mask_jinja(
+                sql,
+                &|schema, table| {
+                    let name = QualifiedName::with_schema(schema, table);
+                    catalog.table_exists(&name) || catalog.view_exists(&name)
+                },
+                templating::dbt_adapter(self.dialect),
+            ),
             Templating::None => Template::unchanged(sql),
         };
         let source = match self.dialect {
@@ -273,7 +277,13 @@ impl<'a> Analyzer<'a> {
                 .map_or(self.catalog, SchemaBuilder::catalog);
 
             // Name resolution and type checking in one walk over the statement
-            let mut resolver = Resolver::new(catalog, self.dialect);
+            let templated_name = |span: &Span| {
+                let mut span = *span;
+                origin.shift(&mut span);
+                template.masked.is_substituted(span.line, span.column)
+            };
+            let mut resolver =
+                Resolver::new(catalog, self.dialect).with_templated_names(&templated_name);
             resolver.statement(stmt);
 
             // Locations relative to the input
@@ -372,7 +382,10 @@ impl<'a> Analyzer<'a> {
                         | DiagnosticKind::AmbiguousColumn
                 ) && (source.is_substituted(span.line, span.column)
                     || template.masked.is_substituted(span.line, span.column)
-                    || psql::is_within(substituted, span.line, span.column));
+                    || psql::is_within(substituted, span.line, span.column))
+                    || is_templated_alias(&d, &template)
+                    || (d.kind == DiagnosticKind::TableNotFound
+                        && template.may_be_templated_cte(span.line, span.column));
                 if substituted || directives.is_suppressed(d.kind, span.line) {
                     return None;
                 }
@@ -461,6 +474,23 @@ impl<'a> Analyzer<'a> {
         }
         (statements, skipped)
     }
+}
+
+/// Whether `d` reports a qualifier missing from FROM (`a_o.v`) whose name may be an
+/// alias the template builds from tags (`left join o as {{ f }}_o` in a loop)
+fn is_templated_alias(d: &Diagnostic, template: &Template) -> bool {
+    if d.kind != DiagnosticKind::TableNotFound {
+        return false;
+    }
+    let Some(name) = d
+        .message
+        .strip_prefix("Table or alias '")
+        .and_then(|m| m.strip_suffix("' not found in FROM clause"))
+    else {
+        return false;
+    };
+    let name = name.rsplit('.').next().unwrap_or(name);
+    template.may_be_templated_alias(name)
 }
 
 /// Make a parse error in a template name the template tag it is on instead of its

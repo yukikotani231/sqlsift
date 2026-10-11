@@ -244,7 +244,7 @@ fn quoted_expressions_are_untyped() {
 #[test]
 fn parse_errors_show_the_template_text() {
     let diagnostics =
-        analyze("with spine as (\n  {{ dbt_utils.date_spine(datepart='day') }}\n)\nselect 1");
+        analyze("select id from orders\nwhere id in {{ dbt_utils.date_spine(datepart='day') }}");
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     let d = &diagnostics[0];
     assert_eq!(d.kind, DiagnosticKind::ParseError);
@@ -286,6 +286,65 @@ fn jinja_comment_directives_work() {
     assert_valid("{# sqlsift:disable E0002 #}\n{% if x %}\nselect bogus from users\n{% endif %}");
     let sql = "{# sqlsift:disable E0001 #}\nselect bogus from users";
     assert_eq!(single(sql).0, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn config_after_comment_lines_is_masked() {
+    assert_valid(
+        "-- disabled by a var\n/* note */\n{{ config(enabled=var('x', True)) }}\nselect id from users",
+    );
+    assert_valid("select 1;\n-- next\n{{ config(materialized='table') }}\nselect id from users");
+}
+
+#[test]
+fn macros_adding_select_items_make_the_columns_unknown() {
+    // `, source_relation` after the last item: the CTE's columns are unknown
+    assert_valid(
+        "with base as (\n  select id, name\n  {{ fivetran_utils.apply_source_relation() }}\n  from users\n)\n\
+         select id, source_relation from base",
+    );
+    // Set operations over such a block aren't compared
+    assert_valid(
+        "select id {{ fivetran_utils.apply_source_relation() }} from users\n\
+         union all select id, name, created_at from users",
+    );
+    // The block's own FROM clause is still checked
+    let sql = "select nme {{ fivetran_utils.apply_source_relation() }} from users";
+    assert_eq!(single(sql).0, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn macros_expanding_to_clauses_are_blanked() {
+    assert_valid("select user_id, count(*) as n from orders\n{{ dbt_utils.group_by(1) }}");
+    assert_valid("select id from orders {{ filter_exceptions() }}");
+    assert_valid(
+        "select row_number() over (partition by user_id {{ fivetran_utils.partition_by_source_relation() }} order by id) as rn from orders",
+    );
+    // A column in such a query is still checked
+    let sql = "select usr_id, count(*) as n from orders\n{{ dbt_utils.group_by(1) }}";
+    assert_eq!(single(sql).0, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn macro_as_a_whole_query_has_unknown_columns() {
+    assert_valid(
+        "with spine as (\n  {{ dbt_utils.date_spine(datepart='day', start_date='2020-01-01') }}\n)\n\
+         select date_day from spine",
+    );
+    assert_valid("select date_day from ({{ dbt_utils.date_spine('day') }}) as s");
+}
+
+#[test]
+fn aliases_built_in_loops_are_unknown() {
+    assert_valid(
+        "{% for f in ['id', 'user_id'] %}\n\
+         select o.id, id_o.total, user_id_o.total from orders o\n\
+         left join orders as {{ f }}_o on o.{{ f }} = {{ f }}_o.{{ f }}\n{% endfor %}",
+    );
+    // A qualifier that can't be such an alias is still reported
+    let sql = "select o.id, x.total from orders o\n\
+               {% for f in ['id'] %} left join orders as {{ f }}_o on o.id = {{ f }}_o.id {% endfor %}";
+    assert_eq!(single(sql).0, DiagnosticKind::TableNotFound);
 }
 
 #[test]
@@ -411,6 +470,34 @@ fn dbt_catalog_unusual_names() {
     assert_dbt_valid("select id from {{ref('order')}}");
     let (kind, ..) = dbt_single("select nope from {{ ref('CamelModel') }}");
     assert_eq!(kind, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn dbt_relation_vars_are_their_relations() {
+    let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+    builder.parse(SCHEMA).unwrap();
+    let mut catalog = builder.build().0;
+    sqlsift_core::dbt::load_catalog_json(DBT_CATALOG, &mut catalog).unwrap();
+    let vars = sqlsift_core::dbt::RelationVars::from_dbt_project(
+        "vars:\n  jaffle:\n    payments: \"{{ source('shop', 'payments') }}\"\n    user: \"{{ ref('stg_orders') }}\"\n",
+    );
+    vars.add_to_catalog(&mut catalog);
+    let analyze = |sql: &str| {
+        Analyzer::with_dialect(&catalog, SqlDialect::PostgreSQL)
+            .with_templating(Templating::Jinja)
+            .analyze(sql)
+    };
+    assert!(analyze("select id, paid_at from {{ var('payments') }}").is_empty());
+    assert!(analyze("select order_id from {{ var('user') }}").is_empty());
+    let found = analyze("select id, amount from {{ var('payments') }}");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].kind, DiagnosticKind::ColumnNotFound);
+    // A default that is a relation
+    let found = analyze("select bogus from {{ var('unset', ref('stg_orders')) }}");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    // Other variables stay unknown tables
+    assert!(analyze("select anything from {{ var('unset') }}").is_empty());
+    assert!(analyze("select anything from {{ var('unset', 'raw.t') }}").is_empty());
 }
 
 #[test]

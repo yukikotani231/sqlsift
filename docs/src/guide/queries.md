@@ -99,18 +99,22 @@ where c.id > (select max(customer_id) from {{ this }})
 ```
 
 - `{# comments #}` and `{% statements %}` are skipped. The SQL inside a `{% for %}` block is checked once, as a single iteration (both `loop.first` and `loop.last`): separators such as `{% if not loop.last %},{% endif %}` and `{{ ',' if not loop.last }}` are dropped.
-- Of `{% if %} ... {% elif %} ... {% else %} ... {% endif %}` only the first branch is checked; the others are skipped.
+- Of `{% if %} ... {% elif %} ... {% else %} ... {% endif %}` only one branch is checked; the others are skipped. It is the first branch whose condition may be true: sqlsift evaluates `is_incremental()` (false, as on a model's first build), `var('x', true)` / `var('x', false)` (the default), `target.type == 'snowflake'` / `!=` / `in [...]` (against the dialect's dbt adapter), `{% set x = ... %}` variables holding such a value, and `not` / `and` / `or` of these. Any other condition counts as true.
 - The bodies of `{% set x %}...{% endset %}`, `{% call %}...{% endcall %}`, `{% macro %}...{% endmacro %}` (and `test`, `materialization`, `docs` blocks) are skipped. The body of `{% raw %}...{% endraw %}` is checked as SQL.
 - `{{ source('raw', 'customers') }}` is the schema's table `raw.customers` when your schema has it, so its columns are checked.
 - `{{ ref('orders') }}` and `{{ source('shop', 'orders') }}` have the columns of the model or source in dbt's `catalog.json`, when there is one (see [Columns of models and sources](#columns-of-models-and-sources-from-dbts-catalog-alpha) below).
 - Any other `{{ ref(...) }}` or `{{ source(...) }}`, `{{ this }}` and any other `{{ ... }}` where a table name is expected (after `FROM`, `JOIN`, `INTO`, `UPDATE`, `USING`) is a table whose columns sqlsift doesn't know: it is not reported as missing, and neither are columns qualified by it or unqualified columns that may come from it. Put the tables your models read from (the dbt sources) in the schema, or generate dbt's catalog, to get them checked.
-- `{{ ... }}` as part of a name (`total_{{ c }}`, `as {{ alias }}`) is a name sqlsift doesn't know, and at the start of a statement (`{{ config(...) }}`) it is skipped.
+- `{{ ... }}` as part of a name (`total_{{ c }}`, `as {{ alias }}`) is a name sqlsift doesn't know: an output column named by it has an unknown name, and a table alias built from it in a loop (`left join o as {{ f }}_o`) makes qualifiers of that shape (`a_o.v`) unknown.
+- `{{ ... }}` at the start of a statement, after any comments (`{{ config(...) }}`), is skipped. When a query follows it directly, the macro may write the query's `WITH` clause, so table names in that query that aren't in the schema are not reported.
+- `{{ ... }}` right after a complete expression is a macro that adds list items or a whole clause. In a `SELECT` list (`select id {{ fivetran_utils.apply_source_relation() }} from t`) it adds columns sqlsift doesn't know: the columns of that query are unknown to the queries that read it. Elsewhere (`{{ dbt_utils.group_by(2) }}`, `partition by id {{ ... }}`, a macro that writes a `WHERE` clause) it is skipped.
+- `{{ ... }}` that is the whole body of a CTE or a subquery in `FROM` (`with spine as ({{ dbt_utils.date_spine(...) }})`) is a query whose columns sqlsift doesn't know.
+- `{{ var('x') }}` where a table name is expected is the relation of the dbt project variable `x` when `vars:` in `dbt_project.yml` sets it to a `{{ ref(...) }}` or `{{ source(...) }}` that sqlsift knows (diagnostics name it `var.x`), and `{{ var('x', ref('m')) }}` is the default relation; otherwise it is a table with unknown columns.
 - `{{ ... }}` as a type (`x::{{ dbt.type_bigint() }}`, `cast(x as {{ ... }})`) is a type sqlsift doesn't know.
 - Any other `{{ ... }}`, and a string literal with one in it (`'{{ var("start") }}'`), is an untyped value, like a bind parameter: it is never a type mismatch.
 - `sqlsift:disable` directives work in Jinja comments too: `{# sqlsift:disable-file #}`, `{# sqlsift:disable E0002 #}` (dbt users avoid `--` comments, which end up in the compiled SQL).
 - Everything else is checked as usual, and diagnostics point at the original file.
 
-Macros that expand to whole clauses or statements can't be followed: a parse error on one shows the template tag (`found: Jinja expression {{ dbt_utils.date_spine(...) }}`). Use `ignore` or `{# sqlsift:disable-file #}` for such files.
+Macros that expand to other SQL can't be followed: a parse error on one shows the template tag (`found: Jinja expression {{ dbt_utils.date_spine(...) }}`). Use `ignore` or `{# sqlsift:disable-file #}` for such files.
 
 ### Columns of models and sources from dbt's catalog (alpha)
 

@@ -6,8 +6,12 @@
 //! - `{# comment #}` and `{% statement %}` become whitespace. The SQL inside a
 //!   `{% for %}` block is checked once, as its first and last iteration (so
 //!   `{% if not loop.last %},{% endif %}` and `{{ ',' if not loop.last }}` are
-//!   dropped). Of an `{% if %}` / `{% elif %}` / `{% else %}` block only the first
-//!   branch is kept; the others are blanked.
+//!   dropped). Of an `{% if %}` / `{% elif %}` / `{% else %}` block only one
+//!   branch is kept; the others are blanked. It is the first branch whose
+//!   condition may be true: conditions sqlsift can evaluate are `is_incremental()`
+//!   (false, the first build), `var('x', true|false)` (the default), comparisons
+//!   of `target.type` with the dialect's dbt adapter, `{% set x = ... %}`
+//!   variables with such a value, and `not` / `and` / `or` of these.
 //! - The bodies of `{% set x %}...{% endset %}`, `{% call %}`, `{% macro %}`,
 //!   `{% test %}`, `{% materialization %}` and `{% docs %}` blocks are blanked;
 //!   the body of `{% raw %}...{% endraw %}` is SQL text.
@@ -23,8 +27,24 @@
 //!   are not reported. The same goes for an alias (`AS {{ name }}`), a type
 //!   (`x::{{ dbt.type_bigint() }}`) and an expression that is part of a name
 //!   (`{{ prefix }}_total`, `t.{{ column }}`).
-//! - `{{ expression }}` at the start of a statement (`{{ config(...) }}`) becomes
-//!   whitespace.
+//!   `{{ var('x') }}` there becomes `var.x` when the catalog has the relation
+//!   variable (see [`crate::dbt::RelationVars`]), and `{{ var('x', ref('m')) }}`
+//!   its default relation. An alias built from tags (`AS {{ f }}_o` in a loop)
+//!   makes qualifiers of that shape (`a_o.v`) unknown, and an output column with
+//!   such an alias has an unknown name.
+//! - `{{ expression }}` at the start of a statement, after comments
+//!   (`{{ config(...) }}`), becomes whitespace. When the query follows it, the
+//!   macro may write its WITH clause: its table names may be CTEs, and aren't
+//!   reported.
+//! - `{{ expression }}` right after a complete expression expands to more list
+//!   items or a whole clause. In a SELECT list (`select a {{ source_relation() }}`)
+//!   it becomes `, <identifier>.*`, a wildcard over a relation sqlsift doesn't
+//!   know, so the columns of that query block are unknown; elsewhere
+//!   (`{{ dbt_utils.group_by(2) }}`, `partition by a {{ m() }}`, a WHERE clause)
+//!   it becomes whitespace.
+//! - `{{ expression }}` that is all there is in the parentheses of a CTE or a
+//!   derived table (`as ({{ dbt_utils.date_spine(...) }})`) becomes
+//!   `select <identifier>.*`: a query whose columns are unknown.
 //! - A string literal with an `{{ expression }}` in it (`'{{ var("x") }}'`) and any
 //!   other `{{ expression }}` become the placeholder `$1`, an untyped value like a
 //!   bind parameter.
@@ -34,9 +54,11 @@
 //! parser and diagnostic line/column locations still point at the original text.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::dbt;
+use crate::dialect::SqlDialect;
 use crate::psql::Preprocessed;
 
 /// How query files are templated
@@ -69,6 +91,18 @@ impl std::fmt::Display for Templating {
             Templating::None => write!(f, "none"),
             Templating::Jinja => write!(f, "jinja"),
         }
+    }
+}
+
+/// The dbt adapter (`target.type`) that runs models in `dialect`
+pub(crate) fn dbt_adapter(dialect: SqlDialect) -> Option<&'static str> {
+    match dialect {
+        SqlDialect::PostgreSQL => Some("postgres"),
+        SqlDialect::Snowflake => Some("snowflake"),
+        SqlDialect::BigQuery => Some("bigquery"),
+        SqlDialect::Redshift => Some("redshift"),
+        SqlDialect::Databricks => Some("databricks"),
+        SqlDialect::MySQL | SqlDialect::SQLite => None,
     }
 }
 
@@ -160,6 +194,12 @@ enum Position {
     /// (`x::{{ dbt.type_bigint() }}`), or part of a name (`{{ prefix }}_total`,
     /// `t.{{ col }}`, `{{ target.schema }}.users`)
     Name,
+    /// Right after a complete expression or clause (`select a {{ m() }} from t`,
+    /// `from t {{ dbt_utils.group_by(2) }}`): the tag expands to more list items or
+    /// to a whole clause
+    Continuation,
+    /// The whole body of a CTE or derived table (`as ({{ dbt_utils.date_spine() }})`)
+    Query,
     /// Anywhere else: a value
     Value,
 }
@@ -174,12 +214,14 @@ fn last_word(text: &str) -> &str {
     &text[start..]
 }
 
-fn position(before: &str, after: &str) -> Position {
-    let glued = before.ends_with(is_name_char) || after.starts_with(is_name_char);
-    let before = before.trim_end();
-    if before.is_empty() || before.ends_with(';') {
+/// `statement_start`: only whitespace and comments since the start of the input or
+/// the last `;`
+fn position(before: &str, after: &str, statement_start: bool) -> Position {
+    if statement_start {
         return Position::Statement;
     }
+    let glued = before.ends_with(is_name_char) || after.starts_with(is_name_char);
+    let before = without_trailing_comments(before);
     let word = last_word(before);
     if glued {
         Position::Name
@@ -187,9 +229,248 @@ fn position(before: &str, after: &str) -> Position {
         Position::Table
     } else if word.eq_ignore_ascii_case("as") || before.ends_with("::") {
         Position::Name
+    } else if ends_expression(before) && !starts_with_word(after, "as") {
+        Position::Continuation
+    } else if is_query_body(before, after) {
+        Position::Query
     } else {
         Position::Value
     }
+}
+
+/// `text` without trailing whitespace and `--` / `/* */` comments
+fn without_trailing_comments(text: &str) -> &str {
+    let mut text = text.trim_end();
+    loop {
+        if text.ends_with("*/") {
+            if let Some(open) = text.rfind("/*") {
+                text = text[..open].trim_end();
+                continue;
+            }
+        }
+        let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let line = &text[line_start..];
+        let code = without_line_comment(line);
+        if code.len() == line.len() {
+            return text;
+        }
+        text = text[..line_start + code.len()].trim_end();
+    }
+}
+
+/// A line without its `--` comment (a `--` outside string literals and quoted
+/// identifiers)
+fn without_line_comment(line: &str) -> &str {
+    let mut quote = None;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '-') if line[i + 1..].starts_with('-') => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Whether `text` starts (after whitespace) with the keyword `word`
+fn starts_with_word(text: &str, word: &str) -> bool {
+    let text = text.trim_start();
+    text.get(..word.len())
+        .is_some_and(|w| w.eq_ignore_ascii_case(word))
+        && !text[word.len()..].starts_with(is_ident_char)
+}
+
+/// Whether a tag between `before` and `after` is all there is in the parentheses of
+/// a CTE (`AS (...)`) or a derived table (`FROM (...)`)
+fn is_query_body(before: &str, after: &str) -> bool {
+    let Some(open) = before.strip_suffix('(') else {
+        return false;
+    };
+    let word = last_word(open.trim_end());
+    after.trim_start().starts_with(')')
+        && ["as", "from", "join"]
+            .iter()
+            .any(|k| word.eq_ignore_ascii_case(k))
+}
+
+/// Keywords after which an expression or a name follows (a tag after one of them
+/// is a value, not the continuation of a complete expression)
+const OPERAND_KEYWORDS: &[&str] = &[
+    "select",
+    "distinct",
+    "all",
+    "where",
+    "and",
+    "or",
+    "not",
+    "on",
+    "by",
+    "when",
+    "then",
+    "else",
+    "case",
+    "in",
+    "is",
+    "as",
+    "from",
+    "join",
+    "like",
+    "ilike",
+    "between",
+    "having",
+    "limit",
+    "offset",
+    "set",
+    "values",
+    "return",
+    "returns",
+    "with",
+    "union",
+    "except",
+    "intersect",
+    "minus",
+    "interval",
+    "over",
+    "partition",
+    "order",
+    "group",
+    "qualify",
+    "using",
+    "into",
+    "cast",
+    "exists",
+    "any",
+    "some",
+    "top",
+    "lateral",
+    "table",
+    "update",
+    "delete",
+    "insert",
+    "escape",
+    "similar",
+    "to",
+    "filter",
+    "within",
+    "at",
+    "zone",
+    "inner",
+    "left",
+    "right",
+    "full",
+    "outer",
+    "cross",
+    "natural",
+    "window",
+    "returning",
+    "recursive",
+    "materialized",
+    "rows",
+    "range",
+    "groups",
+    "unbounded",
+    "current",
+    "row",
+    "following",
+    "preceding",
+    "date",
+    "time",
+    "timestamp",
+    "array",
+    "struct",
+    "if",
+];
+
+/// Whether the (masked, trimmed) text ends with a complete expression: a name, a
+/// literal, a closing parenthesis or quote, or the `*` of `SELECT *`
+fn ends_expression(before: &str) -> bool {
+    let Some(last) = before.chars().next_back() else {
+        return false;
+    };
+    match last {
+        ')' | '\'' | '"' | '`' | ']' => true,
+        '*' => {
+            let rest = before[..before.len() - 1].trim_end();
+            rest.ends_with(',')
+                || rest.ends_with('.')
+                || ["select", "distinct"]
+                    .iter()
+                    .any(|k| last_word(rest).eq_ignore_ascii_case(k))
+        }
+        c if is_ident_char(c) => {
+            let word = last_word(before);
+            !OPERAND_KEYWORDS
+                .iter()
+                .any(|k| word.eq_ignore_ascii_case(k))
+        }
+        _ => false,
+    }
+}
+
+/// Whether the end of the (masked) text is in a SELECT list: the nearest clause
+/// keyword before it, outside parentheses, is SELECT
+fn in_select_list(before: &str) -> bool {
+    const CLAUSES: &[&str] = &[
+        "from",
+        "where",
+        "by",
+        "having",
+        "qualify",
+        "limit",
+        "on",
+        "using",
+        "window",
+        "union",
+        "except",
+        "intersect",
+        "values",
+        "set",
+        "returning",
+        "join",
+    ];
+    let is_clause = |word: &str| {
+        if word.eq_ignore_ascii_case("select") {
+            Some(true)
+        } else {
+            CLAUSES
+                .iter()
+                .any(|k| word.eq_ignore_ascii_case(k))
+                .then_some(false)
+        }
+    };
+    let mut depth = 0usize;
+    for line in before.rsplit('\n') {
+        let line = without_line_comment(line);
+        let mut word_end = None;
+        for (i, c) in line.char_indices().rev() {
+            if is_ident_char(c) {
+                word_end.get_or_insert(i + c.len_utf8());
+                continue;
+            }
+            if let Some(end) = word_end.take() {
+                if depth == 0 {
+                    if let Some(select) = is_clause(&line[i + c.len_utf8()..end]) {
+                        return select;
+                    }
+                }
+            }
+            match c {
+                ')' => depth += 1,
+                '(' if depth == 0 => return false,
+                '(' => depth -= 1,
+                _ => {}
+            }
+        }
+        if let Some(end) = word_end {
+            if depth == 0 {
+                if let Some(select) = is_clause(&line[..end]) {
+                    return select;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// A quoted name argument (`'customers'`), without its quotes
@@ -226,6 +507,28 @@ fn ref_call(content: &str) -> Option<&str> {
     unquote_name(arg)
 }
 
+/// The relation of `var('x')`: the relation variable `var.x` (see
+/// [`dbt::RelationVars`]), or a default that is a relation call
+/// (`var('x', ref('y'))`), as (schema, table)
+fn var_relation(content: &str) -> Option<(&str, &str)> {
+    let args = content
+        .strip_prefix("var")?
+        .trim_start()
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    let args = split_top_level(args, ",");
+    let name = unquote_name(args.first()?)?;
+    match args.get(1).map(|a| a.trim()) {
+        Some(default) => relation_call(default),
+        None => Some((dbt::VAR_SCHEMA, name)),
+    }
+}
+
+/// The (schema, table) of a `source('s', 't')` / `ref('m')` call
+pub(crate) fn relation_call(content: &str) -> Option<(&str, &str)> {
+    source_call(content).or_else(|| ref_call(content).map(|model| (dbt::REF_SCHEMA, model)))
+}
+
 /// A name part as SQL: as is when it is a lowercase identifier (which every
 /// dialect reads as itself), else double-quoted
 fn sql_name_part(name: &str) -> Cow<'_, str> {
@@ -254,13 +557,147 @@ fn is_loop_separator(content: &str) -> bool {
 
 /// The value of a branch condition when it is known: the body of a `{% for %}` loop
 /// is checked once, as its first and last iteration
-fn branch_condition(condition: &str) -> Option<bool> {
-    let words: Vec<&str> = condition.split_whitespace().collect();
-    match words.as_slice() {
-        ["loop.last" | "loop.first"] => Some(true),
-        ["not", "loop.last" | "loop.first"] => Some(false),
-        _ => None,
+/// is checked once, as its first and last iteration. Also known: `is_incremental()`
+/// (false: the model's first, full build), `var('x', <true|false>)` (its default)
+/// and comparisons of `target.type` with the dbt adapter of the dialect.
+fn branch_condition(condition: &str, known: &Known) -> Option<bool> {
+    let condition = condition.trim();
+    // `a or b`, `a and b` (outside parentheses and strings)
+    for (op, short_circuit) in [(" or ", true), (" and ", false)] {
+        let parts = split_top_level(condition, op);
+        if parts.len() > 1 {
+            let values: Vec<Option<bool>> =
+                parts.iter().map(|p| branch_condition(p, known)).collect();
+            if values.contains(&Some(short_circuit)) {
+                return Some(short_circuit);
+            }
+            return values.iter().all(Option::is_some).then_some(!short_circuit);
+        }
     }
+    if let Some(inner) = condition
+        .strip_prefix('(')
+        .and_then(|c| c.strip_suffix(')'))
+        .filter(|c| {
+            // `(a) == (b)` isn't one parenthesized condition
+            let mut depth = 0i32;
+            c.chars().all(|ch| {
+                depth += match ch {
+                    '(' => 1,
+                    ')' => -1,
+                    _ => 0,
+                };
+                depth >= 0
+            })
+        })
+    {
+        return branch_condition(inner, known);
+    }
+    if let Some(rest) = condition.strip_prefix("not ") {
+        if !rest.trim_start().starts_with("in ") {
+            return branch_condition(rest, known).map(|v| !v);
+        }
+    }
+    let compact: String = condition.split_whitespace().collect();
+    match compact.as_str() {
+        "loop.last" | "loop.first" => return Some(true),
+        "is_incremental()" => return Some(false),
+        _ => {}
+    }
+    if let Some(args) = compact
+        .strip_prefix("var(")
+        .and_then(|c| c.strip_suffix(')'))
+    {
+        let (_, default) = args.rsplit_once(',')?;
+        return match default {
+            "true" | "True" => Some(true),
+            "false" | "False" => Some(false),
+            _ => None,
+        };
+    }
+    if compact.chars().all(is_ident_char) {
+        return known.sets.get(&compact).copied();
+    }
+    target_condition(condition, known.target?)
+}
+
+/// What is known when evaluating a branch condition
+struct Known<'k> {
+    /// The dbt adapter (`target.type`)
+    target: Option<&'k str>,
+    /// Variables set to a known value (`{% set enabled = var('x', false) %}`)
+    sets: &'k HashMap<String, bool>,
+}
+
+/// `target.type == 'x'`, `!=`, `in [...]`, `not in [...]`, with `target` the dbt
+/// adapter of the dialect
+fn target_condition(condition: &str, target: &str) -> Option<bool> {
+    const ADAPTERS: &[&str] = &[
+        "postgres",
+        "redshift",
+        "snowflake",
+        "bigquery",
+        "databricks",
+        "spark",
+        "mysql",
+        "sqlite",
+        "duckdb",
+        "sqlserver",
+        "synapse",
+        "fabric",
+        "trino",
+        "athena",
+        "oracle",
+    ];
+    let rest = condition.strip_prefix("target.type")?.trim_start();
+    let (negate, rest) = if let Some(r) = rest.strip_prefix("==") {
+        (false, r)
+    } else if let Some(r) = rest.strip_prefix("!=") {
+        (true, r)
+    } else if let Some(r) = rest.strip_prefix("not in") {
+        (true, r)
+    } else {
+        (false, rest.strip_prefix("in")?)
+    };
+    let names: Vec<&str> = rest
+        .trim()
+        .trim_start_matches(['[', '('])
+        .trim_end_matches([']', ')'])
+        .split(',')
+        .map(|n| n.trim().trim_matches(['\'', '"']))
+        .collect();
+    // Only names of adapters (anything else may be a variable)
+    if names.iter().any(|n| !ADAPTERS.contains(n)) {
+        return None;
+    }
+    // Databricks models may also run on the spark adapter
+    if target == "databricks" && names.contains(&"spark") {
+        return None;
+    }
+    Some(names.contains(&target) != negate)
+}
+
+/// `text` split at `separator` where it is outside parentheses, brackets and strings
+fn split_top_level<'t>(text: &'t str, separator: &str) -> Vec<&'t str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut quote = None;
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(' | '[' | '{') => depth += 1,
+            (None, ')' | ']' | '}') => depth -= 1,
+            (None, _) if depth == 0 && i >= start && text[i..].starts_with(separator) => {
+                parts.push(&text[start..i]);
+                start = i + separator.len();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 /// An open `{% ... %}` block
@@ -304,6 +741,10 @@ pub(crate) struct Template<'a> {
     directives: Vec<(usize, String)>,
     /// Tags that became values or names
     tags: Vec<TagSpan>,
+    /// Aliases built from tags (`AS {{ f }}_o`): the text before and after the tags
+    alias_patterns: Vec<(String, String)>,
+    /// Statements whose tables may be CTEs a macro writes: (line, column) ranges
+    open_statements: Vec<((usize, usize), (usize, usize))>,
 }
 
 impl<'a> Template<'a> {
@@ -313,7 +754,29 @@ impl<'a> Template<'a> {
             masked: Preprocessed::unchanged(sql),
             directives: Vec::new(),
             tags: Vec::new(),
+            alias_patterns: Vec::new(),
+            open_statements: Vec::new(),
         }
+    }
+
+    /// Whether `line`/`column` is in a query that follows a macro which may write its
+    /// WITH clause (`{{ recursive_dag() }}\nselect * from all_relationships`): a
+    /// table name there may be one of its CTEs
+    pub fn may_be_templated_cte(&self, line: usize, column: usize) -> bool {
+        self.open_statements
+            .iter()
+            .any(|&(start, end)| start <= (line, column) && (line, column) <= end)
+    }
+
+    /// Whether `name` may be an alias built from template tags (`AS {{ f }}_o`
+    /// in a `{% for %}` loop defines `a_o`, `b_o`, ...)
+    pub fn may_be_templated_alias(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        self.alias_patterns.iter().any(|(prefix, suffix)| {
+            name.len() > prefix.len() + suffix.len()
+                && name.starts_with(prefix.as_str())
+                && name.ends_with(suffix.as_str())
+        })
     }
 
     /// The text to read `sqlsift:disable` directives from: the masked text (so lines
@@ -354,15 +817,25 @@ impl<'a> Template<'a> {
 struct Masker<'s, 'f> {
     sql: &'s str,
     table_exists: &'f dyn Fn(&str, &str) -> bool,
+    /// The dbt adapter (`target.type`) of the dialect, if known
+    target: Option<&'static str>,
+    /// `{% set %}` variables whose value is known
+    sets: HashMap<String, bool>,
     out: String,
     identifiers: Vec<(usize, usize, usize)>,
     directives: Vec<(usize, String)>,
     tags: Vec<TagSpan>,
+    alias_patterns: Vec<(String, String)>,
+    /// Output byte offsets of macros that may write the WITH clause of the query
+    /// that follows
+    open_statements: Vec<usize>,
     frames: Vec<Frame>,
     lex: Lex,
     /// The previous character was the first quote of a doubled quote (`''`) in a
     /// string
     quote_pending: bool,
+    /// Only whitespace, comments and blanked tags since the start or the last `;`
+    statement_start: bool,
     /// Line and character column of the next character
     line: usize,
     column: usize,
@@ -404,6 +877,11 @@ impl Masker<'_, '_> {
             let at = range.start + i;
             let next = sql[at + c.len_utf8()..].chars().next();
             let mut closed_string = None;
+            // Code other than whitespace and the start of a comment
+            let starts_comment = matches!((c, next), ('-', Some('-')) | ('/', Some('*')));
+            if matches!(self.lex, Lex::Code) && !c.is_whitespace() && !starts_comment {
+                self.statement_start = c == ';';
+            }
             self.lex = match self.lex {
                 Lex::Code => match c {
                     '\'' => Lex::String {
@@ -461,6 +939,14 @@ impl Masker<'_, '_> {
 
     /// Handle a `{% ... %}` tag (blanked), updating the open blocks. Returns the end
     /// of the text it covers (past `{% endraw %}` for `{% raw %}`).
+    /// What is known when evaluating a branch condition here
+    fn known(&self) -> Known<'_> {
+        Known {
+            target: self.target,
+            sets: &self.sets,
+        }
+    }
+
     fn statement(&mut self, start: usize, end: usize) -> usize {
         let text = &self.sql[start..end];
         let content = tag_content(text);
@@ -473,15 +959,16 @@ impl Masker<'_, '_> {
         self.advance(text);
         match keyword.as_str() {
             "if" => {
-                let active = branch_condition(args) != Some(false);
+                let active = branch_condition(args, &self.known()) != Some(false);
                 self.frames.push(Frame::If {
                     active,
                     taken: active,
                 });
             }
             "elif" => {
+                let possible = branch_condition(args, &self.known()) != Some(false);
                 if let Some(Frame::If { active, taken }) = self.frames.last_mut() {
-                    *active = !*taken && branch_condition(args) != Some(false);
+                    *active = !*taken && possible;
                     *taken |= *active;
                 }
             }
@@ -513,7 +1000,24 @@ impl Masker<'_, '_> {
                 self.advance(end_tag);
                 return raw_end;
             }
-            kw if NON_SQL_BLOCKS.contains(&kw) && !(kw == "set" && args.contains('=')) => {
+            "set" if args.contains('=') => {
+                // `{% set name = value %}`: remember a value a branch may test
+                if let Some((name, value)) = args.split_once('=') {
+                    let name = name.trim();
+                    if !value.starts_with('=') && name.chars().all(is_ident_char) {
+                        let value = branch_condition(value, &self.known());
+                        match value {
+                            Some(v) if self.active() => {
+                                self.sets.insert(name.to_string(), v);
+                            }
+                            _ => {
+                                self.sets.remove(name);
+                            }
+                        }
+                    }
+                }
+            }
+            kw if NON_SQL_BLOCKS.contains(&kw) => {
                 self.frames.push(Frame::Blank(format!("end{kw}")));
             }
             kw => {
@@ -523,6 +1027,42 @@ impl Masker<'_, '_> {
             }
         }
         end
+    }
+
+    /// Write the tag `text` as `<prefix><identifier>.*`, a wildcard over a relation
+    /// sqlsift doesn't know (so the columns of its query block are unknown), on the
+    /// first line of the tag long enough to hold it; the rest is blanked. Writes
+    /// nothing and returns `false` when no line is long enough.
+    fn open_wildcard(&mut self, text: &str, prefix: &str) -> bool {
+        let needed = prefix.len() + 5;
+        let Some(fit) = text.split('\n').position(|l| l.chars().count() >= needed) else {
+            return false;
+        };
+        for (i, segment) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.out.push('\n');
+            }
+            if i != fit {
+                blank(&mut self.out, segment);
+                continue;
+            }
+            let width = segment.chars().count();
+            let line = self.line + i;
+            let column = if i == 0 { self.column } else { 1 };
+            self.out.push_str(prefix);
+            self.out.push('_');
+            self.out.extend(
+                segment
+                    .chars()
+                    .skip(prefix.len() + 1)
+                    .take(width - prefix.len() - 3)
+                    .map(|c| if is_ident_char(c) { c } else { '_' }),
+            );
+            self.out.push_str(".*");
+            self.identifiers
+                .push((line, column + prefix.len(), column + width - 2));
+        }
+        true
     }
 
     /// Handle a `{{ ... }}` tag
@@ -538,18 +1078,56 @@ impl Masker<'_, '_> {
                     *templated = true;
                     Position::Statement
                 }
-                Lex::Code => position(&self.out, &self.sql[end..]),
+                Lex::Code => position(&self.out, &self.sql[end..], self.statement_start),
                 _ => Position::Statement,
             }
         };
         let first_line = text.find('\n').map_or(text, |n| &text[..n]);
         let single_line = first_line.len() == text.len();
         let column = self.column;
+        let width = first_line.chars().count();
+        // The tag's first line as identifier characters (`{{ ref('a') }}` →
+        // `___ref__a____`)
+        let ident: String = first_line
+            .chars()
+            .map(|c| if is_ident_char(c) { c } else { '_' })
+            .collect();
+        let position = match position {
+            // More SELECT list items: `, <tag>.*`, a wildcard over a relation sqlsift
+            // doesn't know, so the query block's output columns are unknown. Any
+            // other clause (`group by 1, 2`, `where ...`, `, column` in PARTITION
+            // BY) is blanked.
+            Position::Continuation
+                if in_select_list(&self.out) && self.open_wildcard(text, ",") =>
+            {
+                Position::Continuation
+            }
+            Position::Continuation => {
+                blank(&mut self.out, text);
+                Position::Continuation
+            }
+            // A query whose output columns are unknown: `select <tag>.*`
+            Position::Query if self.open_wildcard(text, "select ") => Position::Query,
+            Position::Query => Position::Value,
+            position => position,
+        };
+        if !matches!(position, Position::Statement) {
+            self.statement_start = false;
+        } else if self.statement_start
+            && self.active()
+            && !content.starts_with("config")
+            && starts_with_word(&self.sql[end..], "select")
+        {
+            // A macro that writes the WITH clause of the query that follows
+            // (`{{ recursive_dag() }}\nselect * from all_relationships`): the tables
+            // of that query may be its CTEs
+            self.open_statements.push(self.out.len());
+        }
         // A relation the catalog has: `{{ source('raw', 'customers') }}` →
         // `raw.customers`, `{{ ref('orders') }}` → `ref.orders` (dbt catalog)
         let relation = if single_line && matches!(position, Position::Table) {
-            source_call(content)
-                .or_else(|| ref_call(content).map(|model| (dbt::REF_SCHEMA, model)))
+            relation_call(content)
+                .or_else(|| var_relation(content))
                 .filter(|&(schema, table)| (self.table_exists)(schema, table))
                 .map(|(schema, table)| {
                     format!("{}.{}", sql_name_part(schema), sql_name_part(table))
@@ -575,18 +1153,32 @@ impl Masker<'_, '_> {
                     .take_while(|&c| is_name_char(c))
                     .count();
                 let start_column = column - glued_before;
-                self.out.extend(
-                    first_line
-                        .chars()
-                        .map(|c| if is_ident_char(c) { c } else { '_' }),
-                );
-                let mut end_column = column + first_line.chars().count();
-                if single_line {
-                    end_column += self.sql[end..]
+                let glued_after: String = if single_line {
+                    self.sql[end..]
                         .chars()
                         .take_while(|&c| is_name_char(c))
-                        .count();
+                        .collect()
+                } else {
+                    String::new()
+                };
+                // An alias built from the tag (`AS {{ f }}_o`): names of that shape
+                // may be aliases of this file
+                let glued_start = self
+                    .out
+                    .char_indices()
+                    .rev()
+                    .take(glued_before)
+                    .last()
+                    .map_or(self.out.len(), |(i, _)| i);
+                let (out_before, glued_text) = self.out.split_at(glued_start);
+                if last_word(out_before.trim_end()).eq_ignore_ascii_case("as") {
+                    self.alias_patterns.push((
+                        glued_text.to_ascii_lowercase(),
+                        glued_after.to_ascii_lowercase(),
+                    ));
                 }
+                self.out.push_str(&ident);
+                let end_column = column + width + glued_after.chars().count();
                 self.identifiers.push((self.line, start_column, end_column));
                 self.tags.push(TagSpan {
                     line: self.line,
@@ -604,6 +1196,15 @@ impl Masker<'_, '_> {
                     line: self.line,
                     start: column,
                     end: column + first_line.chars().count(),
+                    text: first_line.to_string(),
+                });
+            }
+            (Position::Continuation | Position::Query, _) => {
+                // The tag is written above
+                self.tags.push(TagSpan {
+                    line: self.line,
+                    start: column,
+                    end: column + width,
                     text: first_line.to_string(),
                 });
             }
@@ -645,6 +1246,7 @@ fn find_endraw(sql: &str, from: usize) -> (usize, usize) {
 pub(crate) fn mask_jinja<'a>(
     sql: &'a str,
     table_exists: &dyn Fn(&str, &str) -> bool,
+    target: Option<&'static str>,
 ) -> Template<'a> {
     if !sql.contains("{{") && !sql.contains("{%") && !sql.contains("{#") {
         return Template::unchanged(sql);
@@ -653,13 +1255,18 @@ pub(crate) fn mask_jinja<'a>(
     let mut masker = Masker {
         sql,
         table_exists,
+        target,
+        sets: HashMap::new(),
         out: String::with_capacity(sql.len()),
         identifiers: Vec::new(),
         directives: Vec::new(),
         tags: Vec::new(),
+        alias_patterns: Vec::new(),
+        open_statements: Vec::new(),
         frames: Vec::new(),
         lex: Lex::Code,
         quote_pending: false,
+        statement_start: true,
         line: 1,
         column: 1,
     };
@@ -696,10 +1303,32 @@ pub(crate) fn mask_jinja<'a>(
     }
     masker.copy(rest..sql.len());
 
+    // Each open statement ends at the next `;`
+    let line_column = |offset: usize| {
+        let before = &masker.out[..offset];
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        (
+            before.matches('\n').count() + 1,
+            before[line_start..].chars().count() + 1,
+        )
+    };
+    let open_statements = masker
+        .open_statements
+        .iter()
+        .map(|&start| {
+            let end = masker.out[start..]
+                .find(';')
+                .map_or(masker.out.len(), |i| start + i);
+            (line_column(start), line_column(end))
+        })
+        .collect();
+
     Template {
         masked: Preprocessed::new(Cow::Owned(masker.out), masker.identifiers),
         directives: masker.directives,
         tags: masker.tags,
+        alias_patterns: masker.alias_patterns,
+        open_statements,
     }
 }
 
@@ -716,12 +1345,16 @@ mod tests {
     use super::*;
 
     fn template(sql: &str) -> Template<'_> {
-        mask_jinja(sql, &|schema, table| {
-            matches!(
-                (schema, table),
-                ("raw", "customers") | ("ref", "orders" | "Orders" | "a_very_long_model_name")
-            )
-        })
+        mask_jinja(
+            sql,
+            &|schema, table| {
+                matches!(
+                    (schema, table),
+                    ("raw", "customers") | ("ref", "orders" | "Orders" | "a_very_long_model_name")
+                )
+            },
+            Some("postgres"),
+        )
     }
 
     fn mask(sql: &str) -> String {
@@ -958,5 +1591,124 @@ mod tests {
         assert!(p.masked.is_substituted(2, 25));
         assert!(!p.masked.is_substituted(2, 5));
         assert!(!p.masked.is_substituted(2, 27));
+    }
+
+    #[test]
+    fn statement_start_skips_comments() {
+        assert_eq!(
+            mask("-- c\n{{ config(a=1) }}\nselect 1"),
+            "-- c\n                 \nselect 1"
+        );
+        assert_eq!(mask("/* c */ {{ x }} select 1"), "/* c */         select 1");
+    }
+
+    #[test]
+    fn continuations_of_select_lists_open_the_columns() {
+        assert_eq!(
+            mask("select a {{ m() }} from t"),
+            "select a ,__m___.* from t"
+        );
+        let t = template("select a {{ m() }} from t");
+        assert!(t.masked.is_substituted(1, 11));
+        // After a comment line, a tag is still a continuation of `a`
+        assert_eq!(
+            mask("select a\n  -- note\n  {{ m() }}\nfrom t"),
+            "select a\n  -- note\n  ,__m___.*\nfrom t"
+        );
+        // A tag followed by an alias is a value
+        assert_eq!(
+            mask("select a,\n-- x\n{{ f() }} as b from t"),
+            "select a,\n-- x\n$1        as b from t"
+        );
+        // Multi-line: written on the first line long enough
+        assert_eq!(
+            mask("select a {{\n  m(x, y)\n}} from t"),
+            "select a   \n,_m_x__.*\n   from t"
+        );
+    }
+
+    #[test]
+    fn clause_macros_are_blanked() {
+        assert_eq!(
+            mask("select a from t {{ group_by(1) }}"),
+            "select a from t                  "
+        );
+        assert_eq!(
+            mask("over (partition by a {{ p() }} order by b)"),
+            "over (partition by a           order by b)"
+        );
+        // Not after a keyword that expects an operand
+        assert_eq!(mask("where {{ c }}"), "where $1     ");
+    }
+
+    #[test]
+    fn query_bodies_have_unknown_columns() {
+        assert_eq!(
+            mask("with s as ({{ date_spine() }}) select 1"),
+            "with s as (select _spine___.*) select 1"
+        );
+        // Too short to hold a query: a value (a parse error)
+        assert_eq!(mask("with s as ({{ x }})"), "with s as ($1     )");
+    }
+
+    #[test]
+    fn aliases_built_from_tags() {
+        let t = template("select 1 from o as {{ f }}_o join p as q_{{ g }}");
+        assert!(t.may_be_templated_alias("a_o"));
+        assert!(t.may_be_templated_alias("q_x"));
+        assert!(!t.may_be_templated_alias("_o"));
+        assert!(!t.may_be_templated_alias("x"));
+    }
+
+    #[test]
+    fn known_branch_conditions() {
+        let sets = HashMap::from([("enabled".to_string(), false)]);
+        let known = Known {
+            target: Some("postgres"),
+            sets: &sets,
+        };
+        let eval = |c: &str| branch_condition(c, &known);
+        assert_eq!(eval("not loop.last"), Some(false));
+        assert_eq!(eval("is_incremental()"), Some(false));
+        assert_eq!(eval("not is_incremental()"), Some(true));
+        assert_eq!(eval("var('x', false)"), Some(false));
+        assert_eq!(eval("var(\"x\", True)"), Some(true));
+        assert_eq!(eval("var('x')"), None);
+        assert_eq!(eval("var('x', [])"), None);
+        assert_eq!(eval("enabled"), Some(false));
+        assert_eq!(eval("other"), None);
+        assert_eq!(eval("target.type == 'redshift'"), Some(false));
+        assert_eq!(eval("target.type != 'postgres'"), Some(false));
+        assert_eq!(eval("target.type in ['postgres', 'redshift']"), Some(true));
+        assert_eq!(
+            eval("target.type not in ('snowflake', 'bigquery')"),
+            Some(true)
+        );
+        assert_eq!(eval("target.type == my_var"), None);
+        assert_eq!(eval("is_incremental() and x"), Some(false));
+        assert_eq!(eval("x or not is_incremental()"), Some(true));
+        assert_eq!(eval("x and y"), None);
+        assert_eq!(eval("(is_incremental())"), Some(false));
+        // Unknown target
+        let unknown = Known {
+            target: None,
+            sets: &sets,
+        };
+        assert_eq!(
+            branch_condition("target.type == 'postgres'", &unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn known_branches_and_set_variables_choose_the_branch() {
+        assert_eq!(
+            mask("{% if is_incremental() %}a{% else %}b{% endif %}"),
+            "                         a          b           ".replace('a', " ")
+        );
+        assert_eq!(
+            mask("{% set on = var('x', false) %}{% if on %}a{% endif %}b"),
+            "                                                     b"
+        );
     }
 }
