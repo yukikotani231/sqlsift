@@ -254,6 +254,13 @@ pub const RULES: &[Rule] = &[
         summary: "SELECT DISTINCT ordered by a column it doesn't select",
     },
     Rule {
+        kind: DiagnosticKind::GroupingError,
+        code: "E0016",
+        name: "grouping-error",
+        category: RuleCategory::Correctness,
+        summary: "Column must appear in GROUP BY or be used in an aggregate",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

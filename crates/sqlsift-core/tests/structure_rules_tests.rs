@@ -484,3 +484,87 @@ fn e0015_selected_columns_are_fine() {
     assert_clean("SELECT DISTINCT ON (name, org_id) id FROM users ORDER BY org_id, name, id");
     assert_clean("SELECT DISTINCT ON (name, org_id) id FROM users ORDER BY org_id");
 }
+
+// ---------------------------------------------------------------------
+// E0016 grouping-error
+// ---------------------------------------------------------------------
+
+const GROUPING: &str = "
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT, org_id INT);
+CREATE TABLE orgs (id INT PRIMARY KEY, title TEXT);
+CREATE TABLE pairs (a INT, b INT, v INT, PRIMARY KEY (a, b));
+";
+
+fn grouping_codes(dialect: SqlDialect, sql: &str) -> Vec<&'static str> {
+    let mut builder = SchemaBuilder::with_dialect(dialect);
+    builder.parse(GROUPING).expect("schema parses");
+    let catalog = builder.build().0;
+    Analyzer::with_dialect(&catalog, dialect)
+        .analyze(sql)
+        .iter()
+        .map(sqlsift_core::Diagnostic::code)
+        .collect()
+}
+
+#[test]
+fn e0016_ungrouped_columns() {
+    let pg = |sql| grouping_codes(SqlDialect::PostgreSQL, sql);
+    for sql in [
+        "SELECT name, count(*) FROM users",
+        "SELECT email FROM users GROUP BY name",
+        "SELECT u.name, o.title FROM users u JOIN orgs o ON o.id = u.org_id GROUP BY u.id",
+        "SELECT org_id FROM users GROUP BY org_id ORDER BY name",
+        "SELECT org_id FROM users GROUP BY org_id HAVING name = 'a'",
+        "SELECT name FROM users HAVING count(*) > 1",
+        "SELECT a, v FROM pairs GROUP BY a",
+        "SELECT CASE WHEN org_id > 1 THEN name END FROM users GROUP BY org_id",
+        "SELECT x.n, x.m FROM (SELECT name AS n, email AS m FROM users) x GROUP BY x.n",
+    ] {
+        assert_eq!(pg(sql), vec!["E0016"], "{sql}");
+    }
+}
+
+#[test]
+fn e0016_grouped_or_aggregated_columns_are_fine() {
+    let pg = |sql| grouping_codes(SqlDialect::PostgreSQL, sql);
+    for sql in [
+        // Functional dependency on the primary key
+        "SELECT id, name FROM users GROUP BY id",
+        "SELECT u.id, u.name FROM users u GROUP BY u.id",
+        "SELECT u.name, o.title FROM users u JOIN orgs o ON o.id = u.org_id GROUP BY u.id, o.id",
+        "SELECT a, b, v FROM pairs GROUP BY a, b",
+        // Grouped expressions, positions and output aliases
+        "SELECT lower(name), count(*) FROM users GROUP BY lower(name)",
+        "SELECT lower(name), count(*) FROM users GROUP BY lower(users.name)",
+        "SELECT name || '!' FROM users GROUP BY name",
+        "SELECT org_id FROM users GROUP BY 1",
+        "SELECT org_id AS o, count(*) FROM users GROUP BY o",
+        "SELECT org_id, count(*) AS c FROM users GROUP BY org_id ORDER BY c",
+        "SELECT users.name FROM users GROUP BY name",
+        // Aggregates, subqueries and window functions
+        "SELECT count(*) FROM users HAVING count(*) > 1",
+        "SELECT org_id, max(name), string_agg(email, ',') FROM users GROUP BY org_id",
+        "SELECT org_id, count(*) FILTER (WHERE name = 'a') FROM users GROUP BY org_id",
+        "SELECT org_id, (SELECT max(title) FROM orgs WHERE orgs.id = users.org_id) FROM users GROUP BY org_id",
+        "SELECT org_id, row_number() OVER (ORDER BY org_id) FROM users GROUP BY org_id",
+        "SELECT 1 FROM users GROUP BY org_id ORDER BY count(*)",
+        // A function that may be a user-defined aggregate
+        "SELECT org_id, my_median(id) FROM users GROUP BY org_id",
+        // No aggregation
+        "SELECT name FROM users",
+    ] {
+        assert!(pg(sql).is_empty(), "{sql}: {:?}", pg(sql));
+    }
+}
+
+#[test]
+fn e0016_other_dialects_and_unknown_shapes() {
+    // MySQL depends on ONLY_FULL_GROUP_BY; SQLite allows bare columns
+    for dialect in [SqlDialect::MySQL, SqlDialect::SQLite] {
+        assert!(grouping_codes(dialect, "SELECT name, count(*) FROM users").is_empty());
+    }
+    let pg = |sql| grouping_codes(SqlDialect::PostgreSQL, sql);
+    assert!(pg("SELECT name, count(*) FROM users GROUP BY ROLLUP (org_id)").is_empty());
+    assert!(pg("SELECT u.name FROM users u JOIN orgs o USING (id) GROUP BY id").is_empty());
+    assert!(pg("SELECT x, count(*) FROM generate_series(1, 3) GROUP BY 1").is_empty());
+}

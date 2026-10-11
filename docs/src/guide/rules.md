@@ -22,6 +22,7 @@ E0012  misplaced-aggregate       correctness  error    Aggregate or window funct
 E0013  generated-column-write    correctness  error    INSERT or UPDATE gives a value to a generated column
 E0014  unmatched-conflict-target correctness  error    ON CONFLICT columns match no unique constraint
 E0015  distinct-order-by         correctness  error    SELECT DISTINCT ordered by a column it doesn't select
+E0016  grouping-error            correctness  error    Column must appear in GROUP BY or be used in an aggregate
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

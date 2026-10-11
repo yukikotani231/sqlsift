@@ -48,6 +48,8 @@ pub(super) struct Resolver<'a> {
     templated_name: Option<&'a dyn Fn(&Span) -> bool>,
     /// Relation names the FROM clause being resolved gives twice (E0009)
     pub(super) duplicate_names: Vec<String>,
+    /// The statement has template tags, which may expand to columns or clauses
+    pub(super) templated_statement: bool,
 }
 
 impl<'a> Resolver<'a> {
@@ -62,6 +64,7 @@ impl<'a> Resolver<'a> {
             variables: Vec::new(),
             templated_name: None,
             duplicate_names: Vec::new(),
+            templated_statement: false,
         }
     }
 
@@ -916,6 +919,7 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        self.check_grouping(select, query);
         self.scope.pop();
         columns
     }

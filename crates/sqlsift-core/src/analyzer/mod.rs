@@ -2,6 +2,7 @@
 
 pub(crate) mod bigquery;
 mod comment_directives;
+mod grouping;
 mod resolver;
 mod scope;
 mod snowflake;
@@ -266,8 +267,16 @@ impl<'a> Analyzer<'a> {
         // Script variables declared so far (`DECLARE x INT64 DEFAULT 0`)
         let mut variables: Vec<String> = Vec::new();
 
+        // Where each statement's text starts in the template source (to tell whether
+        // it has template tags)
+        let source_lines = LineIndex::new(sql);
+        let starts: Vec<usize> = statements
+            .iter()
+            .map(|(_, o)| source_lines.byte_offset(o.line as u64, o.column as u64))
+            .collect();
+
         // Analyze each statement
-        for (stmt, origin) in &statements {
+        for (index, (stmt, origin)) in statements.iter().enumerate() {
             // Definitions before this statement that could not be parsed
             while skipped
                 .last()
@@ -292,9 +301,16 @@ impl<'a> Analyzer<'a> {
                 origin.shift(&mut span);
                 template.masked.is_substituted(span.line, span.column)
             };
+            // Template tags may expand to columns or whole clauses
+            let templated = self.templating != Templating::None && {
+                let end = starts.get(index + 1).copied().unwrap_or(sql.len());
+                let text = sql.get(starts[index]..end).unwrap_or_default();
+                text.contains("{{") || text.contains("{%")
+            };
             let mut resolver = Resolver::new(catalog, self.dialect)
                 .with_variables(&variables)
                 .with_templated_names(&templated_name);
+            resolver.templated_statement = templated;
             resolver.statement(stmt);
             resolver.check_subquery_shapes(stmt);
             if let Statement::Declare { stmts } = stmt {

@@ -180,6 +180,8 @@ pub enum DiagnosticKind {
     UnmatchedConflictTarget,
     /// E0015: ORDER BY of SELECT DISTINCT on something not selected
     DistinctOrderBy,
+    /// E0016: Column neither grouped nor aggregated in an aggregate query
+    GroupingError,
     /// Parse error
     ParseError,
 }

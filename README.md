@@ -187,6 +187,7 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0013](https://yukikotani231.github.io/sqlsift/docs/rules/E0013.html) | generated-column-write | INSERT or UPDATE gives a value to a generated column |
 | [E0014](https://yukikotani231.github.io/sqlsift/docs/rules/E0014.html) | unmatched-conflict-target | ON CONFLICT columns match no unique constraint |
 | [E0015](https://yukikotani231.github.io/sqlsift/docs/rules/E0015.html) | distinct-order-by | SELECT DISTINCT ordered by a column it doesn't select |
+| [E0016](https://yukikotani231.github.io/sqlsift/docs/rules/E0016.html) | grouping-error | Column must appear in GROUP BY or be used in an aggregate |
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

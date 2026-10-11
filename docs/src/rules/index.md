@@ -39,4 +39,5 @@ CREATE TABLE orders (
 | [E0013](E0013.md) | `generated-column-write` | INSERT or UPDATE gives a value to a generated column |
 | [E0014](E0014.md) | `unmatched-conflict-target` | ON CONFLICT columns match no unique constraint |
 | [E0015](E0015.md) | `distinct-order-by` | SELECT DISTINCT ordered by a column it doesn't select |
+| [E0016](E0016.md) | `grouping-error` | Column must appear in GROUP BY or be used in an aggregate |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |
