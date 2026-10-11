@@ -39,7 +39,7 @@ inputs:
     required: false
     default: "true"
   diff-base:
-    description: "Report only the diagnostics that are new compared with this git ref (branch, tag or commit), e.g. `${{ github.base_ref }}` on pull requests. Diagnostics that already occur at that ref are hidden. Empty (the default, and what `github.base_ref` is outside pull requests): report every diagnostic."
+    description: "Report only the diagnostics that are new compared with this git ref (branch, tag or commit), e.g. the `github.base_ref` context on pull requests. Diagnostics that already occur at that ref are hidden. Empty (the default, and what `github.base_ref` is outside pull requests): report every diagnostic."
     required: false
     default: ""
   version:
