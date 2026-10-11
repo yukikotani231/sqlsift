@@ -23,7 +23,7 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 |-------|-------------|
 | `files` | Query files (space-separated paths or globs) |
 | `schema` / `schema-dir` | Schema files, or a directory of migrations |
-| `dialect` | `postgresql`, `mysql` or `sqlite` |
+| `dialect` | `postgresql`, `mysql`, `sqlite`, or (alpha) `snowflake`, `bigquery`, `redshift`, `databricks` |
 | `config` | Path to `sqlsift.toml` |
 | `disable` | Rules to disable, e.g. `E0006 E0008` |
 | `sarif-file` | Also write a SARIF report (see below) |

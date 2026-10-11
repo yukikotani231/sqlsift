@@ -178,6 +178,17 @@ SELECT id, title FROM posts WHERE id IN (sqlc.slice(ids));
 - `@name` is a placeholder with the PostgreSQL dialect only. PostgreSQL's `@` operators are left alone: `@>`, `<@`, `@@`, and `@` followed by a space (absolute value). With MySQL, `@name` stays a user variable (`SET @x = 1`), and with SQLite a bind parameter; sqlc supports `@name` for neither, so use `sqlc.arg(name)` there.
 - Parameters in string literals, quoted identifiers and comments are left alone.
 
+## sqlx query files
+
+The files [sqlx](https://github.com/launchbadge/sqlx)'s `query_file!` and `query_file_as!` read are plain SQL with `$1` parameters (`?` with MySQL and SQLite), one statement each, so they are checked as they are, against the migrations `sqlx::migrate!()` applies:
+
+```toml
+schema_dir = "migrations"         # <timestamp>_name.sql; *.down.sql halves are skipped
+files = ["queries/**/*.sql"]
+```
+
+sqlx's type overrides in column aliases (`id AS "id!"`, `status AS "status: Status"`) are ordinary quoted aliases. SQL written inline in Rust (`query!("SELECT ...")`) is not checked. See the [sqlx example project](../integrations/examples.md).
+
 ## aiosql and HugSQL query files
 
 [aiosql](https://nackjicholson.github.io/aiosql/) (Python) and [HugSQL](https://www.hugsql.org) (Clojure) load named queries from `.sql` files. They are checked as they are, and diagnostics name the query they are in, as for sqlc:

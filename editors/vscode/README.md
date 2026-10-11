@@ -10,7 +10,7 @@ SQL static analysis extension powered by [sqlsift](https://github.com/yukikotani
 
 ## Prerequisites
 
-`sqlsift-lsp` binary must be available in your PATH.
+The platform builds on the Marketplace bundle the `sqlsift-lsp` language server, so nothing else is needed. A build without it (such as a `.vsix` packaged locally as below) uses `sqlsift-lsp` from your PATH, or the path in `sqlsift.serverPath`:
 
 ```bash
 # From the repository root
@@ -44,7 +44,7 @@ Then open `editors/vscode/` in VS Code and press F5.
 
 ## Setup
 
-Create a `sqlsift.toml` in your project root:
+Run `sqlsift init` in your project root to detect the schema, queries and dialect and write a `sqlsift.toml` ([details](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html#sqlsift-init)), or create one by hand:
 
 ```toml
 # Schema file paths (glob patterns supported)
