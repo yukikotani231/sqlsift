@@ -118,49 +118,6 @@ jobs:
           name: vsix-${{ matrix.vscode_target }}
           path: editors/vscode/*.vsix
 
-  release-assets:
-    name: Upload VSIX to GitHub Release
-    needs: build-vsix
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Determine release tag
-        id: tag
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${{ github.event.workflow_run.head_branch }}"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Download all VSIX artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: vsix-*
-          path: vsix/
-          merge-multiple: true
-
-      - name: List VSIX files
-        run: ls -la vsix/
-
-      - name: Upload VSIX files to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Releases are immutable once published, so a release that is already
-          # out (e.g. a manual re-run) keeps its assets; the Marketplace job is
-          # independent of this one.
-          if [[ "$(gh api "repos/${{ github.repository }}/releases/tags/${{ steps.tag.outputs.tag }}" --jq .immutable)" == "true" ]]; then
-            echo "::warning::Release ${{ steps.tag.outputs.tag }} is immutable; VSIX files not attached"
-            exit 0
-          fi
-          for vsix in vsix/*.vsix; do
-            gh release upload "${{ steps.tag.outputs.tag }}" "$vsix" \
-              --repo "${{ github.repository }}"
-          done
-
   # Signs in with GitHub OIDC to a Microsoft Entra ID app (no stored token; global
   # Azure DevOps PATs are retired on 2026-12-01). See PUBLISHING.md for the setup.
   marketplace:

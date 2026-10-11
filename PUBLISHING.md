@@ -49,7 +49,7 @@ This creates a git tag and pushes it, triggering the cargo-dist release workflow
 
 ### For VS Code Marketplace
 
-The `publish-vscode.yml` workflow builds platform-specific VSIX files and uploads them to GitHub Releases automatically. To also publish to VS Code Marketplace:
+The `publish-vscode.yml` workflow builds platform-specific VSIX files and publishes them to the VS Code Marketplace. They are not attached to GitHub Releases: releases are immutable once published. To set up the Marketplace:
 
 1. Create a publisher on [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage)
    - Publisher ID: `sqlsift`
