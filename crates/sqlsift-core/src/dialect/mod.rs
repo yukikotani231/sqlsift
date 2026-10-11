@@ -76,6 +76,17 @@ impl SqlDialect {
         )
     }
 
+    /// Whether referencing a column name that a derived table or CTE outputs more
+    /// than once (`SELECT *` over a join) is an error. SQLite resolves it to the
+    /// first such column; MySQL already rejects the derived table itself. Left off
+    /// for Snowflake and Databricks until their behaviour is verified
+    pub fn rejects_duplicate_column_references(self) -> bool {
+        !matches!(
+            self,
+            SqlDialect::SQLite | SqlDialect::Snowflake | SqlDialect::Databricks
+        )
+    }
+
     /// Whether booleans are integers (MySQL BOOLEAN is TINYINT(1), SQLite stores
     /// booleans as integers), so integers and booleans compare without a cast
     pub fn has_integer_booleans(self) -> bool {

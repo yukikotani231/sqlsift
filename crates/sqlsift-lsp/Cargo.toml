@@ -16,8 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 sqlsift-core.workspace = true
-tower-lsp = "0.20"
-tokio = { version = "1", features = ["full"] }
+tower-lsp.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
