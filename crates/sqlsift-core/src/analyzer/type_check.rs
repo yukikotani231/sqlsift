@@ -498,7 +498,7 @@ impl Resolver<'_> {
             Expr::Nested(inner) => self.infer_expr_type(inner),
             Expr::BinaryOp { .. } => self.infer_binary_chain_type(expr),
             Expr::Cast { data_type, .. } => {
-                ExpressionType::of_column(&SqlType::from_ast(data_type))
+                ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
@@ -512,7 +512,7 @@ impl Resolver<'_> {
             }
             // Typed literals such as DATE '2024-01-01'
             Expr::TypedString { data_type, .. } => {
-                ExpressionType::of_column(&SqlType::from_ast(data_type))
+                ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             // Scalar subquery: the type of its single column
             Expr::Subquery(query) => match self

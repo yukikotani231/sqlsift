@@ -232,7 +232,6 @@ fn dbt_alias_built_in_for_loop() {
 /// Class sf-recursive-cte: Snowflake runs a self-referencing CTE without RECURSIVE
 /// (sf-samples PERF-AU-54)
 #[test]
-#[ignore = "known false positive (corpus report: sf-recursive-cte)"]
 fn snowflake_recursive_cte_without_keyword() {
     assert_clean(&check(
         SqlDialect::Snowflake,
@@ -279,7 +278,6 @@ fn bigquery_struct_star() {
 /// Class rs-datepart-sysdate: Redshift date parts as bare identifiers and `sysdate`
 /// (amazon-redshift-utils AdminScripts)
 #[test]
-#[ignore = "known false positive (corpus report: rs-datepart-sysdate)"]
 fn redshift_date_part_identifier_and_sysdate() {
     assert_clean(&check(
         SqlDialect::Redshift,
@@ -292,7 +290,6 @@ fn redshift_date_part_identifier_and_sysdate() {
 /// skipped, so every query on the table reports E0001 (TPC-H/TPC-DS DDL of
 /// amazon-redshift-utils: 3784 diagnostics)
 #[test]
-#[ignore = "known schema parse gap (corpus report: rs-ddl-attributes)"]
 fn redshift_table_attributes_in_ddl() {
     assert_clean(&check(
         SqlDialect::Redshift,
@@ -305,7 +302,6 @@ fn redshift_table_attributes_in_ddl() {
 /// Class db-types: Databricks MAP / STRUCT<a: INT> columns make the CREATE TABLE skipped,
 /// LONG is not numeric, LATERAL VIEW column aliases are not known
 #[test]
-#[ignore = "known false positive (corpus report: db-types)"]
 fn databricks_complex_types_and_lateral_view() {
     assert_clean(&check(
         SqlDialect::Databricks,

@@ -119,10 +119,11 @@ impl SqlDialect {
         )
     }
 
-    /// Whether `a.b.c` can be a path into a STRUCT column (BigQuery): `a` may be a
-    /// column rather than a table, and the parts after the column are field names
+    /// Whether `a.b.c` can be a path into a STRUCT column (BigQuery, Databricks):
+    /// `a` may be a column rather than a table, and the parts after the column are
+    /// field names
     pub fn struct_field_paths(self) -> bool {
-        matches!(self, SqlDialect::BigQuery)
+        matches!(self, SqlDialect::BigQuery | SqlDialect::Databricks)
     }
 
     /// Whether query text may contain psql meta-commands and `:variables`

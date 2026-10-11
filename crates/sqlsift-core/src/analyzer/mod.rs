@@ -4,6 +4,7 @@ pub(crate) mod bigquery;
 mod comment_directives;
 mod resolver;
 mod scope;
+mod snowflake;
 mod type_check;
 
 use std::ops::Range;
@@ -411,12 +412,19 @@ impl<'a> Analyzer<'a> {
             Err(error) => error,
         };
 
-        let Some(ranges) = statement_ranges(dialect.as_ref(), sql, lines) else {
+        let Some(mut ranges) = statement_ranges(dialect.as_ref(), sql, lines) else {
             // Tokenizer error: nothing can be parsed reliably
             self.diagnostics
                 .push(parse_error_diagnostic(&error, sql, 0..sql.len(), lines));
             return (Vec::new(), Vec::new());
         };
+        // Snowflake Scripting blocks are skipped (their statements end with `;` too)
+        if self.dialect == SqlDialect::Snowflake {
+            let blocks = snowflake::scripting_blocks(dialect.as_ref(), sql, &|location| {
+                lines.byte_offset(location.line, location.column)
+            });
+            ranges.retain(|r| !blocks.iter().any(|b| b.start < r.end && r.start < b.end));
+        }
 
         let mut statements = Vec::new();
         let mut skipped = Vec::new();
@@ -440,9 +448,23 @@ impl<'a> Analyzer<'a> {
                 Err(error) => error,
             };
             let retried = mask_unsupported_clauses(self.dialect, text, false)
-                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok());
+                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                .or_else(|| match self.dialect {
+                    // `t.$1` positional columns
+                    SqlDialect::Snowflake => {
+                        snowflake::mask_positional_columns(dialect.as_ref(), text)
+                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                    }
+                    _ => None,
+                });
             if let Some(parsed) = retried {
                 statements.extend(parsed.into_iter().map(|s| (s, origin)));
+                continue;
+            }
+            // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
+            if self.dialect == SqlDialect::Snowflake
+                && snowflake::is_unanalyzed_statement(dialect.as_ref(), text)
+            {
                 continue;
             }
             if let Some((kind, name)) = unparsed_definition(self.dialect, text) {

@@ -529,7 +529,11 @@ impl<'a> Resolver<'a> {
         self.scope.push(hides_parent);
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
-                self.define_cte(cte, with.recursive);
+                // Snowflake: a CTE is recursive when it references itself, with or
+                // without the RECURSIVE keyword
+                let recursive = with.recursive
+                    || (self.dialect == SqlDialect::Snowflake && self.references_itself(cte));
+                self.define_cte(cte, recursive);
             }
         }
 
@@ -564,6 +568,19 @@ impl<'a> Resolver<'a> {
 
         self.scope.pop();
         columns
+    }
+
+    /// Whether the body of `cte` reads a relation with the CTE's (unqualified) name
+    fn references_itself(&self, cte: &sqlparser::ast::Cte) -> bool {
+        let name = self.catalog.ident_name(&cte.alias.name);
+        let found =
+            sqlparser::ast::visit_relations(&cte.query, |relation| match relation.0.as_slice() {
+                [ident] if self.catalog.ident_name(ident) == name => {
+                    std::ops::ControlFlow::Break(())
+                }
+                _ => std::ops::ControlFlow::Continue(()),
+            });
+        found.is_break()
     }
 
     /// Register a CTE of the current query
@@ -677,6 +694,28 @@ impl<'a> Resolver<'a> {
         // FROM first: it builds the scope for every other clause
         for table_with_joins in &select.from {
             self.table_with_joins(table_with_joins);
+        }
+
+        // Hive / Databricks `LATERAL VIEW [OUTER] explode(expr) alias AS c1, ...`: the
+        // generator's argument sees the FROM clause, and its output is a relation with
+        // the column aliases (of unknown types; any columns without aliases)
+        for (i, view) in select.lateral_views.iter().enumerate() {
+            self.expr(&view.lateral_view);
+            let key = view
+                .lateral_view_name
+                .0
+                .last()
+                .map_or_else(|| format!("?lateral_view{i}"), |n| n.value.clone());
+            let names: Vec<String> = view
+                .lateral_col_alias
+                .iter()
+                .map(|c| c.value.clone())
+                .collect();
+            let columns = Relation::rename_columns(None, &names);
+            self.scope.current().relations.insert(
+                key.clone(),
+                Relation::new(RelationKind::Function, key, columns),
+            );
         }
 
         // DISTINCT ON (...) expressions
@@ -1466,19 +1505,25 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Position of a Snowflake date part keyword argument (`DATEADD(day, ...)`,
-    /// `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`), which the parser represents
-    /// as a column reference
+    /// Position of a Snowflake or Redshift date part keyword argument
+    /// (`DATEADD(day, ...)`, `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`,
+    /// `DATE_PART(h, ts)`), which the parser represents as a column reference
     fn date_part_arg(&self, func: &sqlparser::ast::Function) -> Option<usize> {
-        if self.dialect != SqlDialect::Snowflake {
-            return None;
-        }
+        let is_date_part: fn(&str) -> bool = match self.dialect {
+            SqlDialect::Snowflake => is_snowflake_date_part,
+            SqlDialect::Redshift => is_redshift_date_part,
+            _ => return None,
+        };
         let name = func.name.0.last()?.value.to_ascii_uppercase();
-        let index = match name.as_str() {
-            "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
-            | "DATE_TRUNC" | "DATE_PART" => 0,
-            "LAST_DAY" => 1,
-            "TIME_SLICE" => 2,
+        let index = match (name.as_str(), self.dialect) {
+            (
+                "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
+                | "DATE_TRUNC" | "DATE_PART",
+                _,
+            )
+            | ("DATEPART" | "PGDATE_PART", SqlDialect::Redshift) => 0,
+            ("LAST_DAY", SqlDialect::Snowflake) => 1,
+            ("TIME_SLICE", SqlDialect::Snowflake) => 2,
             _ => return None,
         };
         let FunctionArguments::List(list) = &func.args else {
@@ -1486,7 +1531,7 @@ impl<'a> Resolver<'a> {
         };
         match list.args.get(index)? {
             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))
-                if ident.quote_style.is_none() && is_snowflake_date_part(&ident.value) =>
+                if ident.quote_style.is_none() && is_date_part(&ident.value) =>
             {
                 Some(index)
             }
@@ -1636,6 +1681,8 @@ impl<'a> Resolver<'a> {
                         || is_date_part_keyword(column_name)
                         || (self.dialect == SqlDialect::BigQuery
                             && super::bigquery::is_date_part(column_name))
+                        || (self.dialect == SqlDialect::Redshift
+                            && is_redshift_niladic_function(column_name))
                         || column_name.starts_with('@'));
                 if is_alias || is_relation || is_keyword {
                     return;
@@ -1992,6 +2039,54 @@ fn flatten_columns() -> Vec<Column> {
         Column::new("VALUE", ExpressionType::Unknown),
         Column::new("THIS", ExpressionType::Unknown),
     ]
+}
+
+/// Redshift functions called without parentheses that the parser represents as
+/// identifiers (`SYSDATE`, `CURRENT_USER`)
+fn is_redshift_niladic_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "SYSDATE" | "CURRENT_USER" | "CURRENT_USER_ID" | "SESSION_USER" | "USER"
+    )
+}
+
+/// Redshift date and time parts and their abbreviations, as accepted by DATEADD,
+/// DATEDIFF, DATE_PART, DATE_TRUNC, ...
+fn is_redshift_date_part(name: &str) -> bool {
+    is_snowflake_date_part(name)
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "millennium"
+                | "millennia"
+                | "mil"
+                | "mils"
+                | "century"
+                | "centuries"
+                | "c"
+                | "cent"
+                | "cents"
+                | "decade"
+                | "decades"
+                | "dec"
+                | "decs"
+                | "y"
+                | "weeks"
+                | "minutes"
+                | "msecs"
+                | "msecond"
+                | "mseconds"
+                | "millisec"
+                | "millisecs"
+                | "millisecon"
+                | "microsec"
+                | "microsecs"
+                | "microsecond"
+                | "microseconds"
+                | "usecs"
+                | "usecond"
+                | "useconds"
+                | "timezone"
+        )
 }
 
 /// Snowflake date and time parts and their abbreviations, as accepted by DATEADD,
