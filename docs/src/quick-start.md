@@ -53,7 +53,7 @@ Not sure where your schema comes from? See [Loading your schema](guide/schema.md
 
 ## 2. Pick the dialect
 
-PostgreSQL is the default. For MySQL or SQLite, pass `--dialect`:
+PostgreSQL is the default. For MySQL or SQLite (or, in alpha, Snowflake, BigQuery, Redshift or Databricks), pass `--dialect`:
 
 ```bash
 sqlsift check --dialect mysql --schema schema.sql queries/*.sql
@@ -69,11 +69,11 @@ files = ["queries/**/*.sql"]
 dialect = "postgresql"
 ```
 
-Now `sqlsift check` with no arguments checks every query file. sqlsift looks for `sqlsift.toml` in the current directory and its parents, and the VS Code extension reads the same file. See the [configuration reference](reference/config.md) for every key.
+Now `sqlsift check` with no arguments checks every query file. sqlsift looks for `sqlsift.toml` in the current directory and its parents, and the VS Code extension reads the same file. See the [configuration reference](reference/config.md) for every key, and the [example projects](integrations/examples.md) for a ready-made `sqlsift.toml` for sqlc, Prisma, postgres.js, sqlx, MySQL and dbt projects.
 
 ## 4. Decide what should fail the build
 
-Every rule is an error by default. To report a rule without failing the check, make it a warning:
+Rules that report queries the database rejects (`correctness`) are errors by default, rules for valid but almost certainly wrong queries (`suspicious`) are warnings, and stricter rules (`restriction`) are off until you enable them. To report a rule without failing the check, make it a warning:
 
 ```toml
 [rules]

@@ -19,7 +19,7 @@ inputs:
     required: false
     default: ""
   dialect:
-    description: "SQL dialect: postgresql, mysql or sqlite."
+    description: "SQL dialect: postgresql, mysql, sqlite, or (alpha) snowflake, bigquery, redshift, databricks."
     required: false
     default: ""
   config:

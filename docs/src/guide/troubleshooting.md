@@ -5,6 +5,7 @@
 1. Run `sqlsift schema` with the same options (or the same `sqlsift.toml`) to see what sqlsift loaded. If the table is missing, the statement that creates it was probably skipped; skipped statements are listed as warnings on stderr.
 2. Check the order of your schema files. With `--schema-dir`, files are applied in file-name order, so a migration named `10_add_column.sql` runs before `2_create_table.sql`. Zero-pad numeric prefixes.
 3. Check the dialect. A MySQL schema parsed as PostgreSQL may be partly skipped.
+4. In PostgreSQL, a table in a schema other than `public` must be schema-qualified (`analytics.daily_signups`) unless a `SET search_path` in the file puts its schema on the path, as in the database. See [Schemas and qualified names](sql-support.md#schemas-and-qualified-names).
 
 ## "Pattern matched no files" (exit code 2)
 

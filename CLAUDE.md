@@ -41,7 +41,7 @@ sqlsift/
 │
 ├── docs/                  # User guide (mdBook), published to GitHub Pages at /sqlsift/docs/
 ├── site/                  # Browser playground (GitHub Pages root)
-├── examples/              # Example projects per stack (sqlc, Prisma, postgres.js, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
+├── examples/              # Example projects per stack (sqlc, Prisma, postgres.js, sqlx, migrations, MySQL, dbt); CI runs scripts/check-examples.sh on them
 ├── tests/fixtures/        # Test SQL files
 │   └── real-world/        # Pagila schema (used by tests)
 ├── scripts/
@@ -154,7 +154,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - Integration tests use SQL fixtures in `tests/fixtures/`
 - Real-world SQL: the Pagila schema in `tests/fixtures/real-world/`, and the corpus harness in `tests/corpus/` (public dbt projects and warehouse SQL; not run in CI, its findings become tests in `corpus_regression_tests.rs`)
 - Test both positive cases (valid SQL) and negative cases (should produce diagnostics)
-- Comprehensive test coverage across unit, integration, doc, and LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and all three dialects (PostgreSQL, MySQL, SQLite)
+- Comprehensive test coverage across unit, integration, doc, and LSP tests covering DDL parsing, SELECT, INSERT, UPDATE, DELETE, CTEs, subqueries, VIEWs, ALTER TABLE, derived tables, window functions, type checking, and the PostgreSQL, MySQL and SQLite dialects (plus the alpha warehouse dialects)
 - Test-driven development (TDD) approach: write failing tests first, then implement features
 
 ## Style Guidelines

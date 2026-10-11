@@ -117,16 +117,17 @@
         </article>
         <article class="card">
           <h3>Install</h3>
-          <p>From npm or crates.io.</p>
+          <p>From npm, or from source with Cargo. In an existing project, <code>sqlsift init</code> finds the schema and queries and writes a <code>sqlsift.toml</code>.</p>
           <pre><code>npm install -g sqlsift-cli
 # or
-cargo install sqlsift-cli
+cargo install --git https://github.com/yukikotani231/sqlsift sqlsift-cli
 
-sqlsift check -s schema.sql queries/*.sql</code></pre>
+sqlsift init
+sqlsift check</code></pre>
         </article>
         <article class="card card-wide">
           <h3>GitHub Actions</h3>
-          <p>Fail pull requests that reference columns that do not exist. Add <code>-f sarif</code> to upload results to Code Scanning.</p>
+          <p>Fail pull requests that reference columns that do not exist, with annotations on the diff. <code>diff-base</code> reports only what the pull request introduces.</p>
           <pre><code># .github/workflows/sqlsift.yml
 name: SQL Lint
 on: [push, pull_request]
@@ -135,10 +136,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npx sqlsift-cli check --schema schema.sql queries/*.sql</code></pre>
+      - uses: yukikotani231/sqlsift@main
+        with:
+          schema-dir: db/migrations
+          files: queries/**/*.sql
+          diff-base: ${{ github.base_ref }}</code></pre>
         </article>
       </div>
-      <p class="usage-more">Configure defaults with a <code>sqlsift.toml</code>, silence a line with <code>-- sqlsift:disable E0002</code>, or get live diagnostics in VS Code. See the <a href="https://github.com/yukikotani231/sqlsift#readme">README</a>.</p>
+      <p class="usage-more">Configure defaults with a <code>sqlsift.toml</code>, silence a line with <code>-- sqlsift:disable E0002</code>, or get live diagnostics in VS Code. See the <a href="https://yukikotani231.github.io/sqlsift/docs/">user guide</a> and the <a href="https://github.com/yukikotani231/sqlsift/tree/main/examples">example projects</a> for sqlc, Prisma, postgres.js, sqlx, MySQL and dbt.</p>
     </section>
   </main>
 

@@ -1,0 +1,6 @@
+# The migrations sqlx::migrate!() applies, in version order (the *.down.sql
+# halves of reversible migrations would be skipped), and the files
+# query_file! / query_file_as! read, one statement each.
+schema_dir = "migrations"
+files = ["queries/**/*.sql"]
+dialect = "postgresql"
