@@ -158,7 +158,7 @@ pub enum DiagnosticKind {
     TypeMismatch,
     /// E0004: Potential NOT NULL violation
     PotentialNullViolation,
-    /// E0005: Column count mismatch in INSERT
+    /// E0005: Column count mismatch (INSERT, column aliases, subqueries, rows)
     ColumnCountMismatch,
     /// E0006: Ambiguous column reference
     AmbiguousColumn,
@@ -174,6 +174,12 @@ pub enum DiagnosticKind {
     PositionOutOfRange,
     /// E0012: Aggregate or window function in a clause that doesn't allow it
     MisplacedAggregate,
+    /// E0013: A value given for a generated column by INSERT or UPDATE
+    GeneratedColumnWrite,
+    /// E0014: ON CONFLICT target that matches no primary key or unique constraint
+    UnmatchedConflictTarget,
+    /// E0015: ORDER BY of SELECT DISTINCT on something not selected
+    DistinctOrderBy,
     /// Parse error
     ParseError,
 }

@@ -376,7 +376,7 @@ impl Resolver<'_> {
     ) {
         // Without a column list, values are positional over all table columns
         let target_columns: Vec<&str> = if insert.columns.is_empty() {
-            table_def.columns.keys().map(String::as_str).collect()
+            self.positional_columns(table_def)
         } else {
             insert.columns.iter().map(|c| c.value.as_str()).collect()
         };

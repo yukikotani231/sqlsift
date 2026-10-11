@@ -211,8 +211,10 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        // Without a column list, values are positional (SQLite skips generated columns)
+        let positional_columns = self.positional_columns(table_def);
         let expected_count = if insert.columns.is_empty() {
-            table_def.columns.len()
+            positional_columns.len()
         } else {
             insert.columns.len()
         };
@@ -241,7 +243,13 @@ impl<'a> Resolver<'a> {
                 .map(Vec::len)
                 .max()
                 .filter(|&n| n <= expected_count)
-                .map(|n| table_def.columns.keys().take(n).cloned().collect()),
+                .map(|n| {
+                    positional_columns
+                        .iter()
+                        .take(n)
+                        .map(|c| (*c).to_string())
+                        .collect()
+                }),
             _ => None,
         };
 
@@ -309,7 +317,9 @@ impl<'a> Resolver<'a> {
                 }
             }
             self.check_insert_values(insert, table_def, rows);
+            self.check_generated_insert(insert, table_def, Some(rows));
         } else if let Some(selected) = &selected {
+            self.check_generated_insert(insert, table_def, None);
             if selected.len() != expected_count {
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::ColumnCountMismatch,
@@ -425,6 +435,7 @@ impl<'a> Resolver<'a> {
                     for col in columns {
                         self.check_target_column(table_def, table_name, col);
                     }
+                    self.check_conflict_target(table_def, table_name, columns);
                 }
                 match &on_conflict.action {
                     OnConflictAction::DoNothing => return,
@@ -548,6 +559,7 @@ impl<'a> Resolver<'a> {
 
         if let Some(def) = table_def {
             self.check_assignments(def, assignments);
+            self.check_generated_update(def, assignments);
         }
     }
 
@@ -687,6 +699,13 @@ impl<'a> Resolver<'a> {
                 .update_cte(&name, Relation::rename_columns(columns, &names));
         } else {
             let columns = self.query(&cte.query, false);
+            self.check_alias_count(
+                "WITH query",
+                &cte.alias.name,
+                columns.as_deref(),
+                names.len(),
+                true,
+            );
             self.scope.current().ctes.push(Cte {
                 name,
                 columns: Relation::rename_columns(columns, &names),
@@ -891,6 +910,7 @@ impl<'a> Resolver<'a> {
         if let Some(query) = query {
             self.scope.current().select_aliases = aliases;
             self.query_tail(query);
+            self.check_distinct_order_by(select, query);
             if let Some(columns) = &columns {
                 self.check_order_by_positions(query, columns.len(), Some(select_span));
             }
@@ -1213,6 +1233,15 @@ impl<'a> Resolver<'a> {
                     // into column/alias errors
                     Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 };
+                if let Some(alias) = alias {
+                    self.check_alias_count(
+                        "Table",
+                        &alias.name,
+                        relation.columns.as_deref(),
+                        alias_columns.len(),
+                        false,
+                    );
+                }
                 relation.columns = Relation::rename_columns(relation.columns, &alias_columns);
                 if aliased {
                     // The alias hides the table name
@@ -1240,6 +1269,13 @@ impl<'a> Resolver<'a> {
                 let (key, columns) = if let Some(a) = alias {
                     let names: Vec<String> =
                         a.columns.iter().map(|c| c.name.value.clone()).collect();
+                    self.check_alias_count(
+                        "Subquery",
+                        &a.name,
+                        columns.as_deref(),
+                        names.len(),
+                        true,
+                    );
                     (
                         a.name.value.clone(),
                         Relation::rename_columns(columns, &names),
@@ -1977,7 +2013,12 @@ impl<'a> Resolver<'a> {
 
     /// Whether the database supplies a value for `col` when an INSERT omits it
     fn column_has_implicit_value(&self, table: &TableDef, col: &ColumnDef) -> bool {
-        if col.nullable || col.default.is_some() || col.identity.is_some() || col.auto_increment {
+        if col.nullable
+            || col.default.is_some()
+            || col.identity.is_some()
+            || col.auto_increment
+            || col.generated
+        {
             return true;
         }
         // SQLite: a single-column INTEGER PRIMARY KEY is an alias for the rowid

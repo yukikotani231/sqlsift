@@ -28,7 +28,7 @@ CREATE TABLE orders (
 | [E0002](E0002.md) | `column-not-found` | Referenced column does not exist in table |
 | [E0003](E0003.md) | `type-mismatch` | Type incompatibility in expression |
 | [E0004](E0004.md) | `potential-null-violation` | Potential NOT NULL violation |
-| [E0005](E0005.md) | `column-count-mismatch` | INSERT column count doesn't match values |
+| [E0005](E0005.md) | `column-count-mismatch` | Column count doesn't match (INSERT, column aliases, subqueries) |
 | [E0006](E0006.md) | `ambiguous-column` | Column reference is ambiguous across tables |
 | [E0007](E0007.md) | `join-type-mismatch` | JOIN condition compares incompatible types |
 | [E0008](E0008.md) | `missing-required-column` | INSERT omits a NOT NULL column without a default |
@@ -36,4 +36,7 @@ CREATE TABLE orders (
 | [E0010](E0010.md) | `duplicate-target-column` | Column given twice in an INSERT column list or UPDATE SET |
 | [E0011](E0011.md) | `position-out-of-range` | ORDER BY / GROUP BY position is not in the select list |
 | [E0012](E0012.md) | `misplaced-aggregate` | Aggregate or window function where it is not allowed |
+| [E0013](E0013.md) | `generated-column-write` | INSERT or UPDATE gives a value to a generated column |
+| [E0014](E0014.md) | `unmatched-conflict-target` | ON CONFLICT columns match no unique constraint |
+| [E0015](E0015.md) | `distinct-order-by` | SELECT DISTINCT ordered by a column it doesn't select |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

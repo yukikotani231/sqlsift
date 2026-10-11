@@ -296,6 +296,7 @@ impl<'a> Analyzer<'a> {
                 .with_variables(&variables)
                 .with_templated_names(&templated_name);
             resolver.statement(stmt);
+            resolver.check_subquery_shapes(stmt);
             if let Statement::Declare { stmts } = stmt {
                 variables.extend(
                     stmts

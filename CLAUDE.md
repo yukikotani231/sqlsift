@@ -58,7 +58,7 @@ sqlsift/
 4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types
 5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
 6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
-7. **Structural checks** (`analyzer/structure.rs`): E0009-E0012 (duplicate names and target columns, positions, misplaced aggregates), implemented on `Resolver`
+7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY) and the E0005 checks of column alias lists and subquery shapes, implemented on `Resolver`
 8. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 9. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
 10. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
@@ -237,7 +237,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0002**: Column not found
 - **E0003**: Type mismatch (comparisons, arithmetic, INSERT VALUES, UPDATE SET)
 - **E0004**: Potential NOT NULL violation (explicit NULL assigned to a NOT NULL column)
-- **E0005**: Column count mismatch in INSERT
+- **E0005**: Column count mismatch (INSERT, column alias lists, subqueries, row comparisons)
 - **E0006**: Ambiguous column reference
 - **E0007**: JOIN type mismatch (JOIN condition type incompatibility)
 - **E0008**: Missing required column (INSERT omits a NOT NULL column without DEFAULT / identity / serial / AUTO_INCREMENT)
@@ -245,6 +245,9 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0010**: Duplicate target column (INSERT column list, UPDATE SET)
 - **E0011**: ORDER BY / GROUP BY position out of range
 - **E0012**: Misplaced aggregate or window function (WHERE, JOIN ON, GROUP BY, nested aggregates, ...)
+- **E0013**: Generated column write (INSERT/UPDATE value for a generated or GENERATED ALWAYS identity column)
+- **E0014**: ON CONFLICT target matches no primary key / unique constraint / unique index
+- **E0015**: SELECT DISTINCT ordered by an unselected column (and DISTINCT ON vs ORDER BY)
 - **E1000**: Generic parse error
 
 ## Release Process

@@ -181,7 +181,7 @@ pub const RULES: &[Rule] = &[
         code: "E0005",
         name: "column-count-mismatch",
         category: RuleCategory::Correctness,
-        summary: "INSERT column count doesn't match values",
+        summary: "Column count doesn't match (INSERT, column aliases, subqueries)",
     },
     Rule {
         kind: DiagnosticKind::AmbiguousColumn,
@@ -231,6 +231,27 @@ pub const RULES: &[Rule] = &[
         name: "misplaced-aggregate",
         category: RuleCategory::Correctness,
         summary: "Aggregate or window function where it is not allowed",
+    },
+    Rule {
+        kind: DiagnosticKind::GeneratedColumnWrite,
+        code: "E0013",
+        name: "generated-column-write",
+        category: RuleCategory::Correctness,
+        summary: "INSERT or UPDATE gives a value to a generated column",
+    },
+    Rule {
+        kind: DiagnosticKind::UnmatchedConflictTarget,
+        code: "E0014",
+        name: "unmatched-conflict-target",
+        category: RuleCategory::Correctness,
+        summary: "ON CONFLICT columns match no unique constraint",
+    },
+    Rule {
+        kind: DiagnosticKind::DistinctOrderBy,
+        code: "E0015",
+        name: "distinct-order-by",
+        category: RuleCategory::Correctness,
+        summary: "SELECT DISTINCT ordered by a column it doesn't select",
     },
     Rule {
         kind: DiagnosticKind::ParseError,

@@ -176,7 +176,7 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0002](https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html) | column-not-found | Referenced column does not exist in table |
 | [E0003](https://yukikotani231.github.io/sqlsift/docs/rules/E0003.html) | type-mismatch | Type incompatibility in expressions (comparisons, arithmetic, INSERT/UPDATE values, enums) |
 | [E0004](https://yukikotani231.github.io/sqlsift/docs/rules/E0004.html) | potential-null-violation | Potential NOT NULL violation (explicit NULL assignment) |
-| [E0005](https://yukikotani231.github.io/sqlsift/docs/rules/E0005.html) | column-count-mismatch | INSERT column count doesn't match values |
+| [E0005](https://yukikotani231.github.io/sqlsift/docs/rules/E0005.html) | column-count-mismatch | Column count doesn't match (INSERT values, column alias lists, subqueries, row comparisons) |
 | [E0006](https://yukikotani231.github.io/sqlsift/docs/rules/E0006.html) | ambiguous-column | Column reference is ambiguous across tables |
 | [E0007](https://yukikotani231.github.io/sqlsift/docs/rules/E0007.html) | join-type-mismatch | JOIN condition compares incompatible types |
 | [E0008](https://yukikotani231.github.io/sqlsift/docs/rules/E0008.html) | missing-required-column | INSERT omits a NOT NULL column that has no default |
@@ -184,6 +184,9 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0010](https://yukikotani231.github.io/sqlsift/docs/rules/E0010.html) | duplicate-target-column | Column given twice in an INSERT column list or UPDATE SET |
 | [E0011](https://yukikotani231.github.io/sqlsift/docs/rules/E0011.html) | position-out-of-range | ORDER BY / GROUP BY position is not in the select list |
 | [E0012](https://yukikotani231.github.io/sqlsift/docs/rules/E0012.html) | misplaced-aggregate | Aggregate or window function where it is not allowed |
+| [E0013](https://yukikotani231.github.io/sqlsift/docs/rules/E0013.html) | generated-column-write | INSERT or UPDATE gives a value to a generated column |
+| [E0014](https://yukikotani231.github.io/sqlsift/docs/rules/E0014.html) | unmatched-conflict-target | ON CONFLICT columns match no unique constraint |
+| [E0015](https://yukikotani231.github.io/sqlsift/docs/rules/E0015.html) | distinct-order-by | SELECT DISTINCT ordered by a column it doesn't select |
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

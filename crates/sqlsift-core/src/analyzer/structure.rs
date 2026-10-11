@@ -6,18 +6,24 @@
 //! - a column given twice in an INSERT column list or UPDATE SET (E0010)
 //! - an ORDER BY / GROUP BY position past the end of the select list (E0011)
 //! - aggregate and window functions where SQL doesn't allow them (E0012)
+//! - a value given for a generated column (E0013)
+//! - an ON CONFLICT target that matches no unique key (E0014)
+//! - column alias lists longer than the relation, subqueries and row
+//!   constructors with the wrong number of columns (E0005)
+//! - ORDER BY of SELECT DISTINCT on something not selected (E0015)
 //!
 //! Each check is limited to the dialects known to reject the query.
 
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, Expr, Function, FunctionArguments, GroupByExpr, Ident, Query,
-    Select, Spanned, TableFactor, TableWithJoins, Value, Visit, Visitor,
+    Assignment, AssignmentTarget, Expr, Function, FunctionArguments, GroupByExpr, Ident, Insert,
+    Query, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Value, Visit, Visitor,
 };
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
+use crate::schema::{ColumnDef, IdentityKind, QualifiedName, TableDef};
 
 use super::resolver::Resolver;
 
@@ -396,6 +402,487 @@ impl Resolver<'_> {
             }
         }
     }
+}
+
+impl Resolver<'_> {
+    // ---------------------------------------------------------------------
+    // E0013 generated-column-write
+    // ---------------------------------------------------------------------
+
+    /// Columns an INSERT without a column list gives values for, in order: all
+    /// columns, but SQLite leaves out generated columns
+    pub(super) fn positional_columns<'t>(&self, table: &'t TableDef) -> Vec<&'t str> {
+        table
+            .columns
+            .values()
+            .filter(|c| !(self.dialect == SqlDialect::SQLite && c.generated))
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+
+    /// Why a column can't be given a value other than DEFAULT, if it can't
+    fn generated_kind(&self, column: &ColumnDef) -> Option<&'static str> {
+        if column.generated {
+            Some("a generated column")
+        } else if matches!(column.identity, Some(IdentityKind::Always))
+            && matches!(self.dialect, SqlDialect::PostgreSQL)
+        {
+            Some("an identity column GENERATED ALWAYS")
+        } else {
+            None
+        }
+    }
+
+    /// Report a value other than DEFAULT given for a generated column by an INSERT
+    /// (`rows` of VALUES, or `None` for INSERT ... SELECT)
+    pub(super) fn check_generated_insert(
+        &mut self,
+        insert: &Insert,
+        table: &TableDef,
+        rows: Option<&[Vec<Expr>]>,
+    ) {
+        let targets: Vec<(&str, Option<Span>)> = if insert.columns.is_empty() {
+            self.positional_columns(table)
+                .into_iter()
+                .map(|c| (c, None))
+                .collect()
+        } else {
+            insert
+                .columns
+                .iter()
+                .map(|c| (c.value.as_str(), Some(Span::from_sqlparser(&c.span))))
+                .collect()
+        };
+        let table_span = insert
+            .table_name
+            .0
+            .last()
+            .map(|id| Span::from_sqlparser(&id.span));
+        for (i, (name, span)) in targets.iter().enumerate() {
+            let Some(column) = table.get_column(name) else {
+                continue;
+            };
+            let Some(kind) = self.generated_kind(column) else {
+                continue;
+            };
+            // INSERT ... SELECT can't give DEFAULT; VALUES can
+            let given = rows.map_or(!insert.columns.is_empty(), |rows| {
+                rows.iter()
+                    .any(|row| row.get(i).is_some_and(|value| !is_default(value)))
+            });
+            if !given {
+                continue;
+            }
+            let mut diag = Diagnostic::error(
+                DiagnosticKind::GeneratedColumnWrite,
+                format!(
+                    "Column '{}' is {kind}: INSERT can't give it a value",
+                    column.name
+                ),
+            )
+            .with_help("Leave the column out of the INSERT, or give it DEFAULT");
+            diag.span = span.or(table_span);
+            self.diagnostics.push(diag);
+        }
+    }
+
+    /// Report UPDATE SET of a generated column to a value other than DEFAULT
+    pub(super) fn check_generated_update(&mut self, table: &TableDef, assignments: &[Assignment]) {
+        for assignment in assignments {
+            let AssignmentTarget::ColumnName(name) = &assignment.target else {
+                continue;
+            };
+            let [ident] = name.0.as_slice() else {
+                continue;
+            };
+            let Some(column) = table.get_column(&ident.value) else {
+                continue;
+            };
+            let Some(kind) = self.generated_kind(column) else {
+                continue;
+            };
+            if is_default(&assignment.value) {
+                continue;
+            }
+            self.diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::GeneratedColumnWrite,
+                    format!(
+                        "Column '{}' is {kind}: UPDATE can only set it to DEFAULT",
+                        column.name
+                    ),
+                )
+                .with_span(Span::from_sqlparser(&ident.span))
+                .with_help("Update the columns it is computed from instead"),
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // E0014 unmatched-conflict-target
+    // ---------------------------------------------------------------------
+
+    /// Report `ON CONFLICT (columns)` when no primary key or unique constraint of the
+    /// table has exactly those columns
+    pub(super) fn check_conflict_target(
+        &mut self,
+        table: &TableDef,
+        table_name: &QualifiedName,
+        columns: &[Ident],
+    ) {
+        if !matches!(self.dialect, SqlDialect::PostgreSQL | SqlDialect::SQLite)
+            || columns.is_empty()
+            || table.unknown_unique_keys
+            || self.catalog.unknown_unique_keys
+            || !columns.iter().all(|c| table.column_exists(&c.value))
+        {
+            return;
+        }
+        let same_columns = |key: &[String]| {
+            key.len() == columns.len()
+                && key
+                    .iter()
+                    .all(|k| columns.iter().any(|c| c.value.eq_ignore_ascii_case(k)))
+                && columns
+                    .iter()
+                    .all(|c| key.iter().any(|k| k.eq_ignore_ascii_case(&c.value)))
+        };
+        let primary_key: Vec<String> = match &table.primary_key {
+            Some(pk) => pk.columns.clone(),
+            None => table
+                .columns
+                .values()
+                .filter(|c| c.is_primary_key)
+                .map(|c| c.name.clone())
+                .collect(),
+        };
+        let matches = (!primary_key.is_empty() && same_columns(&primary_key))
+            || table
+                .unique_constraints
+                .iter()
+                .any(|u| same_columns(&u.columns));
+        if matches {
+            return;
+        }
+        let list = columns
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let keys: Vec<String> = std::iter::once(primary_key)
+            .filter(|k| !k.is_empty())
+            .chain(table.unique_constraints.iter().map(|u| u.columns.clone()))
+            .map(|k| format!("({})", k.join(", ")))
+            .collect();
+        let help = if keys.is_empty() {
+            format!("Table '{table_name}' has no primary key or unique constraint")
+        } else {
+            format!(
+                "The unique keys of '{table_name}' are {}; add a unique constraint or index on ({list})",
+                keys.join(", ")
+            )
+        };
+        self.diagnostics.push(
+            Diagnostic::error(
+                DiagnosticKind::UnmatchedConflictTarget,
+                format!("No unique constraint or primary key of '{table_name}' matches ON CONFLICT ({list})"),
+            )
+            .with_span(Span::from_sqlparser(&columns[0].span))
+            .with_help(help),
+        );
+    }
+}
+
+impl Resolver<'_> {
+    // ---------------------------------------------------------------------
+    // E0005 column-count-mismatch (column aliases, subqueries, rows)
+    // ---------------------------------------------------------------------
+
+    /// Report a column alias list (`t AS x(a, b)`, `WITH x(a, b) AS ...`) with more
+    /// names than the relation has columns, or for MySQL and SQLite CTEs and
+    /// derived tables, a different number. `what` is "Table" or "WITH query".
+    pub(super) fn check_alias_count(
+        &mut self,
+        what: &str,
+        name: &Ident,
+        columns: Option<&[super::scope::Column]>,
+        aliases: usize,
+        exact: bool,
+    ) {
+        if !matches!(
+            self.dialect,
+            SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL | SqlDialect::SQLite
+        ) {
+            return;
+        }
+        let Some(columns) = columns else {
+            return;
+        };
+        let exact = exact && matches!(self.dialect, SqlDialect::MySQL | SqlDialect::SQLite);
+        if aliases == 0 || aliases == columns.len() || (aliases < columns.len() && !exact) {
+            return;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                DiagnosticKind::ColumnCountMismatch,
+                format!(
+                    "{what} '{}' has {} column{} but {aliases} column name{} were given",
+                    name.value,
+                    columns.len(),
+                    if columns.len() == 1 { "" } else { "s" },
+                    if aliases == 1 { "" } else { "s" },
+                ),
+            )
+            .with_span(Span::from_sqlparser(&name.span))
+            .with_help(if exact {
+                "Give one name per column"
+            } else {
+                "Give at most one name per column"
+            }),
+        );
+    }
+
+    /// Report subqueries that return the wrong number of columns for where they are
+    /// (`x IN (SELECT a, b ...)`, `x = (SELECT a, b ...)`) and row comparisons of
+    /// different lengths. Runs after the statement is resolved, using the output
+    /// columns of its subqueries.
+    pub(super) fn check_subquery_shapes(&mut self, stmt: &sqlparser::ast::Statement) {
+        if !matches!(
+            self.dialect,
+            SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL | SqlDialect::SQLite
+        ) {
+            return;
+        }
+        let mut checker = ShapeChecker {
+            columns: &self.subquery_columns,
+            row_subqueries: Vec::new(),
+            found: Vec::new(),
+        };
+        let _ = stmt.visit(&mut checker);
+        self.diagnostics.extend(checker.found);
+    }
+}
+
+/// Finds subqueries and row comparisons with the wrong number of columns
+struct ShapeChecker<'c> {
+    /// Output columns of the subqueries of the statement, by address
+    columns: &'c std::collections::HashMap<usize, Option<Vec<super::scope::Column>>>,
+    /// Subqueries compared with a row (`(a, b) = (SELECT ...)`), by address
+    row_subqueries: Vec<usize>,
+    found: Vec<Diagnostic>,
+}
+
+impl ShapeChecker<'_> {
+    fn column_count(&self, query: &Query) -> Option<usize> {
+        let columns = self.columns.get(&(query as *const Query as usize))?;
+        columns.as_ref().map(Vec::len)
+    }
+
+    fn report(&mut self, message: String, help: &str, at: &Expr) {
+        let mut diag = Diagnostic::error(DiagnosticKind::ColumnCountMismatch, message)
+            .with_help(help.to_string());
+        diag.span = Some(Span::from_sqlparser(&at.span())).filter(|s| s.line > 0);
+        self.found.push(diag);
+    }
+}
+
+impl Visitor for ShapeChecker<'_> {
+    type Break = ();
+
+    fn pre_visit_statement(&mut self, stmt: &sqlparser::ast::Statement) -> ControlFlow<()> {
+        // `UPDATE t SET (a, b) = (SELECT x, y ...)` assigns a row
+        if let sqlparser::ast::Statement::Update { assignments, .. } = stmt {
+            for assignment in assignments {
+                if let (AssignmentTarget::Tuple(_), Expr::Subquery(query)) =
+                    (&assignment.target, &assignment.value)
+                {
+                    self.row_subqueries
+                        .push(query.as_ref() as *const Query as usize);
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        match expr {
+            Expr::BinaryOp { left, right, .. } => match (left.as_ref(), right.as_ref()) {
+                (Expr::Tuple(a), Expr::Tuple(b)) if a.len() != b.len() => {
+                    self.report(
+                        format!(
+                            "Row comparison of {} values with {} values",
+                            a.len(),
+                            b.len()
+                        ),
+                        "Compare rows with the same number of values",
+                        left,
+                    );
+                }
+                (Expr::Tuple(row), Expr::Subquery(query))
+                | (Expr::Subquery(query), Expr::Tuple(row)) => {
+                    self.row_subqueries
+                        .push(query.as_ref() as *const Query as usize);
+                    if let Some(n) = self.column_count(query) {
+                        if n != row.len() {
+                            self.report(
+                                format!(
+                                    "Row of {} values compared with a subquery of {n} columns",
+                                    row.len()
+                                ),
+                                "Select as many columns as the row has values",
+                                left,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Expr::InSubquery { expr, subquery, .. } => {
+                let expected = match expr.as_ref() {
+                    Expr::Tuple(row) => row.len(),
+                    _ => 1,
+                };
+                self.row_subqueries
+                    .push(subquery.as_ref() as *const Query as usize);
+                if let Some(n) = self.column_count(subquery) {
+                    if n != expected {
+                        self.report(
+                            format!(
+                                "IN subquery returns {n} columns but {expected} {} expected",
+                                if expected == 1 { "is" } else { "are" }
+                            ),
+                            "Select only the column to compare with",
+                            expr,
+                        );
+                    }
+                }
+            }
+            Expr::Subquery(query) => {
+                let address = query.as_ref() as *const Query as usize;
+                if !self.row_subqueries.contains(&address) {
+                    if let Some(n) = self.column_count(query) {
+                        if n > 1 {
+                            self.report(
+                                format!("Subquery used as a value returns {n} columns"),
+                                "A scalar subquery must select exactly one column",
+                                expr,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+impl Resolver<'_> {
+    // ---------------------------------------------------------------------
+    // E0015 distinct-order-by
+    // ---------------------------------------------------------------------
+
+    /// Report ORDER BY of a SELECT DISTINCT on a column the select list doesn't
+    /// have, and DISTINCT ON expressions that don't start the ORDER BY
+    pub(super) fn check_distinct_order_by(&mut self, select: &Select, query: &Query) {
+        let Some(order_by) = &query.order_by else {
+            return;
+        };
+        match &select.distinct {
+            Some(sqlparser::ast::Distinct::Distinct)
+                if matches!(
+                    self.dialect,
+                    SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL
+                ) =>
+            {
+                // `*` and `t.*` select every column of something
+                let mut selected: Vec<String> = Vec::new();
+                for item in &select.projection {
+                    match item {
+                        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..) => return,
+                        SelectItem::ExprWithAlias { expr, alias } => {
+                            selected.push(alias.value.to_lowercase());
+                            if let Some(name) = column_ref_name(expr) {
+                                selected.push(name);
+                            }
+                        }
+                        SelectItem::UnnamedExpr(expr) => {
+                            if let Some(name) = column_ref_name(expr) {
+                                selected.push(name);
+                            }
+                        }
+                    }
+                }
+                for item in &order_by.exprs {
+                    let Some(name) = column_ref_name(&item.expr) else {
+                        continue;
+                    };
+                    if selected.contains(&name) {
+                        continue;
+                    }
+                    let mut diag = Diagnostic::error(
+                        DiagnosticKind::DistinctOrderBy,
+                        format!("ORDER BY '{}' is not in the select list of SELECT DISTINCT", item.expr),
+                    )
+                    .with_help("With DISTINCT, ORDER BY can only use selected columns: select it too, or drop DISTINCT");
+                    diag.span =
+                        Some(Span::from_sqlparser(&item.expr.span())).filter(|s| s.line > 0);
+                    self.diagnostics.push(diag);
+                }
+            }
+            Some(sqlparser::ast::Distinct::On(on)) if self.dialect == SqlDialect::PostgreSQL => {
+                let Some(on_names) = on.iter().map(column_ref_name).collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                let mut covered: Vec<&String> = Vec::new();
+                for item in &order_by.exprs {
+                    if on_names.iter().all(|n| covered.contains(&n)) {
+                        break;
+                    }
+                    let Some(name) = column_ref_name(&item.expr) else {
+                        return;
+                    };
+                    if let Some(n) = on_names.iter().find(|n| **n == name) {
+                        covered.push(n);
+                        continue;
+                    }
+                    let mut diag = Diagnostic::error(
+                        DiagnosticKind::DistinctOrderBy,
+                        format!(
+                            "ORDER BY '{}' comes before all DISTINCT ON expressions",
+                            item.expr
+                        ),
+                    )
+                    .with_help(
+                        "Start ORDER BY with the DISTINCT ON expressions, then order by other columns",
+                    );
+                    diag.span =
+                        Some(Span::from_sqlparser(&item.expr.span())).filter(|s| s.line > 0);
+                    self.diagnostics.push(diag);
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Lowercase name of the column a plain column reference (`c`, `t.c`) names
+fn column_ref_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.to_lowercase()),
+        Expr::Nested(inner) => column_ref_name(inner),
+        _ => None,
+    }
+}
+
+/// Whether an expression is the DEFAULT keyword (which the parser represents as an
+/// identifier)
+fn is_default(expr: &Expr) -> bool {
+    matches!(expr, Expr::Identifier(ident)
+        if ident.quote_style.is_none() && ident.value.eq_ignore_ascii_case("DEFAULT"))
 }
 
 /// A name a FROM item introduces, with the table it names when it isn't aliased

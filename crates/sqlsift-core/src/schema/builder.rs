@@ -79,6 +79,7 @@ impl SchemaBuilder {
     pub(crate) fn changes_schema(stmt: &Statement) -> bool {
         match stmt {
             Statement::CreateTable(_)
+            | Statement::CreateIndex(_)
             | Statement::CreateType { .. }
             | Statement::CreateView { .. }
             | Statement::AlterTable { .. }
@@ -276,11 +277,21 @@ impl SchemaBuilder {
                 };
                 Some((kind, i + 1))
             });
-            match object {
-                Some((Some(kind), name_start)) => (kind, name_start),
-                _ => return,
-            }
+            let Some((Some(kind), name_start)) = object else {
+                // An unparsed `CREATE UNIQUE INDEX`: unique keys aren't all known
+                if words.iter().any(|w| w == "UNIQUE") {
+                    self.catalog.unknown_unique_keys = true;
+                }
+                return;
+            };
+            (kind, name_start)
         } else if word(0) == "ALTER" && word(1) == "TABLE" {
+            if words
+                .iter()
+                .any(|w| matches!(w.as_str(), "UNIQUE" | "PRIMARY" | "EXCLUDE"))
+            {
+                self.catalog.unknown_unique_keys = true;
+            }
             ("ALTER TABLE", 2)
         } else {
             return;
@@ -482,6 +493,8 @@ impl SchemaBuilder {
         let mut table = TableDef::new(name);
         table.columns.clone_from(&parent_table.columns);
         table.primary_key.clone_from(&parent_table.primary_key);
+        // A unique index of the parent is also an index of the partition
+        table.unknown_unique_keys = true;
         table
             .check_constraints
             .clone_from(&parent_table.check_constraints);
@@ -608,6 +621,7 @@ impl SchemaBuilder {
                     self.catalog.search_path = vec![self.catalog.ident_name(schema)];
                 }
             }
+            Statement::CreateIndex(index) if index.unique => self.process_unique_index(index),
             Statement::Drop {
                 object_type, names, ..
             } => {
@@ -627,6 +641,33 @@ impl SchemaBuilder {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Record `CREATE UNIQUE INDEX` as a unique key of its table. A partial or
+    /// expression index makes the table's unique keys unknown.
+    fn process_unique_index(&mut self, index: &sqlparser::ast::CreateIndex) {
+        let name = self.catalog.qualified_name(&index.table_name);
+        let columns: Option<Vec<String>> = index
+            .columns
+            .iter()
+            .map(|c| match &c.expr {
+                Expr::Identifier(ident) => Some(ident.value.clone()),
+                _ => None,
+            })
+            .collect();
+        let index_name = index.name.as_ref().map(ToString::to_string);
+        let Some(table) = self.catalog.get_table_mut(&name) else {
+            return;
+        };
+        match columns {
+            Some(columns) if index.predicate.is_none() => {
+                table.unique_constraints.push(UniqueConstraintDef {
+                    name: index_name,
+                    columns,
+                });
+            }
+            _ => table.unknown_unique_keys = true,
         }
     }
 
@@ -1181,6 +1222,14 @@ fn build_column(
                 };
                 col.identity = Some(kind);
                 col.nullable = false; // IDENTITY columns are implicitly NOT NULL
+            }
+            // Generated (computed) column: `GENERATED ALWAYS AS (expr) STORED`, MySQL
+            // and SQLite `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]`
+            ColumnOption::Generated {
+                generation_expr: Some(_),
+                ..
+            } => {
+                col.generated = true;
             }
             // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
             ColumnOption::DialectSpecific(tokens)

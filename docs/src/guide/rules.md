@@ -6,20 +6,23 @@ Every diagnostic comes from a rule. Each rule has a code (`E0002`), a name (`col
 
 ```console
 $ sqlsift rules
-CODE   NAME                     CATEGORY     DEFAULT  DESCRIPTION
-E0001  table-not-found          correctness  error    Referenced table does not exist in schema
-E0002  column-not-found         correctness  error    Referenced column does not exist in table
-E0003  type-mismatch            correctness  error    Type incompatibility in expression
-E0004  potential-null-violation correctness  error    Potential NOT NULL violation
-E0005  column-count-mismatch    correctness  error    INSERT column count doesn't match values
-E0006  ambiguous-column         correctness  error    Column reference is ambiguous across tables
-E0007  join-type-mismatch       correctness  error    JOIN condition compares incompatible types
-E0008  missing-required-column  correctness  error    INSERT omits a NOT NULL column without a default
-E0009  duplicate-name           correctness  error    Table alias or CTE name given twice in one query
-E0010  duplicate-target-column  correctness  error    Column given twice in an INSERT column list or UPDATE SET
-E0011  position-out-of-range    correctness  error    ORDER BY / GROUP BY position is not in the select list
-E0012  misplaced-aggregate      correctness  error    Aggregate or window function where it is not allowed
-E1000  parse-error              correctness  error    SQL could not be parsed
+CODE   NAME                      CATEGORY     DEFAULT  DESCRIPTION
+E0001  table-not-found           correctness  error    Referenced table does not exist in schema
+E0002  column-not-found          correctness  error    Referenced column does not exist in table
+E0003  type-mismatch             correctness  error    Type incompatibility in expression
+E0004  potential-null-violation  correctness  error    Potential NOT NULL violation
+E0005  column-count-mismatch     correctness  error    Column count doesn't match (INSERT, column aliases, subqueries)
+E0006  ambiguous-column          correctness  error    Column reference is ambiguous across tables
+E0007  join-type-mismatch        correctness  error    JOIN condition compares incompatible types
+E0008  missing-required-column   correctness  error    INSERT omits a NOT NULL column without a default
+E0009  duplicate-name            correctness  error    Table alias or CTE name given twice in one query
+E0010  duplicate-target-column   correctness  error    Column given twice in an INSERT column list or UPDATE SET
+E0011  position-out-of-range     correctness  error    ORDER BY / GROUP BY position is not in the select list
+E0012  misplaced-aggregate       correctness  error    Aggregate or window function where it is not allowed
+E0013  generated-column-write    correctness  error    INSERT or UPDATE gives a value to a generated column
+E0014  unmatched-conflict-target correctness  error    ON CONFLICT columns match no unique constraint
+E0015  distinct-order-by         correctness  error    SELECT DISTINCT ordered by a column it doesn't select
+E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
 Each rule has its own page with examples under [Rules](../rules/index.md).

@@ -46,6 +46,11 @@ pub struct Catalog {
     /// in the schema input (`project.dataset.table`)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub databases: Vec<String>,
+    /// A statement of the schema input that may define a unique index or
+    /// constraint could not be parsed, so the unique keys of tables are not fully
+    /// known
+    #[serde(default)]
+    pub unknown_unique_keys: bool,
 }
 
 /// A schema statement that could not be parsed and was skipped
@@ -80,6 +85,7 @@ impl Catalog {
             skipped_definitions: Vec::new(),
             dropped_relations: Vec::new(),
             databases: Vec::new(),
+            unknown_unique_keys: false,
         };
         // Create default schema
         catalog.schemas.insert(
@@ -610,6 +616,10 @@ pub struct TableDef {
     /// (for diagnostics on queries that still use the old names)
     #[serde(default)]
     pub former_columns: Vec<FormerColumn>,
+    /// The table may have unique indexes sqlsift doesn't know: partial or
+    /// expression unique indexes, or indexes a partition gets from its parent
+    #[serde(default)]
+    pub unknown_unique_keys: bool,
 }
 
 /// A column that ALTER TABLE renamed or dropped
@@ -631,6 +641,7 @@ impl TableDef {
             unique_constraints: Vec::new(),
             check_constraints: Vec::new(),
             former_columns: Vec::new(),
+            unknown_unique_keys: false,
         }
     }
 
@@ -713,6 +724,7 @@ impl TableDef {
 
 /// Column definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // independent facts about a column
 pub struct ColumnDef {
     pub name: String,
     pub data_type: SqlType,
@@ -723,6 +735,10 @@ pub struct ColumnDef {
     /// MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT: a value is generated when omitted
     #[serde(default)]
     pub auto_increment: bool,
+    /// A generated (computed) column, `GENERATED ALWAYS AS (expr)`: its value can't
+    /// be given by INSERT or UPDATE
+    #[serde(default)]
+    pub generated: bool,
 }
 
 impl ColumnDef {
@@ -735,6 +751,7 @@ impl ColumnDef {
             is_primary_key: false,
             identity: None,
             auto_increment: false,
+            generated: false,
         }
     }
 
