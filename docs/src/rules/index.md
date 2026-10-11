@@ -1,6 +1,6 @@
 # Rules
 
-Every rule has a code, a name and a category. Rules in the `correctness` category report queries the database rejects (or that fail at run time) and are errors by default; rules in the `suspicious` category report valid queries that almost certainly don't do what was meant, and are warnings by default. See [Rules and levels](../guide/rules.md) to change their levels and [Suppressing diagnostics](../guide/suppression.md) for exceptions.
+Every rule has a code, a name and a category. Rules in the `correctness` category report queries the database rejects (or that fail at run time) and are errors by default; rules in the `suspicious` category report valid queries that almost certainly don't do what was meant, and are warnings by default. Rules in the `restriction` category ban constructs some codebases don't want and are off until you enable them. See [Rules and levels](../guide/rules.md) to change their levels and [Suppressing diagnostics](../guide/suppression.md) for exceptions.
 
 The `E` in a rule code is sqlsift's prefix, not a severity: a rule's level comes from its category and your configuration, so a warning can carry an `E` code too. Codes are assigned in order as rules are added and never change or get reused, so they are safe to keep in config files, suppression comments and baselines. Names are easier to read in config and comments; codes are shorter.
 
@@ -51,4 +51,7 @@ CREATE TABLE coupons (
 | [E0021](E0021.md) | `missing-join-condition` | Tables in FROM with no condition linking them |
 | [E0022](E0022.md) | `constant-condition` | Condition that is always or never true from the schema |
 | [E0023](E0023.md) | `outer-join-filtered` | WHERE condition turns an outer join into an inner join |
+| [E0024](E0024.md) | `unfiltered-write` | UPDATE or DELETE without WHERE |
+| [E0025](E0025.md) | `insert-without-columns` | INSERT without a column list |
+| [E0026](E0026.md) | `select-star` | SELECT * in a query's result columns |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

@@ -196,6 +196,12 @@ pub enum DiagnosticKind {
     ConstantCondition,
     /// E0023: WHERE condition that turns an outer join into an inner join
     OuterJoinFiltered,
+    /// E0024: UPDATE or DELETE without WHERE
+    UnfilteredWrite,
+    /// E0025: INSERT without a column list
+    InsertWithoutColumns,
+    /// E0026: SELECT * in a statement's result
+    SelectStar,
     /// Parse error
     ParseError,
 }

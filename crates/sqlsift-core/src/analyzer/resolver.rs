@@ -56,6 +56,8 @@ pub(super) struct Resolver<'a> {
     pub(super) row_subqueries: Vec<usize>,
     /// The SELECT of the `IN` subquery being resolved (E0019, E0020)
     pub(super) in_subquery: Option<InSubquery>,
+    /// Whether a restriction rule (off by default) is enabled
+    pub(super) restrictions: bool,
 }
 
 impl<'a> Resolver<'a> {
@@ -73,6 +75,7 @@ impl<'a> Resolver<'a> {
             templated_statement: false,
             row_subqueries: Vec::new(),
             in_subquery: None,
+            restrictions: false,
         }
     }
 
@@ -100,6 +103,9 @@ impl<'a> Resolver<'a> {
     /// Resolve a statement. Returns its output columns (the result of a query, or
     /// the RETURNING list of INSERT/UPDATE/DELETE) if they can be determined.
     pub(super) fn statement(&mut self, stmt: &Statement) -> Option<Vec<Column>> {
+        if self.restrictions {
+            self.check_restrictions(stmt);
+        }
         match stmt {
             Statement::Query(query) => self.query(query, false),
             Statement::Insert(insert) => {

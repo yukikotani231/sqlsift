@@ -310,6 +310,27 @@ pub const RULES: &[Rule] = &[
         summary: "WHERE condition turns an outer join into an inner join",
     },
     Rule {
+        kind: DiagnosticKind::UnfilteredWrite,
+        code: "E0024",
+        name: "unfiltered-write",
+        category: RuleCategory::Restriction,
+        summary: "UPDATE or DELETE without WHERE",
+    },
+    Rule {
+        kind: DiagnosticKind::InsertWithoutColumns,
+        code: "E0025",
+        name: "insert-without-columns",
+        category: RuleCategory::Restriction,
+        summary: "INSERT without a column list",
+    },
+    Rule {
+        kind: DiagnosticKind::SelectStar,
+        code: "E0026",
+        name: "select-star",
+        category: RuleCategory::Restriction,
+        summary: "SELECT * in a query's result columns",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

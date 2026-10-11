@@ -30,6 +30,9 @@ E0020  outer-column-in-subquery  suspicious   warn     IN subquery selects a col
 E0021  missing-join-condition    suspicious   warn     Tables in FROM with no condition linking them
 E0022  constant-condition        suspicious   warn     Condition that is always or never true from the schema
 E0023  outer-join-filtered       suspicious   warn     WHERE condition turns an outer join into an inner join
+E0024  unfiltered-write          restriction  off      UPDATE or DELETE without WHERE
+E0025  insert-without-columns    restriction  off      INSERT without a column list
+E0026  select-star               restriction  off      SELECT * in a query's result columns
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 
@@ -55,7 +58,7 @@ Like [oxlint](https://oxc.rs/docs/guide/usage/linter.html), every rule belongs t
 | `style` | off | Conventions and readability |
 | `restriction` | off | Bans on features some codebases don't want |
 
-Current rules are in `correctness` (errors) and `suspicious` (warnings), as `sqlsift rules` shows above.
+Current rules are in `correctness` (errors), `suspicious` (warnings) and `restriction` (off), as `sqlsift rules` shows above.
 
 ## Changing levels
 

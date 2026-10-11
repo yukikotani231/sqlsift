@@ -5,6 +5,7 @@ mod comment_directives;
 mod grouping;
 mod ranges;
 mod resolver;
+mod restriction;
 mod scope;
 mod snowflake;
 mod structure;
@@ -298,6 +299,13 @@ impl<'a> Analyzer<'a> {
                 .map_or(self.catalog, SchemaBuilder::catalog);
 
             // Name resolution and type checking in one walk over the statement
+            let restrictions = [
+                DiagnosticKind::UnfilteredWrite,
+                DiagnosticKind::InsertWithoutColumns,
+                DiagnosticKind::SelectStar,
+            ]
+            .into_iter()
+            .any(|kind| self.rules.level(kind) != crate::rules::RuleLevel::Off);
             let templated_name = |span: &Span| {
                 let mut span = *span;
                 origin.shift(&mut span);
@@ -313,6 +321,7 @@ impl<'a> Analyzer<'a> {
                 .with_variables(&variables)
                 .with_templated_names(&templated_name);
             resolver.templated_statement = templated;
+            resolver.restrictions = restrictions;
             resolver.statement(stmt);
             if let Statement::Declare { stmts } = stmt {
                 variables.extend(

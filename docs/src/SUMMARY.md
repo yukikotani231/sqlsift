@@ -51,6 +51,9 @@
   - [E0021 missing-join-condition](rules/E0021.md)
   - [E0022 constant-condition](rules/E0022.md)
   - [E0023 outer-join-filtered](rules/E0023.md)
+  - [E0024 unfiltered-write](rules/E0024.md)
+  - [E0025 insert-without-columns](rules/E0025.md)
+  - [E0026 select-star](rules/E0026.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

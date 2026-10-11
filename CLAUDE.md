@@ -250,6 +250,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0015**: SELECT DISTINCT ordered by an unselected column (and DISTINCT ON vs ORDER BY)
 - **E0016**: Grouping error (column neither grouped nor aggregated; PostgreSQL/Redshift, with primary-key functional dependency)
 - **E0018**-**E0023** (suspicious, warnings): comparison with NULL, NOT IN over a nullable column, IN subquery selecting an outer column, comma-joined tables with no join condition, IS NULL on a NOT NULL column / self-comparison, WHERE undoing an outer join (`analyzer/suspicious.rs`)
+- **E0024**-**E0026** (restriction, off by default): UPDATE/DELETE without WHERE, INSERT without column list, SELECT * (`analyzer/restriction.rs`; only run when enabled)
 - **E0017**: Value out of range (literal too long / out of range for the column in INSERT VALUES / UPDATE SET; PostgreSQL, Redshift, MySQL)
 - **E1000**: Generic parse error
 
