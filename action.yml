@@ -42,6 +42,10 @@ inputs:
     description: "Report only the diagnostics that are new compared with this git ref (branch, tag or commit), e.g. the `github.base_ref` context on pull requests. Diagnostics that already occur at that ref are hidden. Empty (the default, and what `github.base_ref` is outside pull requests): report every diagnostic."
     required: false
     default: ""
+  mode:
+    description: "`check` (the default) checks the query files. `impact` shows what the schema files changed since `diff-base` (migrations) break or fix in the query files, which stay as they are: only the diagnostics that differ are reported, and only query files that use a changed table or view are checked. `impact` needs `diff-base`."
+    required: false
+    default: "check"
   version:
     description: "sqlsift-cli version to run from npm."
     required: false
@@ -73,6 +77,7 @@ runs:
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_CLI_PATH: ${{ inputs.cli-path }}
         INPUT_DIFF_BASE: ${{ inputs.diff-base }}
+        INPUT_MODE: ${{ inputs.mode }}
         MATCHER: ${{ github.action_path }}/.github/sqlsift-problem-matcher.json
       run: |
         set -o pipefail
@@ -87,9 +92,23 @@ runs:
           cli=(npx --yes "sqlsift-cli@${INPUT_VERSION}")
         fi
 
+        case "$INPUT_MODE" in
+          check | impact) ;;
+          *)
+            echo "::error::sqlsift: mode must be check or impact, not '${INPUT_MODE}'"
+            echo "exit-code=2" >> "$GITHUB_OUTPUT"
+            exit 2
+            ;;
+        esac
+        if [[ "$INPUT_MODE" == "impact" && -z "$INPUT_DIFF_BASE" ]]; then
+          echo "::error::sqlsift: mode impact needs diff-base (e.g. the github.base_ref context on pull requests)"
+          echo "exit-code=2" >> "$GITHUB_OUTPUT"
+          exit 2
+        fi
+
         # Inputs are passed through the environment and split into words here, so
         # they are never interpreted as shell code. Globs are expanded by sqlsift.
-        args=(check)
+        args=("$INPUT_MODE")
         read -ra patterns <<< "$INPUT_SCHEMA"
         for p in "${patterns[@]}"; do args+=(--schema "$p"); done
         [[ -n "$INPUT_SCHEMA_DIR" ]] && args+=(--schema-dir "$INPUT_SCHEMA_DIR")
@@ -98,25 +117,18 @@ runs:
         read -ra rules <<< "$INPUT_DISABLE"
         for r in "${rules[@]}"; do args+=(--disable "$r"); done
         read -ra files <<< "$INPUT_FILES"
+        if [[ "$INPUT_MODE" == "impact" ]]; then
+          # impact takes the query files as --queries
+          queries=()
+          for f in "${files[@]}"; do queries+=(--queries "$f"); done
+          files=("${queries[@]}")
+        fi
 
-        # diff-base: check the base commit in a temporary worktree, record its
-        # diagnostics in a temporary baseline, then check this commit against
-        # it, so that only the diagnostics this change introduces are reported.
-        # On a pull_request checkout HEAD is the merge commit, so comparing it
-        # with the base branch tip shows what merging the PR would add. Only the
-        # base repository is fetched, so fork PRs need no extra token.
+        # The diff-base commit. On a pull_request checkout HEAD is the merge
+        # commit, so comparing it with the base branch tip shows what merging the
+        # PR would change. Only the base repository is fetched, so fork PRs need
+        # no extra token.
         if [[ -n "$INPUT_DIFF_BASE" ]]; then
-          base_tree="${RUNNER_TEMP:-/tmp}/sqlsift-diff-base-$$"
-          # A baseline names files relative to its own directory, so it is
-          # written in the base worktree's copy of the current directory and
-          # read from the current directory
-          baseline_name=".sqlsift-diff-baseline-$$.json"
-          prefix=$(git rev-parse --show-prefix)
-          cleanup() {
-            rm -f "$baseline_name"
-            git worktree remove --force "$base_tree" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
           # (a shallow checkout, the actions/checkout default, stays shallow; a
           # full one is not made shallow)
           depth=""
@@ -136,6 +148,35 @@ runs:
             echo "exit-code=2" >> "$GITHUB_OUTPUT"
             exit 2
           fi
+        fi
+
+        # impact: the schema files changed since the base commit are the
+        # migrations whose effect is shown
+        if [[ "$INPUT_MODE" == "impact" ]]; then
+          echo "Showing the impact of the schema files changed since ${INPUT_DIFF_BASE} (${base_commit:0:12})"
+          args+=(--base "$base_commit")
+          limit=()
+        else
+          # (impact reports every difference)
+          limit=(--max-errors 0)
+        fi
+
+        # check with diff-base: check the base commit in a temporary worktree,
+        # record its diagnostics in a temporary baseline, then check this commit
+        # against it, so that only the diagnostics this change introduces are
+        # reported
+        if [[ "$INPUT_MODE" == "check" && -n "$INPUT_DIFF_BASE" ]]; then
+          base_tree="${RUNNER_TEMP:-/tmp}/sqlsift-diff-base-$$"
+          # A baseline names files relative to its own directory, so it is
+          # written in the base worktree's copy of the current directory and
+          # read from the current directory
+          baseline_name=".sqlsift-diff-baseline-$$.json"
+          prefix=$(git rev-parse --show-prefix)
+          cleanup() {
+            rm -f "$baseline_name"
+            git worktree remove --force "$base_tree" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
           git worktree add --quiet --detach "$base_tree" "$base_commit"
           echo "Comparing with ${INPUT_DIFF_BASE} (${base_commit:0:12}): only new diagnostics are reported"
           set +e
@@ -158,8 +199,8 @@ runs:
         set +e
         # (in diff-base mode the note about baseline entries that no longer occur
         # only means problems were fixed, so it is left out)
-        NO_COLOR=1 "${cli[@]}" "${args[@]}" --max-errors 0 "${files[@]}" 2>&1 | {
-          if [[ -n "$INPUT_DIFF_BASE" ]]; then grep -v '^Note: .*baseline entr' || true; else cat; fi
+        NO_COLOR=1 "${cli[@]}" "${args[@]}" "${limit[@]}" "${files[@]}" 2>&1 | {
+          if [[ "$INPUT_MODE" == "check" && -n "$INPUT_DIFF_BASE" ]]; then grep -v '^Note: .*baseline entr' || true; else cat; fi
         }
         code=${PIPESTATUS[0]}
         set -e
@@ -167,7 +208,7 @@ runs:
 
         if [[ -n "$INPUT_SARIF_FILE" ]]; then
           # (diagnostics were already printed above)
-          "${cli[@]}" "${args[@]}" --max-errors 0 --format sarif "${files[@]}" > "$INPUT_SARIF_FILE" 2>/dev/null || true
+          "${cli[@]}" "${args[@]}" "${limit[@]}" --format sarif "${files[@]}" > "$INPUT_SARIF_FILE" 2>/dev/null || true
         fi
 
         echo "exit-code=${code}" >> "$GITHUB_OUTPUT"

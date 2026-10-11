@@ -90,6 +90,18 @@ jobs:
           sarif-file: diff.sarif
           fail-on-error: "false"
 
+      - name: "impact: what the new migration breaks is reported"
+        id: impact
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          mode: impact
+          schema-dir: tests/fixtures/action-diff/db
+          files: tests/fixtures/action-diff/queries/*.sql
+          diff-base: ${{ steps.base.outputs.sha }}
+          sarif-file: impact.sarif
+          fail-on-error: "false"
+
       - name: "Without diff-base every problem is reported"
         id: full
         uses: ./
@@ -105,12 +117,15 @@ jobs:
         run: |
           test "${{ steps.diff.outputs.exit-code }}" = "1"
           test "${{ steps.full.outputs.exit-code }}" = "1"
+          test "${{ steps.impact.outputs.exit-code }}" = "1"
           python3 - <<'EOF'
           import json
           diff = json.load(open('diff.sarif'))['runs'][0]['results']
           full = json.load(open('full.sarif'))['runs'][0]['results']
           assert len(diff) == 1 and "'email'" in diff[0]['message']['text'], diff
           assert len(full) == 2, full
+          impact = json.load(open('impact.sarif'))['runs'][0]['results']
+          assert len(impact) == 1 and "'email'" in impact[0]['message']['text'], impact
           EOF
           # The temporary worktree and baseline are cleaned up
           test "$(git worktree list | wc -l)" -eq 1

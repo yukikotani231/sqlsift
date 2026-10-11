@@ -29,6 +29,7 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 | `sarif-file` | Also write a SARIF report (see below) |
 | `fail-on-error` | Fail the step on errors (default `true`) |
 | `diff-base` | Report only diagnostics that are new compared with this branch, tag or commit, e.g. `${{ github.base_ref }}` (see [below](#report-only-what-a-pull-request-introduces)) |
+| `mode` | `check` (default), or `impact` to report what the migrations changed since `diff-base` break or fix (see [below](#show-what-a-migration-breaks)) |
 | `version` | `sqlsift-cli` version from npm (default `latest`) |
 | `cli-path` | Use an existing `sqlsift` binary instead of installing from npm |
 
@@ -69,6 +70,22 @@ How it works: the action fetches the base (one commit, from the repository the w
 - The base is checked with its own `sqlsift.toml` and the same inputs, run from the same directory. If it can't be checked at all (no `sqlsift.toml` or no query files there yet, a schema file named in `schema` that the pull request adds), the action prints a warning and reports every diagnostic. Prefer a glob or `schema-dir` for schema files, so that a new migration file doesn't make the base check fail.
 - Diagnostics are matched by file, rule and statement, so a renamed query file's existing problems are reported as new.
 - A committed baseline (`baseline` in `sqlsift.toml`) is not used in this mode: everything the base already reports is hidden anyway.
+
+## Show what a migration breaks
+
+For a pull request that changes the schema (adds a migration), `mode: impact` runs [`sqlsift impact`](../reference/cli.md#sqlsift-impact): the query files stay as they are, the schema is built without and with the schema files changed since `diff-base`, and only the diagnostics that differ are reported. Only query files that use a changed table or view are checked.
+
+```yaml
+      - uses: yukikotani231/sqlsift@main
+        if: github.event_name == 'pull_request'
+        with:
+          mode: impact
+          schema-dir: db/migrations
+          files: queries/**/*.sql
+          diff-base: ${{ github.base_ref }}
+```
+
+The queries a migration breaks are annotated on the pull request and fail the step; the summary in the log also lists the changed tables and the problems the migration fixes. `mode: impact` needs `diff-base`. It differs from `diff-base` alone in what is compared: `diff-base` compares the whole pull request (queries and schema) with its base, `impact` shows the effect of the schema change on the queries as they are now.
 
 ## Rolling out a rule gradually
 

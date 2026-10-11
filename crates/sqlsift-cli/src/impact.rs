@@ -96,10 +96,14 @@ fn git(args: &[&str]) -> Result<String> {
 }
 
 /// The schema files added or changed since the merge base of `base` and
-/// `HEAD`, in schema file order: committed, uncommitted and untracked changes
+/// `HEAD` (`base` itself when git can't find one), in schema file order:
+/// committed, uncommitted and untracked changes
 fn changed_schema_files(base: &str, schema_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?.trim_end());
-    let merge_base = git(&["merge-base", base, "HEAD"])?;
+    // A shallow checkout (CI) may not have the history to find the merge
+    // base: compare with the revision itself then (on a pull request's merge
+    // commit, the base branch tip is the merge base anyway)
+    let merge_base = git(&["merge-base", base, "HEAD"]).unwrap_or_else(|_| base.to_string());
     let diff = git(&[
         "diff",
         "--name-only",
