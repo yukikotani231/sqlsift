@@ -15,12 +15,14 @@ use std::collections::HashMap;
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
-use crate::schema::{Catalog, ColumnDef, FormerColumn, QualifiedName, TableDef};
+use crate::schema::{
+    split_dotted_idents, Catalog, ColumnDef, FormerColumn, QualifiedName, TableDef,
+};
 use crate::suggest::{find_most_similar, find_similar_name};
 
 use super::scope::{
-    lookup_ignore_case, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType, Relation,
-    RelationKind, Scope, UNNAMED_COLUMN,
+    lookup_ignore_case, split_column_ref, Column, ColumnLookup, ColumnMatch, Cte, ExpressionType,
+    Relation, RelationKind, Scope, UNNAMED_COLUMN,
 };
 
 /// Resolves names and checks types in SQL statements
@@ -433,8 +435,10 @@ impl<'a> Resolver<'a> {
             match &assignment.target {
                 AssignmentTarget::ColumnName(col_name) if col_name.0.len() >= 2 => {
                     // `SET alias.col = ...` (MySQL multi-table UPDATE)
-                    let n = col_name.0.len();
-                    self.column(Some(&col_name.0[n - 2]), &col_name.0[n - 1]);
+                    let parts = split_dotted_idents(&col_name.0);
+                    if let Some((schema, table, column)) = split_column_ref(&parts) {
+                        self.column(Some((schema, table)), column);
+                    }
                 }
                 AssignmentTarget::ColumnName(col_name) if !table.joins.is_empty() => {
                     // Unqualified target in a multi-table UPDATE: any joined table
@@ -755,8 +759,12 @@ impl<'a> Resolver<'a> {
                     }
                 }
                 SelectItem::QualifiedWildcard(name, _) => {
-                    let qualifier = name.0.last()?;
-                    let relation = lookup_ignore_case(&frame.relations, &qualifier.value)?;
+                    let parts = split_dotted_idents(&name.0);
+                    let [.., table] = parts.as_ref() else {
+                        return None;
+                    };
+                    let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
+                    let relation = frame.qualified_relation(self.catalog, schema, table)?;
                     columns.extend(relation.columns.clone()?);
                 }
             }
@@ -881,7 +889,8 @@ impl<'a> Resolver<'a> {
                     return;
                 }
 
-                let key = alias_name.unwrap_or_else(|| table_name.name.clone());
+                let aliased = alias_name.is_some();
+                let mut key = alias_name.unwrap_or_else(|| table_name.name.clone());
                 let cte = table_name
                     .schema
                     .is_none()
@@ -904,6 +913,19 @@ impl<'a> Resolver<'a> {
                     Relation::new(RelationKind::Opaque, table_name.to_string(), None)
                 };
                 relation.columns = Relation::rename_columns(relation.columns, &alias_columns);
+                if aliased {
+                    // The alias hides the table name
+                    relation.qualified = None;
+                } else if let Some(qualified) = &relation.qualified {
+                    // `FROM auth.users JOIN public.users`: both are `users`, told apart
+                    // by their schema-qualified names
+                    let other_schema = lookup_ignore_case(&self.scope.current().relations, &key)
+                        .and_then(|r| r.qualified.as_ref())
+                        .is_some_and(|q| q != qualified);
+                    if other_schema {
+                        key = qualified.to_string();
+                    }
+                }
                 self.scope.current().relations.insert(key, relation);
             }
             TableFactor::Derived {
@@ -988,23 +1010,15 @@ impl<'a> Resolver<'a> {
                 self.expr(expr);
             }
             SelectItem::QualifiedWildcard(name, _) => {
-                // table.*
-                if let Some(ident) = name.0.last() {
-                    let in_scope = self
-                        .scope
-                        .current_ref()
-                        .is_some_and(|f| lookup_ignore_case(&f.relations, &ident.value).is_some());
+                // [[database.]schema.]table.*
+                let parts = split_dotted_idents(&name.0);
+                if let [.., table] = parts.as_ref() {
+                    let schema = parts.len().checked_sub(2).map(|i| &parts[i]);
+                    let in_scope = self.scope.current_ref().is_some_and(|f| {
+                        f.qualified_relation(self.catalog, schema, table).is_some()
+                    });
                     if !in_scope {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                DiagnosticKind::TableNotFound,
-                                format!(
-                                    "Table or alias '{}' not found in FROM clause",
-                                    ident.value
-                                ),
-                            )
-                            .with_span(Span::from_sqlparser(&ident.span)),
-                        );
+                        self.diagnostics.push(relation_not_in_from(schema, table));
                     }
                 }
             }
@@ -1039,11 +1053,13 @@ impl<'a> Resolver<'a> {
     pub(super) fn expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Identifier(ident) => self.column(None, ident),
-            Expr::CompoundIdentifier(idents) => match idents.as_slice() {
-                // table.column or schema.table.column
-                [table, column] | [_, table, column] => self.column(Some(table), column),
-                _ => {}
-            },
+            Expr::CompoundIdentifier(idents) => {
+                // [[database.]schema.]table.column
+                let parts = split_dotted_idents(idents);
+                if let Some((schema, table, column)) = split_column_ref(&parts) {
+                    self.column(Some((schema, table)), column);
+                }
+            }
             Expr::BinaryOp { .. } => {
                 // Binary operators are left-associative, so a long chain
                 // (`a = 1 OR a = 2 OR ...`) nests as deep as it is long: walk its
@@ -1295,24 +1311,19 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Resolve a column reference
-    fn column(&mut self, table_ident: Option<&Ident>, column_ident: &Ident) {
+    /// Resolve a column reference, qualified by `[schema.]table` or not
+    fn column(&mut self, qualifier: Option<(Option<&Ident>, &Ident)>, column_ident: &Ident) {
         let column_name = &column_ident.value;
         let column_span = Span::from_sqlparser(&column_ident.span);
 
-        // Qualified column reference (table.column)
-        if let Some(table_id) = table_ident {
-            let Some(relation) = self.scope.relation(&table_id.value) else {
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        DiagnosticKind::TableNotFound,
-                        format!(
-                            "Table or alias '{}' not found in FROM clause",
-                            table_id.value
-                        ),
-                    )
-                    .with_span(Span::from_sqlparser(&table_id.span)),
-                );
+        // Qualified column reference (table.column, schema.table.column)
+        if let Some((schema_id, table_id)) = qualifier {
+            let Some(relation) = self
+                .scope
+                .qualified_relation(self.catalog, schema_id, table_id)
+            else {
+                self.diagnostics
+                    .push(relation_not_in_from(schema_id, table_id));
                 return;
             };
             if !matches!(relation.column(column_name, self.dialect), ColumnMatch::No) {
@@ -1424,13 +1435,13 @@ impl<'a> Resolver<'a> {
     fn table_not_found(&self, table_name: &QualifiedName, span: Option<Span>) -> Diagnostic {
         let help = match (
             self.dropped_table_hint(table_name),
+            self.off_search_path_hint(table_name),
             self.skipped_definition_hint(table_name),
             self.similar_table(table_name),
         ) {
-            (Some(hint), _, _) => hint,
-            (None, Some(hint), _) => hint,
-            (None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
-            (None, None, None) => self.missing_table_hint(table_name),
+            (Some(hint), _, _, _) | (None, Some(hint), _, _) | (None, None, Some(hint), _) => hint,
+            (None, None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
+            (None, None, None, None) => self.missing_table_hint(table_name),
         };
         let mut diag = Diagnostic::error(
             DiagnosticKind::TableNotFound,
@@ -1479,6 +1490,18 @@ impl<'a> Resolver<'a> {
             .filter(|(shown, _)| !catalog.names_match(shown, &typed));
         find_most_similar(candidates, |(_, name)| name.as_str(), &table_name.name)
             .map(|(shown, _)| shown)
+    }
+
+    /// Why an unqualified table is missing when a schema off the search path has it
+    fn off_search_path_hint(&self, table_name: &QualifiedName) -> Option<String> {
+        if table_name.schema.is_some() {
+            return None;
+        }
+        let qualified = self.catalog.relation_off_search_path(&table_name.name)?;
+        let schema = qualified.schema.as_deref().unwrap_or_default();
+        Some(format!(
+            "Did you mean '{qualified}'? Schema '{schema}' is not on the search_path, so its tables must be schema-qualified"
+        ))
     }
 
     /// Why a table is missing when an earlier statement of the query file dropped it
@@ -1565,6 +1588,20 @@ impl<'a> Resolver<'a> {
 pub(super) fn is_comparison_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
     use sqlparser::ast::BinaryOperator::*;
     matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
+}
+
+/// E0001 for a `[schema.]table` qualifier (of a column or `table.*`) that names no
+/// relation of the FROM clause
+fn relation_not_in_from(schema: Option<&Ident>, table: &Ident) -> Diagnostic {
+    let name = match schema {
+        Some(schema) => format!("{}.{}", schema.value, table.value),
+        None => table.value.clone(),
+    };
+    Diagnostic::error(
+        DiagnosticKind::TableNotFound,
+        format!("Table or alias '{name}' not found in FROM clause"),
+    )
+    .with_span(Span::from_sqlparser(&table.span))
 }
 
 /// Whether an operator is AND / OR
