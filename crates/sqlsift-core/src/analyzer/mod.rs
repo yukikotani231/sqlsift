@@ -23,6 +23,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 use crate::mysql;
+use crate::named_queries;
 use crate::psql::{self, Preprocessed};
 use crate::rules::RuleConfig;
 use crate::schema::{mask_unsupported_clauses, unparsed_definition};
@@ -249,10 +250,14 @@ impl<'a> Analyzer<'a> {
             ),
             Templating::None => Template::unchanged(sql),
         };
+        // aiosql / HugSQL parameters (`:id`, `:v*:ids`, `:i:col`) become placeholders
+        let named = named_queries::mask(&template.masked.text, self.dialect);
+        let fragments: Vec<(usize, usize, bool)> =
+            fragments.iter().chain(&named.fragments).copied().collect();
         let source = match self.dialect {
-            dialect if dialect.is_psql() => psql::preprocess(&template.masked.text),
-            SqlDialect::MySQL => mysql::preprocess(&template.masked.text),
-            _ => Preprocessed::unchanged(&template.masked.text),
+            dialect if dialect.is_psql() => psql::preprocess(&named.text),
+            SqlDialect::MySQL => mysql::preprocess(&named.text),
+            _ => Preprocessed::unchanged(&named.text),
         };
         // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
         let text = sqlc::mask_parameters(&source.text, self.dialect);
@@ -268,7 +273,7 @@ impl<'a> Analyzer<'a> {
 
         // Parse inline disable directives from comments (`{# ... #}` comments too)
         let directives = InlineDirectives::parse(&template.directive_text());
-        // sqlc query names (`-- name: GetPost :one`)
+        // Query names (sqlc `-- name: GetPost :one`, aiosql, HugSQL)
         let query_names = QueryNames::parse(sql);
 
         // Parse the SQL
@@ -432,6 +437,7 @@ impl<'a> Analyzer<'a> {
         // byte lengths, never lines or character columns)
         let original_lines = (!std::ptr::eq(original, sql)
             || template.masked.text.len() != sql.len()
+            || named.text.len() != sql.len()
             || source.text.len() != sql.len()
             || rewritten.is_some())
         .then(|| LineIndex::new(original));
@@ -462,7 +468,8 @@ impl<'a> Analyzer<'a> {
                         | DiagnosticKind::AmbiguousColumn
                 ) && (source.is_substituted(span.line, span.column)
                     || template.masked.is_substituted(span.line, span.column)
-                    || psql::is_within(substituted, span.line, span.column))
+                    || psql::is_within(substituted, span.line, span.column)
+                    || psql::is_within(&named.identifiers, span.line, span.column))
                     || is_templated_alias(&d, &template)
                     || (d.kind == DiagnosticKind::TableNotFound
                         && template.may_be_templated_cte(span.line, span.column));

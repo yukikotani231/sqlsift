@@ -7,8 +7,9 @@
 //! SELECT * FROM posts WHERE id = $1;
 //! ```
 //!
-//! [`QueryNames`] finds these comments so that diagnostics can say which query they
-//! are in.
+//! [`QueryNames`] finds these comments, and the query name comments of aiosql and
+//! HugSQL files (`-- name: get-post^`, `-- :name get-post :? :1`, see
+//! [`crate::named_queries`]), so that diagnostics can say which query they are in.
 //!
 //! Queries may name their parameters with the sqlc macros `sqlc.arg(name)`,
 //! `sqlc.narg(name)` and `sqlc.slice(name)` (the name may be quoted), and with
@@ -26,16 +27,17 @@ use std::borrow::Cow;
 
 use crate::dialect::SqlDialect;
 
-/// The sqlc query names of a file, by the line of their `-- name:` comment
+/// The query names of a file (sqlc, aiosql, HugSQL), by the line of their name
+/// comment
 pub(crate) struct QueryNames<'a> {
     /// (1-indexed line, name), in line order
     names: Vec<(usize, &'a str)>,
 }
 
 impl<'a> QueryNames<'a> {
-    /// Find the `-- name: <Name> :<command>` comments in `sql`
+    /// Find the query name comments in `sql`
     pub fn parse(sql: &'a str) -> Self {
-        if !sql.contains("name:") {
+        if !sql.contains("name") && !sql.contains(":snip") {
             return Self { names: Vec::new() };
         }
         let names = sql
@@ -46,16 +48,22 @@ impl<'a> QueryNames<'a> {
         Self { names }
     }
 
-    /// Name of the query that `line` belongs to: the last `-- name:` comment at or
-    /// before it
+    /// Name of the query that `line` belongs to: the last name comment at or before
+    /// it
     pub fn at(&self, line: usize) -> Option<&'a str> {
         let index = self.names.partition_point(|&(l, _)| l <= line);
         index.checked_sub(1).map(|i| self.names[i].1)
     }
 }
 
-/// The query name of a `-- name: <Name> :<command>` line
+/// The query name of a sqlc (`-- name: <Name> :<command>`), aiosql or HugSQL name
+/// comment line
 fn query_name(line: &str) -> Option<&str> {
+    sqlc_query_name(line).or_else(|| crate::named_queries::header(line).map(|h| h.name))
+}
+
+/// The query name of a `-- name: <Name> :<command>` line
+fn sqlc_query_name(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("--")?.trim_start();
     let rest = rest.strip_prefix("name:")?;
     let mut words = rest.split_whitespace();
@@ -104,7 +112,7 @@ pub(crate) fn mask_parameters(sql: &str, dialect: SqlDialect) -> Cow<'_, str> {
                 i = skip_quoted(bytes, i, backslash);
             }
             b'$' if postgres && !prev(i).is_some_and(is_ident_byte) => {
-                i = skip_dollar_quoted(sql, i);
+                i = skip_dollar_quoted(bytes, i);
             }
             b'@' if postgres
                 && !prev(i).is_some_and(|p| is_ident_byte(p) || matches!(p, b'@' | b'<'))
@@ -149,7 +157,7 @@ pub(crate) fn mask_parameters(sql: &str, dialect: SqlDialect) -> Cow<'_, str> {
     }
 }
 
-fn is_ident_byte(b: u8) -> bool {
+pub(crate) fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
 }
 
@@ -196,7 +204,7 @@ fn mask(out: &mut [u8], start: usize, end: usize, placeholder: &[u8]) {
 }
 
 /// Index of the line break that ends the comment starting at `i` (or the end)
-fn skip_line(bytes: &[u8], i: usize) -> usize {
+pub(crate) fn skip_line(bytes: &[u8], i: usize) -> usize {
     bytes[i..]
         .iter()
         .position(|&c| c == b'\n')
@@ -204,7 +212,7 @@ fn skip_line(bytes: &[u8], i: usize) -> usize {
 }
 
 /// Index after the block comment starting at `i` (nested in PostgreSQL)
-fn skip_block_comment(bytes: &[u8], mut i: usize, nested: bool) -> usize {
+pub(crate) fn skip_block_comment(bytes: &[u8], mut i: usize, nested: bool) -> usize {
     i += 2;
     let mut depth = 1;
     while i < bytes.len() {
@@ -226,7 +234,7 @@ fn skip_block_comment(bytes: &[u8], mut i: usize, nested: bool) -> usize {
 
 /// Index after the quoted string or identifier starting at `i` (a doubled quote
 /// stands for itself)
-fn skip_quoted(bytes: &[u8], mut i: usize, backslash: bool) -> usize {
+pub(crate) fn skip_quoted(bytes: &[u8], mut i: usize, backslash: bool) -> usize {
     let quote = bytes[i];
     i += 1;
     while i < bytes.len() {
@@ -246,17 +254,17 @@ fn skip_quoted(bytes: &[u8], mut i: usize, backslash: bool) -> usize {
 
 /// Index after the dollar-quoted string (`$$...$$`, `$tag$...$tag$`) starting at `i`,
 /// or after the `$` when it doesn't start one (`$1`)
-fn skip_dollar_quoted(sql: &str, i: usize) -> usize {
-    let bytes = sql.as_bytes();
+pub(crate) fn skip_dollar_quoted(bytes: &[u8], i: usize) -> usize {
     let closing = i + 1 + word_len(&bytes[i + 1..]);
     if bytes.get(closing) != Some(&b'$') || bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
         return i + 1;
     }
-    let tag = &sql[i..=closing];
+    let tag = &bytes[i..=closing];
     let body = closing + 1;
-    sql[body..]
-        .find(tag)
-        .map_or(sql.len(), |p| body + p + tag.len())
+    bytes[body..]
+        .windows(tag.len())
+        .position(|w| w == tag)
+        .map_or(bytes.len(), |p| body + p + tag.len())
 }
 
 #[cfg(test)]
@@ -322,7 +330,10 @@ mod tests {
             query_name("-- name: CreatePosts :copyfrom extra"),
             Some("CreatePosts")
         );
-        assert_eq!(query_name("-- name: GetPost"), None);
+        assert_eq!(query_name("-- name: GetPost"), Some("GetPost"));
+        assert_eq!(query_name("-- name: get-post^"), Some("get-post"));
+        assert_eq!(query_name("-- :name get-post :? :1"), Some("get-post"));
+        assert_eq!(query_name("-- name: the user's name"), None);
         assert_eq!(query_name("-- name GetPost :one"), None);
         assert_eq!(query_name("SELECT 1 -- name: GetPost :one"), None);
     }

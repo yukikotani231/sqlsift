@@ -6,6 +6,7 @@ The repository's [`examples/`](https://github.com/yukikotani231/sqlsift/tree/mai
 |---|---|---|
 | [sqlc-go](https://github.com/yukikotani231/sqlsift/tree/main/examples/sqlc-go) | sqlc + golang-migrate, PostgreSQL | `schema_dir = "db/migrations"`, `files = ["db/query/**/*.sql"]` |
 | [prisma-typedsql](https://github.com/yukikotani231/sqlsift/tree/main/examples/prisma-typedsql) | Prisma Migrate + TypedSQL, `$queryRaw` | `schema_dir = "prisma/migrations"`, `files = ["prisma/sql/*.sql", "src/**/*.ts"]`, `embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]` |
+| [aiosql](https://github.com/yukikotani231/sqlsift/tree/main/examples/aiosql) | aiosql (Python) + yoyo-migrations, PostgreSQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
 | [postgres-js](https://github.com/yukikotani231/sqlsift/tree/main/examples/postgres-js) | postgres.js tagged templates + dbmate | `schema_dir = "db/migrations"`, `files = ["src/**/*.ts"]` |
 | [postgres-migrations](https://github.com/yukikotani231/sqlsift/tree/main/examples/postgres-migrations) | Plain SQL + migrations, PostgreSQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]` |
 | [mysql](https://github.com/yukikotani231/sqlsift/tree/main/examples/mysql) | Flyway-style migrations, MySQL | `schema_dir = "migrations"`, `files = ["queries/**/*.sql"]`, `dialect = "mysql"` |

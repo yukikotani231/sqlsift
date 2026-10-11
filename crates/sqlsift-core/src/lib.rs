@@ -14,6 +14,7 @@ pub mod embedded;
 pub mod error;
 pub mod ignore;
 mod mysql;
+mod named_queries;
 mod psql;
 pub mod rules;
 pub mod schema;

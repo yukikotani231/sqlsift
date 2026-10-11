@@ -181,6 +181,70 @@ fn parse_errors_get_the_query_name() {
     assert_eq!(diagnostics[0].query_name.as_deref(), Some("Broken"));
 }
 
+// aiosql and HugSQL query files (#158)
+
+fn analyze_with(sql: &str, dialect: SqlDialect) -> Vec<Diagnostic> {
+    Analyzer::with_dialect(&catalog(), dialect).analyze(sql)
+}
+
+#[test]
+fn aiosql_query_names_are_attached_to_diagnostics() {
+    let sql = include_str!("../../../tests/fixtures/embedded/aiosql.sql");
+    for dialect in [
+        SqlDialect::PostgreSQL,
+        SqlDialect::MySQL,
+        SqlDialect::SQLite,
+    ] {
+        assert_eq!(
+            summary(&analyze_with(sql, dialect)),
+            vec![
+                (
+                    DiagnosticKind::ColumnNotFound,
+                    3,
+                    12,
+                    Some("get-author-by-id")
+                ),
+                (DiagnosticKind::ColumnNotFound, 12, 54, Some("publish_post")),
+            ],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn hugsql_query_names_and_parameters() {
+    let sql = include_str!("../../../tests/fixtures/embedded/hugsql.sql");
+    for dialect in [
+        SqlDialect::PostgreSQL,
+        SqlDialect::MySQL,
+        SqlDialect::SQLite,
+    ] {
+        assert_eq!(
+            summary(&analyze_with(sql, dialect)),
+            vec![
+                (DiagnosticKind::ColumnNotFound, 3, 12, Some("get-author")),
+                (DiagnosticKind::ColumnNotFound, 34, 18, Some("update-title")),
+            ],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn aiosql_queries_need_no_semicolons() {
+    let sql = "-- name: a\nselect id from authors\n\n-- name: b^\nselect nme from authors where id = :id\n";
+    assert_eq!(
+        summary(&analyze(sql)),
+        vec![(DiagnosticKind::ColumnNotFound, 5, 8, Some("b"))]
+    );
+}
+
+#[test]
+fn hugsql_identifier_parameters_are_unknown_names() {
+    let sql = "-- :name q :? :*\nselect u.:i:col from :i:tbl u join posts p on p.id = u.:i:fk";
+    assert!(analyze(sql).is_empty());
+}
+
 // postgres.js, kysely, Prisma and Slonik patterns (#121)
 
 #[test]

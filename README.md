@@ -151,11 +151,12 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 | **sqlx / golang-migrate / goose / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+| **aiosql / HugSQL** (named queries in `.sql` files) | `sqlsift check --schema-dir migrations queries/*.sql` (`:param` placeholders; diagnostics name the `-- name:` / `-- :name` query) |
 | **dbt** (Postgres, MySQL, SQLite) | `sqlsift check --schema sources.sql models/**/*.sql` (Jinja is masked automatically next to `dbt_project.yml`; after `dbt docs generate`, `ref()` / `source()` columns come from `target/catalog.json` and `--schema` is optional — alpha) |
 
 Rollback migrations are skipped automatically; see [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html).
 
-**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [postgres.js](examples/postgres-js), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
+**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [aiosql (Python)](examples/aiosql), [postgres.js](examples/postgres-js), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
 
 ## Editor Integration
 
@@ -220,7 +221,7 @@ Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sql
 
 The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
-- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc query files with named parameters, and SQL in TypeScript tagged templates)
+- [Loading your schema](https://yukikotani231.github.io/sqlsift/docs/guide/schema.html) and [checking queries](https://yukikotani231.github.io/sqlsift/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc, aiosql and HugSQL query files with named parameters, and SQL in TypeScript tagged templates)
 - [Dialects and SQL support](https://yukikotani231.github.io/sqlsift/docs/guide/sql-support.html), including what type checking covers
 - [Command line](https://yukikotani231.github.io/sqlsift/docs/reference/cli.html), [configuration file](https://yukikotani231.github.io/sqlsift/docs/reference/config.html) and [output formats](https://yukikotani231.github.io/sqlsift/docs/reference/output-formats.html) reference
 - [Troubleshooting](https://yukikotani231.github.io/sqlsift/docs/guide/troubleshooting.html)
@@ -238,7 +239,7 @@ The [user guide](https://yukikotani231.github.io/sqlsift/docs/) covers:
 
 - [x] Per-rule and per-category levels (`off` / `warn` / `error`)
 - [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
-- [x] SQL embedded in application code (sqlc query names and parameters, TypeScript tagged templates)
+- [x] SQL embedded in application code (sqlc, aiosql and HugSQL query names and parameters, TypeScript tagged templates)
 
 #### Planned
 See [ROADMAP.md](ROADMAP.md) for what comes next.

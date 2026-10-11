@@ -178,6 +178,43 @@ SELECT id, title FROM posts WHERE id IN (sqlc.slice(ids));
 - `@name` is a placeholder with the PostgreSQL dialect only. PostgreSQL's `@` operators are left alone: `@>`, `<@`, `@@`, and `@` followed by a space (absolute value). With MySQL, `@name` stays a user variable (`SET @x = 1`), and with SQLite a bind parameter; sqlc supports `@name` for neither, so use `sqlc.arg(name)` there.
 - Parameters in string literals, quoted identifiers and comments are left alone.
 
+## aiosql and HugSQL query files
+
+[aiosql](https://nackjicholson.github.io/aiosql/) (Python) and [HugSQL](https://www.hugsql.org) (Clojure) load named queries from `.sql` files. They are checked as they are, and diagnostics name the query they are in, as for sqlc:
+
+```sql
+-- name: get-user-by-id^
+select id, nmae from users where id = :id;
+```
+
+```text
+error[E0002]: Column 'nmae' not found in table 'users'
+  --> queries/users.sql:2:12
+    |
+  2 | select id, nmae from users where id = :id;
+    |            ^^^^
+    = note: in query 'get-user-by-id'
+    = help: Did you mean 'name'?
+```
+
+The name comments are recognised in every dialect:
+
+- aiosql: `-- name: <name>` with an optional parameter list and operation suffix: `-- name: get-user-by-id^`, `-- name: list_posts(author)`, and `$`, `!`, `<!`, `*!`, `#`. The name is shown as written (`get-user-by-id`, not the Python method name `get_user_by_id`).
+- HugSQL: `-- :name <name> :<command> :<result>` (`-- :name get-user :? :1`), `-- :name-` and `-- :snip <name>`.
+
+A name comment starts a new statement, so queries need not end with `;`. In a file with such comments, parameters are untyped placeholders, like `$1`:
+
+| Parameter | Becomes |
+|---|---|
+| aiosql `:id`, `:user.id`; HugSQL `:id`, `:user-id`, `:v:id`, `:v*:ids`, `:t:pair` | a placeholder (`($1)` right after `IN`) |
+| HugSQL `VALUES :t*:rows` | rows of unknown columns, so the column count isn't checked |
+| HugSQL `:i:col`, `:i*:cols`, `:identifier:tbl` | a name sqlsift doesn't know: it is never reported, and columns that may come from it aren't either |
+| HugSQL `:sql:x`, `:snip:x`, `:snip*:x`, `:frag:x` | nothing; the query may have clauses and relations its text doesn't show, so names it can't resolve aren't reported |
+
+HugSQL snippet bodies (after `-- :snip`) and queries with a Clojure expression (`--~ ...` or `/*~ ... ~*/`) are skipped: their SQL is only known at run time. `::` casts (`:id::int`), `:=`, array slices (`a[i:j]`) and anything in string literals, quoted identifiers and comments are left alone. Without name comments, `:name` is a psql variable with the PostgreSQL dialect (see [psql scripts](#psql-scripts)) and a bind parameter with MySQL and SQLite.
+
+The [aiosql example](https://github.com/yukikotani231/sqlsift/tree/main/examples/aiosql) is a complete project.
+
 ## SQL in TypeScript and JavaScript
 
 Files ending in `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs` or `.cjs` are checked for SQL in tagged template literals, as used by postgres.js, Slonik, kysely, `@vercel/postgres`, Prisma and others. In Vue (`.vue`) and Svelte (`.svelte`) components, the `<script>` blocks are checked the same way:

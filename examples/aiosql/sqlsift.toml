@@ -1,0 +1,6 @@
+# yoyo-migrations are applied in file name order; every aiosql query file is
+# checked (`:name` parameters are placeholders, and diagnostics name the
+# `-- name:` query they are in).
+schema_dir = "migrations"
+files = ["queries/**/*.sql"]
+dialect = "postgresql"
