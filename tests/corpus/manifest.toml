@@ -1,0 +1,342 @@
+# Real-world SQL corpus for sqlsift (dbt projects and warehouse dialects).
+#
+# Nothing here is vendored: `fetch.py` clones each project with `git clone --depth 1`
+# into `tests/corpus/repos/` (git-ignored) and records the checked-out commit in
+# `tests/corpus/out/lock.json`. See README.md for the workflow.
+#
+# [[project]] fields:
+#   name        short id (directory name under repos/)
+#   url         git URL
+#   sha         commit the last report was produced from (fetch.py warns when HEAD moved)
+#   license     SPDX id of the project's license ("none" = no license file; the project
+#               is only read, never vendored)
+#   kind        "dbt" (Jinja models: --templating jinja) or "sql" (plain SQL files)
+#   dialects    dialects the files are checked with. dbt packages that support several
+#               warehouses (dispatch macros) are checked with each of them
+#   root        directory of the project inside the repo (default: repo root)
+#   models      globs of query files, relative to `root`
+#   exclude     globs (relative to `root`) of files not to check
+#   schema      how the schema catalog is obtained:
+#                 "dbt-run" run dbt (seed + run + docs generate) against a local
+#                           PostgreSQL and turn target/catalog.json into DDL; compiled
+#                           models are checked too ("compiled" mode, PostgreSQL)
+#                 "yml"     columns declared in sources/models .yml files (type
+#                           `data_type` when given, else unknown) + seed CSV headers
+#                 "ddl"     CREATE TABLE files of the repo (`schema_files` globs)
+#                 "bq-yaml" bigquery-etl schema.yaml files next to each query
+#                 "none"    no schema: only parse coverage is measured
+#   dbt_project directory (relative to `root`) dbt is run from for "dbt-run"
+#               (fivetran packages: integration_tests)
+#   dbt_schema  target schema of the dbt profile (default "corpus")
+#   dbt_vars    --vars passed to every dbt command (YAML/JSON string)
+#   deps        names of [[dependency]] entries installed into dbt_packages/ for
+#               "dbt-run" (dbt hub is not reachable from the sandbox, so `dbt deps`
+#               is replaced by local clones)
+#
+# [[dependency]]: dbt packages cloned into repos/_deps/<name> (`ref`: branch or tag,
+# default the default branch).
+
+# --- dbt projects, PostgreSQL-runnable (highest fidelity: real catalog.json) -------
+
+[[project]]
+name = "jaffle-shop"
+url = "https://github.com/dbt-labs/jaffle-shop"
+sha = "5beb145b00f5"
+license = "none"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "."
+deps = ["dbt_utils", "audit_helper"]
+dbt_vars = '{"load_source_data": true}'
+
+[[project]]
+name = "jaffle_shop"
+url = "https://github.com/dbt-labs/jaffle_shop"
+sha = "fd7bfacae4f4"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "."
+deps = []
+
+[[project]]
+name = "jaffle-sl-template"
+url = "https://github.com/dbt-labs/jaffle-sl-template"
+sha = ""
+license = "none"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "."
+deps = ["dbt_utils", "dbt_date"]
+dbt_schema = "dbt_sl_test"
+
+[[project]]
+name = "dbt-utils"
+url = "https://github.com/dbt-labs/dbt-utils"
+sha = "2a8f07bcbd02"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["integration_tests/models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = []
+
+[[project]]
+name = "dbt-expectations"
+url = "https://github.com/calogica/dbt-expectations"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery"]
+models = ["integration_tests/models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["dbt_date"]
+
+[[project]]
+name = "dbt_stripe"
+url = "https://github.com/fivetran/dbt_stripe"
+sha = "42687a212832"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_hubspot"
+url = "https://github.com/fivetran/dbt_hubspot"
+sha = "0e3fea29a535"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_shopify"
+url = "https://github.com/fivetran/dbt_shopify"
+sha = "03e91d7aeb83"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_salesforce"
+url = "https://github.com/fivetran/dbt_salesforce"
+sha = "2e99cce10766"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_zendesk"
+url = "https://github.com/fivetran/dbt_zendesk"
+sha = "a9300572dc5d"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_jira"
+url = "https://github.com/fivetran/dbt_jira"
+sha = "0ed5dcf2e96b"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_github"
+url = "https://github.com/fivetran/dbt_github"
+sha = "476ee64024f3"
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_netsuite"
+url = "https://github.com/fivetran/dbt_netsuite"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_quickbooks"
+url = "https://github.com/fivetran/dbt_quickbooks"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_klaviyo"
+url = "https://github.com/fivetran/dbt_klaviyo"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+[[project]]
+name = "dbt_fivetran_log"
+url = "https://github.com/fivetran/dbt_fivetran_log"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "dbt-run"
+dbt_project = "integration_tests"
+deps = ["fivetran_utils", "dbt_utils"]
+
+# --- dbt projects, warehouse-only (schema from .yml declarations) -------------------
+
+[[project]]
+name = "dbt_artifacts"
+url = "https://github.com/brooklyn-data/dbt_artifacts"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["snowflake", "bigquery", "databricks", "postgresql"]
+models = ["models/**/*.sql"]
+schema = "yml"
+
+[[project]]
+name = "dbt-project-evaluator"
+url = "https://github.com/dbt-labs/dbt-project-evaluator"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["postgresql", "snowflake", "bigquery", "redshift", "databricks"]
+models = ["models/**/*.sql"]
+schema = "yml"
+
+[[project]]
+name = "sf-samples"
+url = "https://github.com/Snowflake-Labs/sf-samples"
+sha = ""
+license = "Apache-2.0"
+kind = "dbt"
+dialects = ["snowflake"]
+root = "samples/sap_accounts_receivable_dbt"
+models = ["models/**/*.sql"]
+schema = "yml"
+
+# --- plain warehouse SQL ---------------------------------------------------------------
+
+[[project]]
+name = "sf-samples-queries"
+url = "https://github.com/Snowflake-Labs/sf-samples"
+clone = "sf-samples"
+sha = ""
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["snowflake"]
+# (samples/ps-finops is left out: its files are Snowflake CLI `<% %>` templates)
+models = ["samples/workload-optimization-queries/**/*.sql"]
+schema = "none"
+
+[[project]]
+name = "bigquery-etl"
+url = "https://github.com/mozilla/bigquery-etl"
+sha = "4fff648163cf"
+license = "MPL-2.0"
+kind = "sql"
+dialects = ["bigquery"]
+models = ["sql/moz-fx-data-shared-prod/**/query.sql"]
+schema = "bq-yaml"
+
+[[project]]
+name = "bigquery-utils"
+url = "https://github.com/GoogleCloudPlatform/bigquery-utils"
+sha = ""
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["bigquery"]
+models = ["scripts/**/*.sql", "dashboards/**/*.sql", "views/**/*.sql"]
+schema = "none"
+
+[[project]]
+name = "amazon-redshift-utils-tpc"
+url = "https://github.com/awslabs/amazon-redshift-utils"
+clone = "amazon-redshift-utils"
+sha = ""
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["redshift"]
+models = ["src/CloudDataWarehouseBenchmark/**/queries/*.sql"]
+schema = "ddl"
+schema_files = ["src/CloudDataWarehouseBenchmark/**/ddl.sql"]
+
+[[project]]
+name = "amazon-redshift-utils-admin"
+url = "https://github.com/awslabs/amazon-redshift-utils"
+clone = "amazon-redshift-utils"
+sha = ""
+license = "Apache-2.0"
+kind = "sql"
+dialects = ["redshift"]
+models = ["src/AdminViews/*.sql", "src/AdminScripts/*.sql"]
+schema = "none"
+
+# --- dependencies (dbt packages for "dbt-run") ------------------------------------------
+
+[[dependency]]
+name = "fivetran_utils"
+url = "https://github.com/fivetran/dbt_fivetran_utils"
+ref = "releases/v0.4.latest"
+
+[[dependency]]
+name = "dbt_utils"
+url = "https://github.com/dbt-labs/dbt-utils"
+
+[[dependency]]
+name = "dbt_date"
+url = "https://github.com/calogica/dbt-date"
+
+[[dependency]]
+name = "audit_helper"
+url = "https://github.com/dbt-labs/dbt-audit-helper"

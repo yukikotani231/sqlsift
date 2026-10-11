@@ -1,0 +1,3 @@
+# Configuration used by the corpus runner, so that no sqlsift.toml of a checked
+# repository (or of this repository) is picked up. Everything is passed on the
+# command line.
