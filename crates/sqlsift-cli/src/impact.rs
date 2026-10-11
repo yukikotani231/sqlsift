@@ -241,6 +241,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
                 file: file.clone(),
                 source: source.clone(),
                 diagnostics: diff.introduced,
+                ..FileDiagnostics::default()
             });
         }
         if !diff.resolved.is_empty() {
@@ -248,6 +249,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
                 file,
                 source,
                 diagnostics: diff.resolved,
+                ..FileDiagnostics::default()
             });
         }
     }

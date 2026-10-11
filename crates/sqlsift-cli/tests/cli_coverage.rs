@@ -3063,7 +3063,7 @@ fn fixed_baseline_entries_are_a_note_not_a_failure() {
     ])
     .assert_code(0)
     .assert_stderr_contains(
-        "Note: 1 baseline entry no longer occurs; re-run with --write-baseline to remove it",
+        "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
     );
 }
 
@@ -4180,4 +4180,225 @@ fn byte_order_mark_is_ignored_on_stdin() {
     let t = with_users_schema("bom-stdin");
     t.run_stdin(&["check", "-s", "schema.sql", "-"], "\u{feff}SELECT 1;\n")
         .assert_code(0);
+}
+
+// ---------------------------------------------------------------------------
+// Baseline maintenance (#137)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strict_baseline_fails_on_stale_entries() {
+    let t = with_two_errors("bl-strict");
+    write_baseline(&t, &["q.sql"]).assert_code(0);
+    let strict = [
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "--strict-baseline",
+        "-q",
+        "q.sql",
+    ];
+    t.run(&strict).assert_code(0);
+    t.write("q.sql", "SELECT name FROM users;\nSELECT id FROM userz;\n");
+    t.run(&strict).assert_code(1).assert_stderr_contains(
+        "Error: 1 baseline entry no longer occurs (--strict-baseline); remove it with --prune-baseline",
+    );
+}
+
+#[test]
+fn baseline_flags_need_a_baseline_file() {
+    let t = with_two_errors("bl-strict-none");
+    t.run(&["check", "-s", "schema.sql", "--strict-baseline", "q.sql"])
+        .assert_code(2)
+        .assert_stderr_contains("--strict-baseline needs a baseline file");
+}
+
+#[test]
+fn max_baseline_entries_fails_when_the_baseline_grows() {
+    let t = with_two_errors("bl-max");
+    write_baseline(&t, &["q.sql"]).assert_code(0);
+    let mut args = vec![
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "--max-baseline-entries",
+        "2",
+        "q.sql",
+    ];
+    t.run(&args).assert_code(0);
+    args[6] = "1";
+    t.run(&args)
+        .assert_code(1)
+        .assert_stderr_contains("the baseline has 2 entries, the maximum is 1");
+}
+
+#[test]
+fn prune_baseline_only_removes_stale_entries() {
+    let t = with_two_errors("bl-prune");
+    t.write("p.sql", "SELECT x FROM users;\n");
+    write_baseline(&t, &["q.sql", "p.sql"]).assert_code(0);
+    // nme fixed, a new problem added, p.sql deleted
+    t.write(
+        "q.sql",
+        "SELECT name FROM users;\nSELECT id FROM userz;\nSELECT bad FROM users;\n",
+    );
+    fs::remove_file(t.path().join("p.sql")).unwrap();
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "--prune-baseline",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains(
+        "Removed 2 stale baseline entries from sqlsift-baseline.json (1 entry left)",
+    );
+    let baseline = read_baseline(&t, "sqlsift-baseline.json");
+    let entries = baseline["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["code"], "E0001");
+    // The new problem was not added
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Found 1 error(s)")
+        .assert_stderr_lacks("no longer occur");
+}
+
+#[test]
+fn write_baseline_for_some_rules_keeps_the_other_entries() {
+    let t = with_two_errors("bl-rule");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-A",
+        "E0001",
+        "--write-baseline",
+        "q.sql",
+    ])
+    .assert_code(0);
+    // E0001 turned on: record its entries only, a new E0002 stays reported
+    t.write(
+        "q.sql",
+        "SELECT nme FROM users;\nSELECT id FROM userz;\nSELECT bad FROM users;\n",
+    );
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--write-baseline",
+        "--baseline-rule",
+        "table-not-found",
+        "q.sql",
+    ])
+    .assert_code(0)
+    .assert_stderr_contains("Wrote 1 baseline entry of E0001 for 1 file(s)")
+    .assert_stderr_contains("Kept 1 entry of other rules");
+    check_with_baseline(&t, &["q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("Found 1 error(s)")
+        .assert_stderr_contains("'bad'");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--write-baseline",
+        "--baseline-rule",
+        "E9999",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("Unknown rule 'E9999' in --baseline-rule");
+}
+
+#[test]
+fn json_output_counts_hidden_and_stale_entries() {
+    let t = with_two_errors("bl-json");
+    write_baseline(&t, &["q.sql"]).assert_code(0);
+    t.write("q.sql", "SELECT name FROM users;\nSELECT id FROM userz;\n");
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "-f",
+        "json",
+        "q.sql",
+    ]);
+    let json = run.json();
+    assert_eq!(json["baseline"]["hidden"], 1);
+    assert_eq!(json["baseline"]["stale"], 1);
+    // No baseline, no `baseline` key
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "json", "q.sql"]);
+    assert!(run.json().get("baseline").is_none());
+}
+
+#[test]
+fn sarif_reports_baselined_results_as_suppressed_with_fingerprints() {
+    let t = with_two_errors("bl-sarif");
+    write_baseline(&t, &["q.sql"]).assert_code(0);
+    t.write(
+        "q.sql",
+        "SELECT nme FROM users;\nSELECT id FROM userz;\nSELECT bad FROM users;\n",
+    );
+    let sarif = |t: &TempDir| {
+        let run = t.run(&[
+            "check",
+            "-s",
+            "schema.sql",
+            "--baseline",
+            "sqlsift-baseline.json",
+            "-f",
+            "sarif",
+            "q.sql",
+        ]);
+        run.assert_code(1);
+        run.json()["runs"][0]["results"].as_array().unwrap().clone()
+    };
+    let results = sarif(&t);
+    assert_eq!(results.len(), 3);
+    assert!(results[0]["message"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("bad"));
+    assert!(results[0].get("suppressions").is_none());
+    for result in &results[1..] {
+        assert_eq!(result["suppressions"][0]["kind"], "external");
+    }
+    // Fingerprints don't change when lines are added above
+    let fingerprint = |r: &Value| r["partialFingerprints"]["sqlsiftStatement/v1"].clone();
+    let before: Vec<Value> = results.iter().map(fingerprint).collect();
+    assert!(before.iter().all(Value::is_string));
+    t.write(
+        "q.sql",
+        "-- header\n\nSELECT nme FROM users;\nSELECT id FROM userz;\nSELECT bad FROM users;\n",
+    );
+    let after: Vec<Value> = sarif(&t).iter().map(fingerprint).collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn baseline_stats_counts_entries_by_rule_and_file() {
+    let t = with_two_errors("bl-stats");
+    t.write("p.sql", "SELECT x FROM users;\n");
+    write_baseline(&t, &["q.sql", "p.sql"]).assert_code(0);
+    t.run(&["baseline", "stats"])
+        .assert_code(0)
+        .assert_stdout_contains("sqlsift-baseline.json: 3 entries in 2 file(s)")
+        .assert_stdout_contains("2  E0002 column-not-found")
+        .assert_stdout_contains("2  q.sql");
+    let run = t.run(&["baseline", "stats", "--format", "json"]);
+    run.assert_code(0);
+    assert_eq!(run.json()["entries"], 3);
+    t.run(&["baseline", "stats", "--baseline", "missing.json"])
+        .assert_code(2)
+        .assert_stderr_contains("Baseline file not found");
 }

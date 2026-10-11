@@ -105,6 +105,31 @@ pub enum Command {
         /// `--baseline`, `baseline` in sqlsift.toml, or sqlsift-baseline.json)
         #[arg(long)]
         write_baseline: bool,
+
+        /// With --write-baseline: only rewrite the entries of these rules (codes or
+        /// names, repeatable), keeping the other entries of the checked files as
+        /// they are (e.g. after turning a rule on)
+        #[arg(
+            long = "baseline-rule",
+            value_name = "RULE",
+            requires = "write_baseline"
+        )]
+        baseline_rule: Vec<String>,
+
+        /// Remove the baseline entries that no longer occur (problems fixed, files
+        /// deleted or ignored) and exit 0; never adds entries
+        #[arg(long, conflicts_with = "write_baseline")]
+        prune_baseline: bool,
+
+        /// Fail (exit 1) when baseline entries no longer occur, so that the baseline
+        /// only shrinks (remove them with --prune-baseline)
+        #[arg(long)]
+        strict_baseline: bool,
+
+        /// Fail (exit 1) when the baseline has more than N entries, so that a change
+        /// can't grow it
+        #[arg(long, value_name = "N")]
+        max_baseline_entries: Option<usize>,
     },
 
     /// Show the queries a schema change breaks or fixes
@@ -287,6 +312,12 @@ pub enum Command {
         format: DescribeFormat,
     },
 
+    /// Inspect the baseline file of known diagnostics
+    Baseline {
+        #[command(subcommand)]
+        command: BaselineCommand,
+    },
+
     /// Parse SQL and display AST (for debugging)
     Parse {
         /// SQL file to parse
@@ -320,6 +351,35 @@ pub enum SchemaFormat {
 /// Output format of `sqlsift describe`
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
 pub enum DescribeFormat {
+    /// Human-readable listing
+    #[default]
+    Human,
+    /// JSON output
+    Json,
+}
+
+/// Subcommands of `sqlsift baseline`
+#[derive(Subcommand)]
+pub enum BaselineCommand {
+    /// Count the baseline entries by rule and by file
+    Stats {
+        /// Baseline file [default: `baseline` in sqlsift.toml, or sqlsift-baseline.json]
+        #[arg(long, value_name = "PATH")]
+        baseline: Option<PathBuf>,
+
+        /// Path to configuration file (default: sqlsift.toml in current or parent directory)
+        #[arg(short, long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = BaselineFormat::Human)]
+        format: BaselineFormat,
+    },
+}
+
+/// Output format of `sqlsift baseline stats`
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum, Default)]
+pub enum BaselineFormat {
     /// Human-readable listing
     #[default]
     Human,

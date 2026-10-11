@@ -87,13 +87,43 @@ Options:
                             baseline file and exit 0, keeping the entries of other files
                             that still exist (--baseline, `baseline` in sqlsift.toml, or
                             sqlsift-baseline.json)
+      --baseline-rule <RULE>
+                            With --write-baseline: only rewrite the entries of these
+                            rules (codes or names, repeatable), keeping the others
+      --prune-baseline      Remove the baseline entries that no longer occur and exit 0;
+                            never adds entries
+      --strict-baseline     Fail (exit 1) when baseline entries no longer occur
+      --max-baseline-entries <N>
+                            Fail (exit 1) when the baseline has more than N entries
       --stdin-filename <PATH>
                             File name to report for the query read from stdin (`-`)
 ```
 
 Command-line options override `sqlsift.toml`. `-A`, `-W` and `-D` accept a rule code (`E0006`), a rule name (`ambiguous-column`) or a category (`suspicious`), and can be repeated.
 
-Exit codes: `0` no errors, `1` errors reported (or more warnings than `--max-warnings`), `2` usage or configuration error (including a missing or invalid baseline file). Diagnostics in the baseline don't count; see [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
+Exit codes: `0` no errors, `1` errors reported (or more warnings than `--max-warnings`, stale entries with `--strict-baseline`, a baseline larger than `--max-baseline-entries`), `2` usage or configuration error (including a missing or invalid baseline file). Diagnostics in the baseline don't count; see [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
+
+## `sqlsift baseline stats`
+
+```
+sqlsift baseline stats [--baseline <PATH>] [-c <FILE>] [--format human|json]
+```
+
+Counts the entries of the baseline file (`--baseline`, `baseline` in `sqlsift.toml`, or `sqlsift-baseline.json`) by rule and by file, files with the most entries first:
+
+```text
+sqlsift-baseline.json: 153 entries in 12 file(s)
+
+By rule:
+  140  E0002 column-not-found
+   13  E0008 missing-required-column
+
+By file:
+   61  queries/reports/monthly.sql
+   ...
+```
+
+`--format json` prints `{"baseline", "version", "entries", "rules": [{"code", "name", "entries"}], "files": [{"file", "entries"}]}`.
 
 ## `sqlsift impact`
 

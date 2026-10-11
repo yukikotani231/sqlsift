@@ -61,13 +61,29 @@ This writes every current diagnostic (errors and warnings) to `sqlsift-baseline.
 baseline = "sqlsift-baseline.json"
 ```
 
-Diagnostics in the baseline are not printed and don't count toward the exit code, `--max-errors` or `--max-warnings`. `sqlsift check` prints how many were hidden, and a note when baseline entries no longer occur: the problem was fixed, or the entry's file was deleted, renamed or is now ignored. Re-run `sqlsift check --write-baseline` to remove them. That note never fails the check. Entries of files that still exist but weren't checked in this run (say, a pre-commit hook checking only changed files) are never reported as stale.
+Diagnostics in the baseline are not printed and don't count toward the exit code, `--max-errors` or `--max-warnings`. `sqlsift check` prints how many were hidden, and a note when baseline entries no longer occur: the problem was fixed, or the entry's file was deleted, renamed or is now ignored. Run `sqlsift check --prune-baseline` to remove them. That note doesn't fail the check unless `--strict-baseline` is given (see below). Entries of files that still exist but weren't checked in this run (say, a pre-commit hook checking only changed files) are never reported as stale.
 
 A diagnostic matches a baseline entry by its file (relative to the baseline file, with symbolic links resolved), rule code and the statement it is in. The statement is compared ignoring comments, whitespace (including whitespace around operators, commas and parentheses), the case of keywords and unquoted identifiers, and quotes around a lowercase identifier (`"users"` is `users`); string literals must be unchanged. In TypeScript and JavaScript files only the SQL template counts, not the code around it, and in Rust files only the query's string literal. So adding lines or statements elsewhere in the file, or running a formatter over the statement, keeps the match. Each entry hides one diagnostic, so the same mistake made twice in one statement needs two entries.
 
 When a statement with baselined problems is changed, its diagnostics that are left are still matched by rule code and message against the file's unmatched entries: fixing one of several problems in a statement doesn't make the others new. The entries store no line numbers and are sorted by file, rule, statement hash and message, so adding lines to a file doesn't change the baseline (and doesn't cause merge conflicts in it).
 
 `--write-baseline` records the diagnostics of the files it checks, and keeps the existing entries of other files that still exist and aren't ignored, printing how many were kept and removed. So it can be run over a few files, and two configurations can share one baseline file. To start over, delete the file first.
+
+### Keeping the baseline shrinking
+
+A baseline should only get smaller. These options of `sqlsift check` help keep it that way:
+
+- `--prune-baseline` removes the entries that no longer occur (problems fixed, files deleted, renamed or ignored) and exits `0`. Unlike `--write-baseline`, it never adds entries, so new problems stay reported.
+- `--strict-baseline` fails the check (exit `1`) when entries no longer occur, so whoever fixes a problem also removes its entry, with `--prune-baseline`.
+- `--max-baseline-entries <N>` fails the check when the baseline has more than `N` entries, so that a pull request can't grow it by re-running `--write-baseline`. Lower `N` as the baseline shrinks.
+- `--write-baseline --baseline-rule <RULE>` rewrites the entries of the given rules only (codes or names, repeatable) and keeps the others, e.g. to record the existing problems of a rule you just turned on without hiding new problems of the other rules.
+
+```bash
+# CI
+sqlsift check --strict-baseline --max-baseline-entries 140
+```
+
+`sqlsift baseline stats` counts the entries by rule and by file (see the [command line reference](../reference/cli.md#sqlsift-baseline-stats)). In `--format json` output a `baseline` object gives the number of diagnostics hidden and of stale entries, and in SARIF output the hidden diagnostics are listed as suppressed results (see [Output formats](../reference/output-formats.md#sarif)).
 
 Baseline files written by sqlsift 0.1 (format version 1) are still read; `--write-baseline` writes version 2.
 

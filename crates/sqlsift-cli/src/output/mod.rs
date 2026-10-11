@@ -1,5 +1,6 @@
 //! Output formatting
 
+pub mod baseline;
 pub mod describe;
 pub mod schema;
 
@@ -13,16 +14,36 @@ use crate::args::OutputFormat;
 const RULES_HELP_URI: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#diagnostic-rules");
 
 /// Diagnostics produced for a single file
+#[derive(Default)]
 pub struct FileDiagnostics {
     pub file: String,
     pub source: String,
     pub diagnostics: Vec<Diagnostic>,
+    /// Diagnostics hidden by the baseline (only reported in SARIF, as suppressed
+    /// results)
+    pub suppressed: Vec<Diagnostic>,
+    /// Hashes of the statements of `diagnostics` followed by those of
+    /// `suppressed` (SARIF `partialFingerprints`), when computed
+    pub statement_hashes: Vec<String>,
 }
+
+/// What the baseline did in a `check` run (JSON output)
+#[derive(Debug, Clone, Copy)]
+pub struct BaselineSummary {
+    /// Diagnostics hidden by the baseline
+    pub hidden: usize,
+    /// Entries that no longer occur (`None` when the run stopped early)
+    pub stale: Option<usize>,
+}
+
+/// SARIF `partialFingerprints` key: the statement hash, the rule and the message
+const FINGERPRINT_KEY: &str = "sqlsiftStatement/v1";
 
 /// Output formatter for diagnostics
 pub struct OutputFormatter {
     format: OutputFormat,
     color: bool,
+    baseline: Option<BaselineSummary>,
 }
 
 /// Whether ANSI colors should be used for output written to stderr.
@@ -39,7 +60,19 @@ impl OutputFormatter {
         Self {
             format,
             color: use_color(),
+            baseline: None,
         }
+    }
+
+    /// Include what the baseline did in the JSON output
+    pub fn set_baseline(&mut self, summary: BaselineSummary) {
+        self.baseline = Some(summary);
+    }
+
+    /// Whether the format reports the diagnostics hidden by the baseline (and
+    /// so needs [`FileDiagnostics::suppressed`] and the statement hashes)
+    pub fn reports_suppressed(&self) -> bool {
+        self.format == OutputFormat::Sarif
     }
 
     /// Print diagnostics for all files in the configured format.
@@ -47,15 +80,18 @@ impl OutputFormatter {
     /// JSON and SARIF always produce exactly one document, even when there
     /// are no diagnostics. Files without diagnostics are omitted.
     pub fn print(&self, files: &[FileDiagnostics]) {
-        let files: Vec<&FileDiagnostics> =
-            files.iter().filter(|f| !f.diagnostics.is_empty()).collect();
+        let suppressed = self.reports_suppressed();
+        let files: Vec<&FileDiagnostics> = files
+            .iter()
+            .filter(|f| !f.diagnostics.is_empty() || (suppressed && !f.suppressed.is_empty()))
+            .collect();
         match self.format {
             OutputFormat::Human => {
                 for f in files {
                     self.print_human(f);
                 }
             }
-            OutputFormat::Json => print_json(&files),
+            OutputFormat::Json => print_json(&files, self.baseline),
             OutputFormat::Sarif => print_sarif(&files),
             OutputFormat::Github => print_github(&files),
         }
@@ -145,8 +181,15 @@ pub fn location(diag: &Diagnostic, source: &str) -> Option<(usize, usize)> {
 }
 
 /// JSON output: `{"files": [{"file": ..., "diagnostics": [...]}, ...]}`
-fn print_json(files: &[&FileDiagnostics]) {
-    let output = serde_json::json!({ "files": json_files(files) });
+/// (and `"baseline": {"hidden": ..., "stale": ...}` when a baseline is used)
+fn print_json(files: &[&FileDiagnostics], baseline: Option<BaselineSummary>) {
+    let mut output = serde_json::json!({ "files": json_files(files) });
+    if let Some(summary) = baseline {
+        output["baseline"] = serde_json::json!({
+            "hidden": summary.hidden,
+            "stale": summary.stale,
+        });
+    }
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
@@ -186,7 +229,10 @@ fn print_sarif(files: &[&FileDiagnostics]) {
 
     let mut results = Vec::new();
     for f in files {
-        for d in &f.diagnostics {
+        let fingerprints = fingerprints(f);
+        let all = f.diagnostics.iter().map(|d| (d, false));
+        let all = all.chain(f.suppressed.iter().map(|d| (d, true)));
+        for (i, (d, suppressed)) in all.enumerate() {
             // The registry is indexed by diagnostic kind
             let rule_index = d.kind as usize;
 
@@ -218,7 +264,7 @@ fn print_sarif(files: &[&FileDiagnostics]) {
                 message = format!("{message} (in query '{name}')");
             }
 
-            results.push(serde_json::json!({
+            let mut result = serde_json::json!({
                 "ruleId": d.code(),
                 "ruleIndex": rule_index,
                 "level": match d.severity {
@@ -230,7 +276,18 @@ fn print_sarif(files: &[&FileDiagnostics]) {
                     "text": message
                 },
                 "locations": [location]
-            }));
+            });
+            if let Some(fingerprint) = fingerprints.get(i) {
+                result["partialFingerprints"] = serde_json::json!({ FINGERPRINT_KEY: fingerprint });
+            }
+            // Known diagnostics: the baseline file is the reason they are hidden
+            if suppressed {
+                result["suppressions"] = serde_json::json!([{
+                    "kind": "external",
+                    "justification": "In the sqlsift baseline file"
+                }]);
+            }
+            results.push(result);
         }
     }
 
@@ -251,6 +308,34 @@ fn print_sarif(files: &[&FileDiagnostics]) {
     });
 
     println!("{}", serde_json::to_string_pretty(&sarif).unwrap());
+}
+
+/// Fingerprints of the diagnostics and then the suppressed diagnostics of a
+/// file: the hash of the statement, the rule and the message, and the
+/// occurrence of that triple in the file (`<hash>:<n>`), so that they survive
+/// edits to other statements and lines moving. Empty when the statement hashes
+/// were not computed.
+fn fingerprints(f: &FileDiagnostics) -> Vec<String> {
+    let count = f.diagnostics.len() + f.suppressed.len();
+    if f.statement_hashes.len() != count {
+        return Vec::new();
+    }
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    f.diagnostics
+        .iter()
+        .chain(&f.suppressed)
+        .zip(&f.statement_hashes)
+        .map(|(d, statement)| {
+            let hash = sqlsift_core::baseline::statement_hash(&format!(
+                "{} {statement} {}",
+                d.code(),
+                d.message
+            ));
+            let n = seen.entry(hash.clone()).or_default();
+            *n += 1;
+            format!("{hash}:{n}")
+        })
+        .collect()
 }
 
 /// GitHub Actions workflow commands on stdout, one per diagnostic, e.g.

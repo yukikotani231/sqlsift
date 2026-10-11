@@ -63,7 +63,7 @@ jobs:
 
 A pull request that drops or renames a column fails with the queries it breaks, even when other queries already had problems. `github.base_ref` is empty outside pull requests, so pushes to `main` still report every diagnostic.
 
-How it works: the action fetches the base (one commit, from the repository the workflow runs in), checks it out in a temporary `git worktree`, runs the same check there with `--write-baseline` into a temporary baseline file, and then checks the pull request against that baseline (see [Baseline](../guide/suppression.md#an-existing-backlog-baseline) for how diagnostics are matched). On a `pull_request` event the checkout is the merge commit, so this compares the result of merging with the base branch as it is now. No token beyond the default one is needed, and pull requests from forks work the same way. The SARIF file (`sarif-file`) has only the new diagnostics too.
+How it works: the action fetches the base (one commit, from the repository the workflow runs in), checks it out in a temporary `git worktree`, runs the same check there with `--write-baseline` into a temporary baseline file, and then checks the pull request against that baseline (see [Baseline](../guide/suppression.md#an-existing-backlog-baseline) for how diagnostics are matched). On a `pull_request` event the checkout is the merge commit, so this compares the result of merging with the base branch as it is now. No token beyond the default one is needed, and pull requests from forks work the same way. The SARIF file (`sarif-file`) reports only the new diagnostics too; the ones the base already has are in it as suppressed results.
 
 `diff-base` takes a branch or tag name (fetched from `origin`), or a commit SHA, e.g. `${{ github.event.pull_request.base.sha }}`. Good to know:
 
@@ -108,7 +108,7 @@ sqlsift check --write-baseline          # writes sqlsift-baseline.json; commit i
 baseline = "sqlsift-baseline.json"
 ```
 
-From then on `sqlsift check` (and the editor) hides the recorded diagnostics, and new ones fail the check as usual. When a recorded problem is fixed, sqlsift prints a note; re-run `--write-baseline` to shrink the file. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
+From then on `sqlsift check` (and the editor) hides the recorded diagnostics, and new ones fail the check as usual. When a recorded problem is fixed, sqlsift prints a note; run `--prune-baseline` to shrink the file. Add `--strict-baseline` to the CI command to make that note an error, so the baseline only ever shrinks. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
 
 ## Re-check everything when the schema changes
 

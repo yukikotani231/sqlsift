@@ -218,6 +218,61 @@ impl Baseline {
         summary.removed_files = gone.values().filter(|g| **g).count();
         summary
     }
+
+    /// Add the entries of `previous` (the baseline file being replaced) for the
+    /// files in `checked` ([`file_key`]s) whose rule code is not in `codes`.
+    /// Used to rewrite the entries of some rules only (e.g. after turning a rule
+    /// on), leaving those of the other rules as they are. Returns the number of
+    /// entries added.
+    pub fn keep_other_rules(
+        &mut self,
+        previous: &Baseline,
+        checked: &HashSet<String>,
+        codes: &HashSet<&str>,
+    ) -> usize {
+        let before = self.entries.len();
+        for entry in &previous.entries {
+            let file = normalize_separators(&entry.file);
+            if checked.contains(&file) && !codes.contains(entry.code.as_str()) {
+                self.entries.push(BaselineEntry {
+                    file,
+                    ..entry.clone()
+                });
+            }
+        }
+        self.entries.len() - before
+    }
+
+    /// Remove one entry equal to each of `entries` (same file, rule code,
+    /// statement hash and message), e.g. the stale entries a [`BaselineFilter`]
+    /// found. Returns the number of entries removed.
+    pub fn remove_entries<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = &'a BaselineEntry>,
+    ) -> usize {
+        let key = |entry: &BaselineEntry| {
+            (
+                normalize_separators(&entry.file),
+                entry.code.clone(),
+                entry.statement_hash.clone(),
+                entry.message.clone(),
+            )
+        };
+        let mut to_remove: HashMap<(String, String, String, String), usize> = HashMap::new();
+        for entry in entries {
+            *to_remove.entry(key(entry)).or_default() += 1;
+        }
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| match to_remove.get_mut(&key(entry)) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    false
+                }
+                _ => true,
+            });
+        before - self.entries.len()
+    }
 }
 
 /// Diagnostics of a file after removing the baselined ones
@@ -402,6 +457,28 @@ pub fn sql_text<S: AsRef<str>, M: AsRef<str>>(
     } else {
         source.to_string()
     }
+}
+
+/// The hash of the statement containing each of `diagnostics` (as stored in
+/// [`BaselineEntry::statement_hash`]), in the same order. `sql` is the SQL the
+/// diagnostics were reported on (see [`sql_text`]). Used as a fingerprint that
+/// survives edits elsewhere in the file (SARIF `partialFingerprints`).
+///
+/// ```
+/// use sqlsift_core::baseline::{diagnostic_statement_hashes, statement_hash};
+/// use sqlsift_core::schema::SchemaBuilder;
+/// use sqlsift_core::Analyzer;
+///
+/// let mut builder = SchemaBuilder::new();
+/// builder.parse("CREATE TABLE users (id INTEGER);").unwrap();
+/// let (catalog, _) = builder.build();
+/// let sql = "SELECT 1;\nSELECT nme FROM users;";
+/// let diagnostics = Analyzer::new(&catalog).analyze(sql);
+/// let hashes = diagnostic_statement_hashes(sql, &diagnostics);
+/// assert_eq!(hashes, [statement_hash("SELECT nme FROM users;")]);
+/// ```
+pub fn diagnostic_statement_hashes(sql: &str, diagnostics: &[Diagnostic]) -> Vec<String> {
+    statement_hashes(BASELINE_VERSION, sql, diagnostics)
 }
 
 /// The name of `path` in a baseline: relative to `base_dir` (the directory

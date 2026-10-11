@@ -23,11 +23,12 @@ use sqlsift_core::sqlx::is_rust_file;
 use sqlsift_core::stack::{with_analysis_stack, ANALYSIS_STACK_SIZE};
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
-use crate::args::{Args, Command, OutputFormat, SchemaFormat};
+use crate::args::{Args, BaselineCommand, Command, OutputFormat, SchemaFormat};
 use crate::config::{Config, RuleFlags};
+use crate::output::baseline::BaselineStats;
 use crate::output::describe::FileDescription;
 use crate::output::schema::SchemaReport;
-use crate::output::{FileDiagnostics, OutputFormatter};
+use crate::output::{BaselineSummary, FileDiagnostics, OutputFormatter};
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -212,7 +213,7 @@ fn process_files<T: Send>(
 }
 
 /// Read the baseline file of known diagnostics
-fn load_baseline(path: &Path) -> Result<BaselineFilter> {
+fn load_baseline(path: &Path) -> Result<Baseline> {
     let json = fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             miette::miette!(
@@ -223,9 +224,7 @@ fn load_baseline(path: &Path) -> Result<BaselineFilter> {
             miette::miette!("Failed to read baseline {}: {}", path.display(), e)
         }
     })?;
-    let baseline =
-        Baseline::from_json(&json).map_err(|e| miette::miette!("{}: {}", path.display(), e))?;
-    Ok(BaselineFilter::new(&baseline))
+    Baseline::from_json(&json).map_err(|e| miette::miette!("{}: {}", path.display(), e))
 }
 
 /// The baseline file that `--write-baseline` replaces, if there is a valid one
@@ -505,6 +504,7 @@ fn build_catalog(
                 file: schema_file.display().to_string(),
                 source: content,
                 diagnostics: diags,
+                ..FileDiagnostics::default()
             }));
         }
     }
@@ -652,6 +652,10 @@ fn run(args: Args) -> Result<bool> {
             stdin_filename,
             baseline,
             write_baseline,
+            baseline_rule,
+            prune_baseline,
+            strict_baseline,
+            max_baseline_entries,
         } => {
             // Load configuration; CLI args take precedence over the config file
             let config = load_config(config_path.as_deref())?.merge_with_args(
@@ -689,7 +693,7 @@ fn run(args: Args) -> Result<bool> {
             let mut dbt_projects = dbt::DbtProjects::default();
             let dbt_catalogs = dbt_catalog_files(&config, templating, &mut dbt_projects)?;
             let schema_files = schema_files(&config, !dbt_catalogs.is_empty())?;
-            let formatter = OutputFormatter::new(output_format);
+            let mut formatter = OutputFormatter::new(output_format);
             let mut catalog = match build_catalog(&schema_files, dialect, true)? {
                 Ok(catalog) => catalog,
                 Err(failed) => {
@@ -744,10 +748,34 @@ fn run(args: Args) -> Result<bool> {
 
             // The baseline file: read unless it is being written
             let baseline_path = config.baseline.as_ref().map(PathBuf::from);
-            let baseline_filter = match &baseline_path {
+            let loaded_baseline = match &baseline_path {
                 Some(path) if !write_baseline => Some(load_baseline(path)?),
                 _ => None,
             };
+            if loaded_baseline.is_none() && !write_baseline {
+                for (used, flag) in [
+                    (prune_baseline, "--prune-baseline"),
+                    (strict_baseline, "--strict-baseline"),
+                    (max_baseline_entries.is_some(), "--max-baseline-entries"),
+                ] {
+                    if used {
+                        miette::bail!(
+                            "{flag} needs a baseline file (--baseline, or `baseline` in sqlsift.toml)"
+                        );
+                    }
+                }
+            }
+            let baseline_entries = loaded_baseline.as_ref().map(|b| b.entries.len());
+            let baseline_filter = loaded_baseline.as_ref().map(BaselineFilter::new);
+            // --baseline-rule: the codes of the rules whose entries are rewritten
+            let baseline_rules = baseline_rule
+                .iter()
+                .map(|id| {
+                    sqlsift_core::rules::find_rule(id)
+                        .map(|rule| rule.code)
+                        .ok_or_else(|| miette::miette!("Unknown rule '{id}' in --baseline-rule"))
+                })
+                .collect::<Result<HashSet<&str>>>()?;
             let baseline_target = baseline_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_BASELINE_FILE));
@@ -814,15 +842,26 @@ fn run(args: Args) -> Result<bool> {
                 let mut baseline = Baseline::default();
                 let mut checked_keys = HashSet::new();
                 for (query_file, analyzed) in query_files.iter().zip(analyzed) {
-                    let (content, diagnostics, _) = analyzed?;
+                    let (content, mut diagnostics, _) = analyzed?;
+                    if !baseline_rules.is_empty() {
+                        diagnostics.retain(|d| baseline_rules.contains(d.code()));
+                    }
                     let key = file_key(query_file);
                     baseline.add_file(&key, &baseline_sql(query_file, &content), &diagnostics);
                     checked_keys.insert(key);
                 }
                 let written = baseline.entries.len();
+                let previous = previous_baseline(&baseline_target);
+                // With --baseline-rule, the entries of other rules are kept
+                let other_rules = match &previous {
+                    Some(previous) if !baseline_rules.is_empty() => {
+                        baseline.keep_other_rules(previous, &checked_keys, &baseline_rules)
+                    }
+                    _ => 0,
+                };
                 // Entries of files not checked in this run are kept, unless the
                 // file is gone
-                let kept = previous_baseline(&baseline_target).map(|previous| {
+                let kept = previous.map(|previous| {
                     baseline.keep_unchecked(&previous, &checked_keys, baseline_file_gone)
                 });
                 fs::write(&baseline_target, baseline.to_json()).map_err(|e| {
@@ -833,12 +872,25 @@ fn run(args: Args) -> Result<bool> {
                     )
                 })?;
                 if !quiet {
+                    let rules = if baseline_rules.is_empty() {
+                        String::new()
+                    } else {
+                        let mut codes: Vec<&str> = baseline_rules.iter().copied().collect();
+                        codes.sort_unstable();
+                        format!(" of {}", codes.join(", "))
+                    };
                     eprintln!(
-                        "Wrote {written} baseline {} for {} file(s) to {}",
+                        "Wrote {written} baseline {}{rules} for {} file(s) to {}",
                         entries_word(written),
                         query_files.len(),
                         baseline_target.display()
                     );
+                    if other_rules > 0 {
+                        eprintln!(
+                            "Kept {other_rules} {} of other rules",
+                            entries_word(other_rules)
+                        );
+                    }
                     if let Some(kept) = kept {
                         if kept.kept > 0 {
                             eprintln!(
@@ -874,6 +926,47 @@ fn run(args: Args) -> Result<bool> {
                 return Ok(false);
             }
 
+            if prune_baseline {
+                if let (Some(mut baseline), Some(filter)) = (loaded_baseline, &baseline_filter) {
+                    // Every file is checked in full, whatever --max-errors says
+                    let mut stale = Vec::new();
+                    let mut checked_keys = HashSet::new();
+                    for (query_file, analyzed) in query_files.iter().zip(analyzed) {
+                        let (content, diagnostics, _) = analyzed?;
+                        let key = file_key(query_file);
+                        let sql = baseline_sql(query_file, &content);
+                        stale.extend(filter.filter(&key, &sql, diagnostics).stale);
+                        checked_keys.insert(key);
+                    }
+                    stale.extend(
+                        filter
+                            .stale_unchecked(&checked_keys, baseline_file_gone)
+                            .into_iter()
+                            .cloned(),
+                    );
+                    let removed = baseline.remove_entries(&stale);
+                    if removed > 0 {
+                        fs::write(&baseline_target, baseline.to_json()).map_err(|e| {
+                            miette::miette!(
+                                "Failed to write baseline {}: {}",
+                                baseline_target.display(),
+                                e
+                            )
+                        })?;
+                    }
+                    if !quiet {
+                        let left = baseline.entries.len();
+                        eprintln!(
+                            "Removed {removed} stale baseline {} from {} ({left} {} left)",
+                            entries_word(removed),
+                            baseline_target.display(),
+                            entries_word(left)
+                        );
+                    }
+                    return Ok(false);
+                }
+            }
+
             let mut total_errors = 0;
             let mut total_warnings = 0;
             let mut files_checked = 0;
@@ -899,17 +992,21 @@ fn run(args: Args) -> Result<bool> {
                 let (content, diagnostics, _) = analyzed?;
                 files_checked += 1;
 
-                let diagnostics = match &baseline_filter {
-                    Some(filter) => {
+                // SARIF also reports the baselined diagnostics (as suppressed) and
+                // the hashes of the statements (as fingerprints)
+                let sarif = formatter.reports_suppressed();
+                let sql = (baseline_filter.is_some() || sarif)
+                    .then(|| baseline_sql(query_file, &content));
+                let (diagnostics, suppressed) = match (&baseline_filter, &sql) {
+                    (Some(filter), Some(sql)) => {
                         let key = file_key(query_file);
-                        let sql = baseline_sql(query_file, &content);
-                        let filtered = filter.filter(&key, &sql, diagnostics);
+                        let filtered = filter.filter(&key, sql, diagnostics);
                         baselined += filtered.suppressed.len();
                         stale += filtered.stale.len();
                         checked_keys.insert(key);
-                        filtered.kept
+                        (filtered.kept, filtered.suppressed)
                     }
-                    None => diagnostics,
+                    _ => (diagnostics, Vec::new()),
                 };
 
                 let mut diagnostics_to_print = Vec::new();
@@ -929,10 +1026,24 @@ fn run(args: Args) -> Result<bool> {
                     diagnostics_to_print.push(diag);
                 }
 
+                let (suppressed, statement_hashes) = match &sql {
+                    Some(sql) if sarif => {
+                        let all: Vec<Diagnostic> = diagnostics_to_print
+                            .iter()
+                            .chain(&suppressed)
+                            .cloned()
+                            .collect();
+                        let hashes = baseline::diagnostic_statement_hashes(sql, &all);
+                        (suppressed, hashes)
+                    }
+                    _ => (Vec::new(), Vec::new()),
+                };
                 results.push(FileDiagnostics {
                     file: display_name(query_file),
                     source: content,
                     diagnostics: diagnostics_to_print,
+                    suppressed,
+                    statement_hashes,
                 });
 
                 if limit_reached {
@@ -940,6 +1051,23 @@ fn run(args: Args) -> Result<bool> {
                 }
             }
 
+            // Entries of a file that was only partly checked can't be stale; those
+            // of files not checked are when the file is gone
+            let stale = baseline_filter
+                .as_ref()
+                .filter(|_| !limit_reached)
+                .map(|filter| {
+                    stale
+                        + filter
+                            .stale_unchecked(&checked_keys, baseline_file_gone)
+                            .len()
+                });
+            if baseline_filter.is_some() {
+                formatter.set_baseline(BaselineSummary {
+                    hidden: baselined,
+                    stale,
+                });
+            }
             formatter.print(&results);
 
             // Print summary
@@ -967,26 +1095,35 @@ fn run(args: Args) -> Result<bool> {
                 if baselined > 0 {
                     eprintln!("{baselined} known diagnostic(s) hidden by the baseline");
                 }
-                // Entries of a file that was only partly checked can't be stale;
-                // those of files not checked are when the file is gone
-                let stale =
-                    baseline_filter
-                        .as_ref()
-                        .filter(|_| !limit_reached)
-                        .map_or(0, |filter| {
-                            stale
-                                + filter
-                                    .stale_unchecked(&checked_keys, baseline_file_gone)
-                                    .len()
-                        });
-                if stale > 0 {
+                if let Some(stale) = stale.filter(|n| *n > 0 && !strict_baseline) {
                     eprintln!(
-                        "Note: {stale} baseline entr{} no longer occur{}; re-run with --write-baseline to remove {}",
+                        "Note: {stale} baseline entr{} no longer occur{}; re-run with --prune-baseline to remove {}",
                         if stale == 1 { "y" } else { "ies" },
                         if stale == 1 { "s" } else { "" },
                         if stale == 1 { "it" } else { "them" },
                     );
                 }
+            }
+
+            // --strict-baseline and --max-baseline-entries fail the check; the reason
+            // is printed even with --quiet, as it explains the exit code
+            let stale_fails = strict_baseline && stale.is_some_and(|n| n > 0);
+            if let Some(stale) = stale.filter(|_| stale_fails) {
+                eprintln!(
+                    "Error: {stale} baseline entr{} no longer occur{} (--strict-baseline); remove {} with --prune-baseline",
+                    if stale == 1 { "y" } else { "ies" },
+                    if stale == 1 { "s" } else { "" },
+                    if stale == 1 { "it" } else { "them" },
+                );
+            }
+            let too_many_entries = max_baseline_entries
+                .zip(baseline_entries)
+                .filter(|(max, entries)| entries > max);
+            if let Some((max, entries)) = too_many_entries {
+                eprintln!(
+                    "Error: the baseline has {entries} {}, the maximum is {max} (--max-baseline-entries)",
+                    entries_word(entries)
+                );
             }
 
             // Too many warnings fail the check; the reason is printed even with
@@ -1003,7 +1140,10 @@ fn run(args: Args) -> Result<bool> {
                 );
             }
 
-            Ok(total_errors > 0 || too_many_warnings.is_some())
+            Ok(total_errors > 0
+                || too_many_warnings.is_some()
+                || stale_fails
+                || too_many_entries.is_some())
         }
 
         Command::Impact {
@@ -1065,6 +1205,39 @@ fn run(args: Args) -> Result<bool> {
             no_check,
             dry_run,
         }),
+
+        Command::Baseline {
+            command:
+                BaselineCommand::Stats {
+                    baseline,
+                    config: config_path,
+                    format,
+                },
+        } => {
+            let config = load_config(config_path.as_deref())?.merge_with_args(
+                &[],
+                None,
+                &[],
+                &[],
+                None,
+                None,
+                None,
+                None,
+                None,
+                baseline.as_deref(),
+            );
+            let path = config
+                .baseline
+                .clone()
+                .unwrap_or_else(|| DEFAULT_BASELINE_FILE.to_string());
+            let baseline = load_baseline(Path::new(&path))?;
+            let stats = BaselineStats {
+                path: &path,
+                baseline: &baseline,
+            };
+            print!("{}", stats.render(format));
+            Ok(false)
+        }
 
         Command::Rules => {
             print_rules();
