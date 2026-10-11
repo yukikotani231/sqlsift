@@ -9,7 +9,8 @@
 //! - comparisons and arithmetic (E0003), JOIN conditions (E0007)
 //! - `x IN (SELECT ...)` against the subquery's column
 //! - INSERT VALUES / UPDATE SET / ON CONFLICT assignments against column types (E0003),
-//!   and NULL assigned to NOT NULL columns (E0004)
+//!   and NULL assigned to NOT NULL columns (E0004); literals out of the column's range
+//!   are reported in [`ranges`](super::ranges) (E0017)
 //! - CASE branch consistency, set operation column counts and types
 
 use sqlparser::ast::{
@@ -429,7 +430,16 @@ impl Resolver<'_> {
                     // Literals carry no location: fall back to the target column
                     diag.span = located_span(value_expr).or(column_span);
                     self.diagnostics.push(diag);
+                    continue;
                 }
+                let fallback = column_span.or_else(|| {
+                    insert
+                        .table_name
+                        .0
+                        .last()
+                        .map(|t| Span::from_sqlparser(&t.span))
+                });
+                self.check_value_range(&table_def.name, col_def, value_expr, fallback);
             }
         }
     }
@@ -471,7 +481,14 @@ impl Resolver<'_> {
                 // Literals carry no location: fall back to the target column
                 diag.span = located_span(&assignment.value).or(Some(target_span));
                 self.diagnostics.push(diag);
+                continue;
             }
+            self.check_value_range(
+                &table_def.name,
+                col_def,
+                &assignment.value,
+                Some(target_span),
+            );
         }
     }
 
@@ -912,7 +929,7 @@ fn assignment_mismatch(column: &str, expected: &str, actual: &str) -> Diagnostic
 
 /// Source span of an expression, or `None` if the parser recorded no location
 /// (sqlparser 0.53 doesn't track spans of literal values)
-fn located_span(expr: &Expr) -> Option<Span> {
+pub(super) fn located_span(expr: &Expr) -> Option<Span> {
     let span = expr.span();
     (span.start.line > 0).then(|| Span::from_sqlparser(&span))
 }

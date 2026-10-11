@@ -3,6 +3,7 @@
 pub(crate) mod bigquery;
 mod comment_directives;
 mod grouping;
+mod ranges;
 mod resolver;
 mod scope;
 mod snowflake;

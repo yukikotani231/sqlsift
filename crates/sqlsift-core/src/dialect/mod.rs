@@ -114,6 +114,16 @@ impl SqlDialect {
         matches!(self, SqlDialect::PostgreSQL | SqlDialect::Redshift)
     }
 
+    /// Whether a literal too long or out of range for the column it is assigned
+    /// to is an error rather than truncated (PostgreSQL, Redshift, MySQL in its
+    /// default strict mode)
+    pub fn rejects_out_of_range_values(self) -> bool {
+        matches!(
+            self,
+            SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL
+        )
+    }
+
     /// Whether `ORDER BY 2` / `GROUP BY 2` always name select list positions
     /// (Databricks can be configured to read them as constants)
     pub fn checks_ordinal_positions(self) -> bool {

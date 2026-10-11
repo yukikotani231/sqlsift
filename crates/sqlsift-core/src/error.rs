@@ -182,6 +182,8 @@ pub enum DiagnosticKind {
     DistinctOrderBy,
     /// E0016: Column neither grouped nor aggregated in an aggregate query
     GroupingError,
+    /// E0017: A literal the target column's type can't hold
+    ValueOutOfRange,
     /// Parse error
     ParseError,
 }

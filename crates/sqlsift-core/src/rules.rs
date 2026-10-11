@@ -261,6 +261,13 @@ pub const RULES: &[Rule] = &[
         summary: "Column must appear in GROUP BY or be used in an aggregate",
     },
     Rule {
+        kind: DiagnosticKind::ValueOutOfRange,
+        code: "E0017",
+        name: "value-out-of-range",
+        category: RuleCategory::Correctness,
+        summary: "Literal too long or out of range for the column type",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

@@ -44,6 +44,7 @@
   - [E0014 unmatched-conflict-target](rules/E0014.md)
   - [E0015 distinct-order-by](rules/E0015.md)
   - [E0016 grouping-error](rules/E0016.md)
+  - [E0017 value-out-of-range](rules/E0017.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---
