@@ -964,6 +964,7 @@ fn run(args: Args) -> Result<bool> {
 
         Command::Impact {
             migrations,
+            base,
             queries,
             schema,
             schema_dir,
@@ -998,6 +999,7 @@ fn run(args: Args) -> Result<bool> {
                 &config,
                 &impact::ImpactOptions {
                     migrations: &migrations,
+                    base: base.as_deref(),
                     rules: &rules,
                     quiet,
                 },

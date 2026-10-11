@@ -202,3 +202,56 @@ fn missing_migration_is_an_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("nope.sql"));
 }
+
+impl Project {
+    fn git(&self, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(&self.path)
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "git {args:?}: {status:?}");
+    }
+}
+
+#[test]
+fn base_picks_changed_schema_files() {
+    let project = Project::new(&[INIT, QUERIES[0], QUERIES[1]]);
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-q", "-m", "init"]);
+    let args = [
+        "--schema-dir",
+        "migrations",
+        "--queries",
+        "queries/*.sql",
+        "--base",
+        "main",
+    ];
+
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(0));
+    assert_eq!(json["migrations"], Value::Array(Vec::new()));
+
+    // An untracked migration counts
+    fs::write(project.path.join(RENAME.0), RENAME.1).unwrap();
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        json["migrations"][0].as_str().unwrap().replace('\\', "/"),
+        RENAME.0
+    );
+    assert_eq!(file_names(&json["introduced"]), ["queries/users.sql"]);
+
+    // So does a committed one on a branch
+    project.git(&["checkout", "-q", "-b", "feature"]);
+    project.git(&["add", "."]);
+    project.git(&["commit", "-q", "-m", "rename"]);
+    let (json, code) = project.json(&args);
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        json["migrations"][0].as_str().unwrap().replace('\\', "/"),
+        RENAME.0
+    );
+}

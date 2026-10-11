@@ -117,8 +117,14 @@ pub enum Command {
     /// Exits 1 when the change introduces errors.
     Impact {
         /// Migration (schema) files whose effect is shown (supports glob patterns)
-        #[arg(required = true)]
+        #[arg(required_unless_present = "base")]
         migrations: Vec<PathBuf>,
+
+        /// Show the effect of the schema files added or changed since the commit
+        /// where the current branch left this git revision (e.g. `origin/main`),
+        /// uncommitted and untracked files included
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
 
         /// Query files to check (supports glob patterns) [default: `files` in sqlsift.toml]
         #[arg(long = "queries", value_name = "PATTERN")]

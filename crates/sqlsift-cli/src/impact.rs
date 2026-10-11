@@ -18,6 +18,8 @@ use crate::{
 /// What `sqlsift impact` runs with, besides the configuration
 pub struct ImpactOptions<'a> {
     pub migrations: &'a [PathBuf],
+    /// `--base`: also the schema files changed since this git revision
+    pub base: Option<&'a str>,
     pub rules: &'a sqlsift_core::RuleConfig,
     pub quiet: bool,
 }
@@ -72,6 +74,55 @@ fn migration_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Run git in the current directory, returning its standard output
+fn git(args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| miette::miette!("Failed to run git: {}", e))?;
+    if !output.status.success() {
+        miette::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The schema files added or changed since the merge base of `base` and
+/// `HEAD`, in schema file order: committed, uncommitted and untracked changes
+fn changed_schema_files(base: &str, schema_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let root = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?.trim_end());
+    let merge_base = git(&["merge-base", base, "HEAD"])?;
+    let diff = git(&[
+        "diff",
+        "--name-only",
+        "-z",
+        "--diff-filter=AMR",
+        merge_base.trim_end(),
+    ])?;
+    let untracked = git(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--full-name",
+        ":/",
+    ])?;
+    let changed: Vec<PathBuf> = diff
+        .split('\0')
+        .chain(untracked.split('\0'))
+        .filter(|name| !name.is_empty())
+        .map(|name| fs::canonicalize(root.join(name)).unwrap_or_else(|_| root.join(name)))
+        .collect();
+    Ok(schema_files
+        .iter()
+        .filter(|path| fs::canonicalize(path).is_ok_and(|p| changed.contains(&p)))
+        .cloned()
+        .collect())
+}
+
 /// Run `sqlsift impact`. Returns whether the change introduces errors.
 pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
     let dialect = crate::config_dialect(config)?;
@@ -84,6 +135,14 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
     let dbt_catalogs = crate::dbt_catalog_files(config, templating, &mut dbt_projects)?;
     // Without schema files the migrations are the whole schema
     let schema_files = crate::schema_files(config, true)?;
+    let mut migrations = migrations;
+    if let Some(base) = options.base {
+        for file in changed_schema_files(base, &schema_files)? {
+            if !migrations.contains(&file) {
+                migrations.push(file);
+            }
+        }
+    }
     let versions = schema_versions(&schema_files, &migrations);
 
     let mut catalogs: Vec<Catalog> = Vec::with_capacity(2);
@@ -190,6 +249,10 @@ fn count(files: &[FileDiagnostics], severity: Severity) -> usize {
 }
 
 fn print_changes(changes: &SchemaChanges, migrations: &[PathBuf]) {
+    if migrations.is_empty() {
+        eprintln!("No schema files changed");
+        return;
+    }
     let names: Vec<String> = migrations.iter().map(|m| m.display().to_string()).collect();
     eprintln!("Impact of {}", names.join(", "));
     if changes.is_empty() {
