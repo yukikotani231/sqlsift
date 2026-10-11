@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident};
 
+use crate::dialect::SqlDialect;
 use crate::error::Span;
 use crate::schema::{split_dotted_idents, QualifiedName};
 use crate::types::SqlType;
@@ -81,16 +82,22 @@ impl Resolver<'_> {
         }
     }
 
-    /// Whether an unqualified name is a column (or an output column alias) in scope
+    /// Whether an unqualified name is a column (or an output column alias) in scope.
+    /// In Databricks (where struct paths are rarer than BigQuery's) a name that only
+    /// may be a column of a relation with unknown columns is not one, so a misspelled
+    /// alias is still reported.
     fn is_value_name(&self, ident: &Ident) -> bool {
-        !matches!(
-            self.scope.column(&ident.value, self.dialect),
-            ColumnLookup::NotFound
-        ) || self.scope.current_ref().is_some_and(|f| {
-            f.select_aliases
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(&ident.value))
-        })
+        let is_column = match self.scope.column(&ident.value, self.dialect) {
+            ColumnLookup::NotFound => false,
+            ColumnLookup::Unknown => self.dialect != SqlDialect::Databricks,
+            _ => true,
+        };
+        is_column
+            || self.scope.current_ref().is_some_and(|f| {
+                f.select_aliases
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&ident.value))
+            })
     }
 
     /// Whether a table missing from the catalog may still exist: a wildcard table

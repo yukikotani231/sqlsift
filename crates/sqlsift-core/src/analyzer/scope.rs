@@ -55,6 +55,10 @@ impl ExpressionType {
 pub(super) struct Column {
     pub(super) name: String,
     pub(super) ty: ExpressionType,
+    /// The name was guessed from an unaliased expression (`count(*)` -> `count`),
+    /// which dialects name differently: it is good enough to resolve references,
+    /// but not to say two columns have the same name
+    pub(super) guessed_name: bool,
 }
 
 impl Column {
@@ -62,7 +66,14 @@ impl Column {
         Self {
             name: name.into(),
             ty,
+            guessed_name: false,
         }
+    }
+
+    /// Give the column a name it certainly has (an alias or a column list)
+    pub(super) fn rename(&mut self, name: &str) {
+        name.clone_into(&mut self.name);
+        self.guessed_name = false;
     }
 }
 
@@ -107,6 +118,9 @@ pub(super) enum ColumnMatch<'r> {
     Yes(&'r ExpressionType),
     /// The relation's columns aren't fully known, so it may have the column
     Maybe,
+    /// The relation has several columns with this name (`SELECT *` over a join in a
+    /// CTE or subquery), so a reference to it is ambiguous
+    Duplicate,
     No,
 }
 
@@ -192,7 +206,7 @@ impl Relation {
         let mut columns = columns.unwrap_or_default();
         for (i, name) in names.iter().enumerate() {
             match columns.get_mut(i) {
-                Some(col) => col.name.clone_from(name),
+                Some(col) => col.rename(name),
                 None => columns.push(Column::new(name.clone(), ExpressionType::Unknown)),
             }
         }
@@ -205,6 +219,16 @@ impl Relation {
             return ColumnMatch::Maybe;
         };
         if let Some(col) = columns.iter().find(|c| c.name.eq_ignore_ascii_case(name)) {
+            if dialect.rejects_duplicate_column_references()
+                && !col.guessed_name
+                && columns
+                    .iter()
+                    .filter(|c| !c.guessed_name && c.name == col.name)
+                    .nth(1)
+                    .is_some()
+            {
+                return ColumnMatch::Duplicate;
+            }
             return ColumnMatch::Yes(&col.ty);
         }
         if self.kind == RelationKind::Table && is_system_column(dialect, name) {
@@ -310,6 +334,8 @@ pub(super) enum ColumnLookup<'s> {
     Found(&'s ExpressionType),
     /// Found in several relations of the same query block
     Ambiguous(Vec<String>),
+    /// The relation (by its key in FROM) has several columns with this name
+    Duplicate(String),
     /// Not found, but a relation with unknown columns may have it
     Unknown,
     NotFound,
@@ -421,13 +447,16 @@ impl Scope {
     /// The relation an unqualified column resolves to, if it resolves to exactly one
     pub(super) fn column_relation(&self, name: &str, dialect: SqlDialect) -> Option<&Relation> {
         for frame in self.visible() {
-            let mut found = frame
-                .relations
-                .values()
-                .filter(|r| matches!(r.column(name, dialect), ColumnMatch::Yes(_)));
+            let mut found = frame.relations.values().filter(|r| {
+                matches!(
+                    r.column(name, dialect),
+                    ColumnMatch::Yes(_) | ColumnMatch::Duplicate
+                )
+            });
             if let Some(relation) = found.next() {
-                let unique =
-                    found.next().is_none() || frame.using_columns.contains(&name.to_lowercase());
+                let duplicate = matches!(relation.column(name, dialect), ColumnMatch::Duplicate);
+                let unique = (found.next().is_none() && !duplicate)
+                    || frame.using_columns.contains(&name.to_lowercase());
                 return unique.then_some(relation);
             }
             if frame
@@ -446,11 +475,26 @@ impl Scope {
         for frame in self.visible() {
             let mut found: Vec<(&str, &ExpressionType)> = Vec::new();
             let mut maybe = false;
+            let mut duplicate = None;
             for (key, relation) in &frame.relations {
                 match relation.column(name, dialect) {
                     ColumnMatch::Yes(ty) => found.push((key, ty)),
+                    ColumnMatch::Duplicate => {
+                        duplicate.get_or_insert(key.as_str());
+                        found.push((key, &ExpressionType::Unknown));
+                    }
                     ColumnMatch::Maybe => maybe = true,
                     ColumnMatch::No => {}
+                }
+            }
+            if let Some(key) = duplicate {
+                // `JOIN ... USING (c)` with a side that has `c` twice is an error of
+                // its own; stay silent then
+                if frame.using_columns.contains(&name.to_lowercase()) {
+                    return ColumnLookup::Unknown;
+                }
+                if found.len() == 1 {
+                    return ColumnLookup::Duplicate(key.to_string());
                 }
             }
             match found.len() {

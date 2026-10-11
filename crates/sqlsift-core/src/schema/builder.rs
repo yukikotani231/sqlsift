@@ -6,7 +6,7 @@ use sqlparser::ast::{
     UserDefinedTypeRepresentation, Value,
 };
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
 use crate::dialect::SqlDialect;
@@ -663,8 +663,12 @@ impl SchemaBuilder {
             }
         }
 
-        // Process columns
-        for column in &create.columns {
+        // Process columns (Hive-format `PARTITIONED BY (c TYPE)` adds partition columns)
+        let partition_columns = match &create.hive_distribution {
+            sqlparser::ast::HiveDistributionStyle::PARTITIONED { columns } => columns.as_slice(),
+            _ => &[],
+        };
+        for column in create.columns.iter().chain(partition_columns) {
             // `CREATE TABLE c (LIKE p)` parses as a column named LIKE of type `p`
             if let Some(source) = like_pseudo_column(column) {
                 self.copy_like_columns(&mut table, source);
@@ -673,6 +677,7 @@ impl SchemaBuilder {
 
             let (col_def, constraints) = build_column(
                 &self.catalog,
+                self.dialect,
                 &name.name,
                 &column.name.value,
                 &column.data_type,
@@ -893,6 +898,7 @@ impl SchemaBuilder {
                 AlterTableOperation::AddColumn { column_def, .. } => {
                     let (col, constraints) = build_column(
                         &self.catalog,
+                        self.dialect,
                         &table_name.name,
                         &column_def.name.value,
                         &column_def.data_type,
@@ -931,7 +937,7 @@ impl SchemaBuilder {
                     if let Some(col) = self.catalog.get_table_mut(&table_name).and_then(|t| {
                         column_index(t, &column_name.value).map(|i| &mut t.columns[i])
                     }) {
-                        apply_alter_column(col, op);
+                        apply_alter_column(col, op, self.dialect);
                     }
                 }
                 AlterTableOperation::ModifyColumn {
@@ -959,6 +965,7 @@ impl SchemaBuilder {
                         .collect();
                     let (col, constraints) = build_column(
                         &self.catalog,
+                        self.dialect,
                         &table_name.name,
                         &new_name.value,
                         data_type,
@@ -1112,12 +1119,13 @@ impl Default for SchemaBuilder {
 /// collected into the returned `TableDef`, to be merged into the owning table.
 fn build_column(
     catalog: &Catalog,
+    dialect: SqlDialect,
     table_name: &str,
     col_name: &str,
     data_type: &DataType,
     options: &[ColumnOptionDef],
 ) -> (ColumnDef, TableDef) {
-    let mut col = ColumnDef::new(col_name, SqlType::from_ast(data_type));
+    let mut col = ColumnDef::new(col_name, SqlType::from_ast_in(data_type, dialect));
     let mut constraints = TableDef::new(QualifiedName::new(table_name));
 
     for option in options {
@@ -1250,14 +1258,14 @@ fn merge_constraints(table: &mut TableDef, constraints: TableDef) {
 }
 
 /// Apply an `ALTER TABLE ... ALTER COLUMN` operation to a column
-fn apply_alter_column(col: &mut ColumnDef, op: &AlterColumnOperation) {
+fn apply_alter_column(col: &mut ColumnDef, op: &AlterColumnOperation, dialect: SqlDialect) {
     match op {
         AlterColumnOperation::SetNotNull => col.nullable = false,
         AlterColumnOperation::DropNotNull => col.nullable = true,
         AlterColumnOperation::SetDefault { value } => col.default = Some(expr_to_default(value)),
         AlterColumnOperation::DropDefault => col.default = None,
         AlterColumnOperation::SetDataType { data_type, .. } => {
-            col.data_type = SqlType::from_ast(data_type);
+            col.data_type = SqlType::from_ast_in(data_type, dialect);
         }
         AlterColumnOperation::AddGenerated { generated_as, .. } => {
             use sqlparser::ast::GeneratedAs;
@@ -1424,7 +1432,17 @@ pub(crate) fn mask_unsupported_clauses(
             }
         }
     }
-    if !drop.contains(&true) {
+    // Redshift / Databricks table attributes
+    let offset = |t: &TokenWithSpan| {
+        byte_offset_of(
+            stmt,
+            t.span.start.line as usize,
+            t.span.start.column as usize,
+        )
+    };
+    let edits =
+        super::warehouse::mask_table_attributes(dialect, &tokens, &significant, &offset, &mut drop);
+    if !drop.contains(&true) && edits.is_empty() {
         return None;
     }
 
@@ -1437,9 +1455,23 @@ pub(crate) fn mask_unsupported_clauses(
             byte_offset_of(stmt, end.line as usize, end.column as usize).unwrap_or(stmt.len());
         blank[start..end].fill(true);
     }
+    // ... and the edited ranges, writing their replacement text over them
+    let mut replaced = std::collections::HashMap::new();
+    for edit in &edits {
+        let range = edit.range.start..edit.range.end.min(stmt.len());
+        blank[range.clone()].fill(true);
+        let positions = stmt.get(range.clone())?.char_indices();
+        for ((i, _), c) in positions.zip(edit.text.chars()) {
+            replaced.insert(range.start + i, c);
+        }
+    }
     let masked = stmt
         .char_indices()
-        .map(|(i, c)| if blank[i] && c != '\n' { ' ' } else { c })
+        .map(|(i, c)| match replaced.get(&i) {
+            Some(&r) => r,
+            None if blank[i] && c != '\n' => ' ',
+            None => c,
+        })
         .collect();
     Some((masked, parents))
 }

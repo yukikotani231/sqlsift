@@ -346,6 +346,19 @@ fn dbt_catalog_files(
     if config.templating.is_some() && templating == Templating::None {
         return Ok(Vec::new());
     }
+    let mut catalogs: Vec<DbtCatalogFile> = Vec::new();
+    for root in dbt_project_roots(config, projects) {
+        let catalog = dbt::catalog_file(&root);
+        if catalog.is_file() && !catalogs.iter().any(|(c, _)| *c == catalog) {
+            catalogs.push((catalog, false));
+        }
+    }
+    Ok(catalogs)
+}
+
+/// The dbt projects of the current directory, the configuration file's directory
+/// and the query files
+fn dbt_project_roots(config: &Config, projects: &mut dbt::DbtProjects) -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::new()];
     dirs.extend(config.base_dir.clone());
     for pattern in &config.files {
@@ -356,17 +369,37 @@ fn dbt_catalog_files(
             dirs.push(path.parent().unwrap_or(Path::new("")).to_path_buf());
         }
     }
-    let mut catalogs: Vec<DbtCatalogFile> = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
     for dir in dirs {
-        let Some(root) = projects.root_of_dir(&dir) else {
-            continue;
-        };
-        let catalog = dbt::catalog_file(&root);
-        if catalog.is_file() && !catalogs.iter().any(|(c, _)| *c == catalog) {
-            catalogs.push((catalog, false));
+        if let Some(root) = projects.root_of_dir(&dir) {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
         }
     }
-    Ok(catalogs)
+    roots
+}
+
+/// Add the relation variables of the dbt projects (`vars:` in `dbt_project.yml`
+/// whose value is a `ref()` / `source()`) to `catalog` as `var.<name>`, unless
+/// templating is turned off
+fn load_dbt_vars(
+    catalog: &mut Catalog,
+    config: &Config,
+    templating: Templating,
+    projects: &mut dbt::DbtProjects,
+) {
+    if config.templating.is_some() && templating == Templating::None {
+        return;
+    }
+    let mut vars = sqlsift_core::dbt::RelationVars::default();
+    for root in dbt_project_roots(config, projects) {
+        if let Ok(yml) = std::fs::read_to_string(root.join("dbt_project.yml")) {
+            vars.merge(sqlsift_core::dbt::RelationVars::from_dbt_project(&yml));
+        }
+    }
+    let added = vars.add_to_catalog(catalog);
+    tracing::debug!(added, "dbt relation variables");
 }
 
 /// Add the relations of dbt catalogs to `catalog`. A catalog that was found (not
@@ -511,6 +544,7 @@ fn run(args: Args) -> Result<bool> {
                 }
             };
             load_dbt_catalogs(&mut catalog, &dbt_catalogs)?;
+            load_dbt_vars(&mut catalog, &config, templating, &mut dbt_projects);
 
             // Collect query files from config or CLI (glob patterns are expanded)
             let mut query_files = Vec::new();

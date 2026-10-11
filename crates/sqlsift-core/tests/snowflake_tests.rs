@@ -678,3 +678,109 @@ fn dbt_model_mistakes_are_reported() {
         vec![DiagnosticKind::ColumnNotFound]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Recursive CTEs, positional columns, scripting and administration statements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn self_referencing_cte_is_recursive_without_the_keyword() {
+    assert_clean(
+        "WITH nums (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 3) \
+         SELECT n FROM nums",
+    );
+    assert_clean(
+        "WITH chain AS (
+             SELECT id, customer_id FROM raw_orders WHERE customer_id IS NULL
+             UNION ALL
+             SELECT o.id, o.customer_id FROM raw_orders o JOIN chain ON o.customer_id = chain.id
+         )
+         SELECT id FROM chain",
+    );
+    // The recursive term is still checked
+    assert_eq!(
+        kinds(
+            "WITH nums AS (SELECT 1 AS n UNION ALL SELECT nope + 1 FROM nums WHERE n < 3) \
+             SELECT n FROM nums"
+        ),
+        vec![DiagnosticKind::ColumnNotFound]
+    );
+}
+
+#[test]
+fn positional_columns_qualified_with_an_alias() {
+    assert_clean("SELECT o.$1, o.$2 FROM raw_orders o");
+    assert_clean("SELECT e.$1:name::string AS name FROM raw_events e");
+    // The rest of the statement is still checked
+    assert_eq!(
+        kinds("SELECT o.$1, o.nope FROM raw_orders o"),
+        vec![DiagnosticKind::ColumnNotFound]
+    );
+}
+
+#[test]
+fn administration_statements_are_skipped() {
+    let sql = "ALTER SESSION SET USE_CACHED_RESULT = FALSE;
+CREATE WAREHOUSE IF NOT EXISTS sizing_wh;
+ALTER WAREHOUSE sizing_wh SET WAREHOUSE_SIZE = XSMALL;
+ALTER WAREHOUSE sizing_wh SUSPEND;
+CREATE OR REPLACE TASK t1 WAREHOUSE = sizing_wh SCHEDULE = '5 minute' AS SELECT 1;
+ALTER TASK t1 RESUME;
+ALTER USER u SET DEFAULT_ROLE = r;
+CREATE OR REPLACE FILE FORMAT ff TYPE = CSV;
+GRANT USAGE ON WAREHOUSE sizing_wh TO ROLE r;
+SELECT id FROM raw_orders;
+SELECT nope FROM raw_orders;";
+    assert_eq!(kinds(sql), vec![DiagnosticKind::ColumnNotFound]);
+    // Queries and table definitions that don't parse are still parse errors
+    assert_eq!(
+        kinds("ALTER SESSION SET TIMEZONE = 'UTC';\nSELECT FROM WHERE;"),
+        vec![DiagnosticKind::ParseError]
+    );
+    assert_eq!(
+        kinds("CREATE TABLE t (a INT,, b INT);"),
+        vec![DiagnosticKind::ParseError]
+    );
+}
+
+#[test]
+fn scripting_blocks_are_skipped() {
+    let block = "DECLARE
+    v_cnt INT DEFAULT 1;
+    res RESULTSET;
+BEGIN
+    LET v_input STRING := 'database.schema.table';
+    CREATE OR REPLACE TEMPORARY TABLE tmp (id INT, sql TEXT);
+    FOR i IN 1 TO 3 DO
+        BEGIN
+            v_cnt := v_cnt + 1;
+            INSERT INTO output SELECT CASE WHEN :i > 1 THEN 1 ELSE 0 END;
+        EXCEPTION
+            WHEN other THEN v_cnt := 0;
+        END;
+    END FOR;
+    IF (v_cnt > 1) THEN
+        RETURN 1;
+    END IF;
+    res := (EXECUTE IMMEDIATE ('SELECT 1'));
+    RETURN TABLE (res);
+END;
+SELECT nope FROM raw_orders;";
+    assert_eq!(kinds(block), vec![DiagnosticKind::ColumnNotFound]);
+    assert_eq!(
+        kinds(
+            "BEGIN\n  CREATE TABLE z (a INT);\n  INSERT INTO z SELECT id FROM raw_orders;\nEND;\n\
+             SELECT nope FROM raw_orders;"
+        ),
+        vec![DiagnosticKind::ColumnNotFound]
+    );
+    // A transaction is not a block
+    assert_eq!(
+        kinds("BEGIN TRANSACTION;\nSELECT nope FROM raw_orders;\nCOMMIT;"),
+        vec![DiagnosticKind::ColumnNotFound]
+    );
+    assert_eq!(
+        kinds("BEGIN;\nSELECT nope FROM raw_orders;\nCOMMIT;"),
+        vec![DiagnosticKind::ColumnNotFound]
+    );
+}

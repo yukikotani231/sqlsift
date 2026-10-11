@@ -3,6 +3,7 @@
 mod builder;
 mod catalog;
 mod migrations;
+mod warehouse;
 
 pub use builder::SchemaBuilder;
 pub(crate) use builder::{mask_unsupported_clauses, unparsed_definition};

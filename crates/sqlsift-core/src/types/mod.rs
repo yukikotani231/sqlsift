@@ -74,6 +74,22 @@ pub enum SqlType {
 }
 
 impl SqlType {
+    /// Convert from sqlparser's DataType to our internal SqlType, with the type
+    /// names only `dialect` has (Databricks `LONG`, `SHORT`, `BYTE`)
+    pub fn from_ast_in(data_type: &DataType, dialect: SqlDialect) -> Self {
+        match (SqlType::from_ast(data_type), dialect) {
+            (SqlType::Custom(name), SqlDialect::Databricks) => {
+                match name.to_ascii_lowercase().as_str() {
+                    "long" => SqlType::BigInt,
+                    "short" => SqlType::SmallInt,
+                    "byte" => SqlType::TinyInt,
+                    _ => SqlType::Custom(name),
+                }
+            }
+            (ty, _) => ty,
+        }
+    }
+
     /// Convert from sqlparser's DataType to our internal SqlType
     pub fn from_ast(data_type: &DataType) -> Self {
         match data_type {
@@ -335,6 +351,24 @@ impl SqlType {
                 | SqlType::Real
                 | SqlType::DoublePrecision
                 | SqlType::Decimal { .. }
+        )
+    }
+
+    /// Whether sqlsift knows which arithmetic operators this type supports, so that
+    /// using it with `+ - * / %` can be reported. User-defined and extension types
+    /// (MONEY, domains, citext, dbt type placeholders, unknown warehouse types),
+    /// semi-structured values and enums don't qualify, and neither do arrays and
+    /// JSONB, which have arithmetic-looking operators in PostgreSQL (`jsonb - text`,
+    /// intarray's `int[] - int`)
+    pub fn has_known_arithmetic(&self) -> bool {
+        !matches!(
+            self,
+            SqlType::Custom(_)
+                | SqlType::SemiStructured(_)
+                | SqlType::Enum(_)
+                | SqlType::Array(_)
+                | SqlType::Jsonb
+                | SqlType::Unknown
         )
     }
 
