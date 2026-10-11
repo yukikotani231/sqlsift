@@ -210,8 +210,9 @@ Errors are shown as annotations on the pull request diff. Add `diff-base: ${{ gi
 | [E0024](https://yukikotani231.github.io/sqlsift/docs/rules/E0024.html) | unfiltered-write | UPDATE or DELETE without WHERE |
 | [E0025](https://yukikotani231.github.io/sqlsift/docs/rules/E0025.html) | insert-without-columns | INSERT without a column list |
 | [E0026](https://yukikotani231.github.io/sqlsift/docs/rules/E0026.html) | select-star | SELECT * in a query's result columns |
+| [E0027](https://yukikotani231.github.io/sqlsift/docs/rules/E0027.html) | wrong-argument-type | Function or operator given an argument type it doesn't take |
 
-E0001-E0017 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 (`restriction`) are off until enabled (`-W restriction`).
+E0001-E0017 and E0027 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default; E0024-E0026 (`restriction`) are off until enabled (`-W restriction`).
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

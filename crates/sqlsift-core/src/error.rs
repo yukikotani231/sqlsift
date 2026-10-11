@@ -202,6 +202,8 @@ pub enum DiagnosticKind {
     InsertWithoutColumns,
     /// E0026: SELECT * in a statement's result
     SelectStar,
+    /// E0027: A built-in function or operator given an argument type it doesn't take
+    WrongArgumentType,
     /// Parse error
     ParseError,
 }

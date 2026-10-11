@@ -255,6 +255,7 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **E0018**-**E0023** (suspicious, warnings): comparison with NULL, NOT IN over a nullable column, IN subquery selecting an outer column, comma-joined tables with no join condition, IS NULL on a NOT NULL column / self-comparison, WHERE undoing an outer join (`analyzer/suspicious.rs`)
 - **E0024**-**E0026** (restriction, off by default): UPDATE/DELETE without WHERE, INSERT without column list, SELECT * (`analyzer/restriction.rs`; only run when enabled)
 - **E0017**: Value out of range (literal too long / out of range for the column in INSERT VALUES / UPDATE SET; PostgreSQL, Redshift, MySQL)
+- **E0027**: Wrong argument type (built-in function or LIKE with an argument type PostgreSQL has no version for: `sum(text)`, `lower(integer)`, `int LIKE`; skipped for names the schema defines; `analyzer/signatures.rs`)
 - **E1000**: Generic parse error
 
 ## Release Process

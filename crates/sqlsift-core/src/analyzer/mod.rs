@@ -7,6 +7,7 @@ mod ranges;
 mod resolver;
 mod restriction;
 mod scope;
+mod signatures;
 mod snowflake;
 mod structure;
 mod suspicious;

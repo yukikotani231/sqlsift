@@ -33,6 +33,7 @@ E0023  outer-join-filtered       suspicious   warn     WHERE condition turns an 
 E0024  unfiltered-write          restriction  off      UPDATE or DELETE without WHERE
 E0025  insert-without-columns    restriction  off      INSERT without a column list
 E0026  select-star               restriction  off      SELECT * in a query's result columns
+E0027  wrong-argument-type       correctness  error    Function or operator given an argument type it doesn't take
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

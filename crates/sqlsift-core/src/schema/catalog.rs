@@ -9,6 +9,7 @@ use crate::types::SqlType;
 
 /// Schema catalog - holds all table/view information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Catalog {
     /// Schema name -> Schema
     pub schemas: IndexMap<String, Schema>,
@@ -51,6 +52,14 @@ pub struct Catalog {
     /// known
     #[serde(default)]
     pub unknown_unique_keys: bool,
+    /// Names (lowercase, without schema) of the functions and aggregates the
+    /// schema input defines: they may overload built-in functions
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_functions: Vec<String>,
+    /// The schema input defines operators (`CREATE OPERATOR`), which may
+    /// overload built-in ones
+    #[serde(default)]
+    pub user_operators: bool,
 }
 
 /// A schema statement that could not be parsed and was skipped
@@ -86,6 +95,8 @@ impl Catalog {
             dropped_relations: Vec::new(),
             databases: Vec::new(),
             unknown_unique_keys: false,
+            user_functions: Vec::new(),
+            user_operators: false,
         };
         // Create default schema
         catalog.schemas.insert(

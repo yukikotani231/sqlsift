@@ -331,6 +331,13 @@ pub const RULES: &[Rule] = &[
         summary: "SELECT * in a query's result columns",
     },
     Rule {
+        kind: DiagnosticKind::WrongArgumentType,
+        code: "E0027",
+        name: "wrong-argument-type",
+        category: RuleCategory::Correctness,
+        summary: "Function or operator given an argument type it doesn't take",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

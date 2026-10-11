@@ -116,9 +116,46 @@ impl SchemaBuilder {
         }
     }
 
+    /// Record the names of functions, aggregates and operators `sql` creates (in
+    /// any statement, parsed or not), which may overload built-in ones
+    fn record_user_routines(&mut self, sql: &str) {
+        let lower = sql.to_lowercase();
+        let words: Vec<&str> = lower
+            .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '"' | '$')))
+            .filter(|w| !w.is_empty())
+            .collect();
+        for (i, word) in words.iter().enumerate() {
+            if *word != "create" {
+                continue;
+            }
+            let mut rest = words[i + 1..].iter();
+            let mut kind = rest.next();
+            if kind == Some(&"or") {
+                rest.next(); // replace
+                kind = rest.next();
+            }
+            match kind {
+                Some(&("function" | "aggregate")) => {
+                    let name = rest
+                        .next()
+                        .and_then(|n| n.rsplit('.').next())
+                        .map(|n| n.trim_matches('"').to_string());
+                    if let Some(name) = name {
+                        if !self.catalog.user_functions.contains(&name) {
+                            self.catalog.user_functions.push(name);
+                        }
+                    }
+                }
+                Some(&"operator") => self.catalog.user_operators = true,
+                _ => {}
+            }
+        }
+    }
+
     /// Build the catalog from the statements of `sql`
     fn parse_text(&mut self, sql: &str) {
         let sql = &*crate::schema::strip_down_migrations(sql);
+        self.record_user_routines(sql);
         let dialect = self.dialect.parser_dialect();
 
         // psql meta-commands in dumps and scripts (`\connect`, `\restrict`, `\i`, ...)

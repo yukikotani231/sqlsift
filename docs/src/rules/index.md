@@ -54,4 +54,5 @@ CREATE TABLE coupons (
 | [E0024](E0024.md) | `unfiltered-write` | UPDATE or DELETE without WHERE |
 | [E0025](E0025.md) | `insert-without-columns` | INSERT without a column list |
 | [E0026](E0026.md) | `select-star` | SELECT * in a query's result columns |
+| [E0027](E0027.md) | `wrong-argument-type` | Function or operator given an argument type it doesn't take |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |
