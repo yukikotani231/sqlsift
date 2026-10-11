@@ -296,3 +296,132 @@ fn sources_in_the_schema_are_checked() {
     // A source the schema doesn't have is a table with unknown columns
     assert_valid("select anything from {{ source('raw', 'unknown') }}");
 }
+
+// ---------------------------------------------------------------------------
+// dbt catalog (`target/catalog.json`): columns of ref() and source()
+// ---------------------------------------------------------------------------
+
+const DBT_CATALOG: &str = r#"{
+    "nodes": {
+        "model.jaffle.stg_orders": {
+            "metadata": {"type": "VIEW", "schema": "analytics", "name": "stg_orders"},
+            "columns": {
+                "order_id": {"type": "integer", "index": 1, "name": "order_id"},
+                "customer_id": {"type": "integer", "index": 2, "name": "customer_id"},
+                "status": {"type": "text", "index": 3, "name": "status"},
+                "Amount": {"type": "numeric", "index": 4, "name": "Amount"}
+            }
+        },
+        "model.jaffle.CamelModel": {
+            "metadata": {"schema": "analytics", "name": "camel_model"},
+            "columns": {"id": {"type": "integer", "index": 1, "name": "id"}}
+        },
+        "model.jaffle.order": {
+            "metadata": {"schema": "analytics", "name": "order"},
+            "columns": {"id": {"type": "integer", "index": 1, "name": "id"}}
+        }
+    },
+    "sources": {
+        "source.jaffle.shop.payments": {
+            "metadata": {"schema": "raw_shop", "name": "payments"},
+            "columns": {
+                "ID": {"type": "NUMBER(38,0)", "index": 1, "name": "ID"},
+                "PAID_AT": {"type": "TIMESTAMP_NTZ", "index": 2, "name": "PAID_AT"}
+            }
+        }
+    }
+}"#;
+
+fn analyze_dbt(dialect: SqlDialect, sql: &str) -> Vec<Diagnostic> {
+    let mut builder = SchemaBuilder::with_dialect(dialect);
+    builder.parse(SCHEMA).unwrap();
+    let mut catalog = builder.build().0;
+    sqlsift_core::dbt::load_catalog_json(DBT_CATALOG, &mut catalog).unwrap();
+    Analyzer::with_dialect(&catalog, dialect)
+        .with_templating(Templating::Jinja)
+        .analyze(sql)
+}
+
+fn assert_dbt_valid(sql: &str) {
+    for dialect in [
+        SqlDialect::PostgreSQL,
+        SqlDialect::MySQL,
+        SqlDialect::SQLite,
+    ] {
+        let diagnostics = analyze_dbt(dialect, sql);
+        assert!(
+            diagnostics.is_empty(),
+            "{dialect:?}: expected no diagnostics for:\n{sql}\ngot: {diagnostics:#?}"
+        );
+    }
+}
+
+/// The only diagnostic (PostgreSQL): its kind, line, column and message
+fn dbt_single(sql: &str) -> (DiagnosticKind, usize, usize, String) {
+    let diagnostics = analyze_dbt(SqlDialect::PostgreSQL, sql);
+    assert_eq!(diagnostics.len(), 1, "{sql}\n{diagnostics:#?}");
+    let span = diagnostics[0].span.unwrap();
+    (
+        diagnostics[0].kind,
+        span.line,
+        span.column,
+        diagnostics[0].message.clone(),
+    )
+}
+
+#[test]
+fn dbt_catalog_ref_columns_are_checked() {
+    assert_dbt_valid("select order_id, status, amount from {{ ref('stg_orders') }}");
+    assert_dbt_valid(
+        "select o.order_id, u.name\nfrom {{ ref(\"stg_orders\") }} as o\njoin users u on u.id = o.customer_id",
+    );
+    let (kind, line, column, message) =
+        dbt_single("select o.order_id, o.bogus\nfrom {{ ref('stg_orders') }} o");
+    assert_eq!(
+        (kind, line, column),
+        (DiagnosticKind::ColumnNotFound, 1, 22)
+    );
+    assert!(message.contains("bogus"), "{message}");
+    // Through a CTE with `*`
+    let (kind, line, ..) = dbt_single(
+        "with o as (select * from {{ ref('stg_orders') }})\nselect order_id, nope from o",
+    );
+    assert_eq!((kind, line), (DiagnosticKind::ColumnNotFound, 2));
+}
+
+#[test]
+fn dbt_catalog_types_are_checked() {
+    let (kind, ..) = dbt_single("select 1 from {{ ref('stg_orders') }} where order_id = true");
+    assert_eq!(kind, DiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn dbt_catalog_source_columns_are_checked() {
+    assert_dbt_valid("select id, paid_at from {{ source('shop', 'payments') }}");
+    let (kind, ..) = dbt_single("select amount from {{ source('shop', 'payments') }}");
+    assert_eq!(kind, DiagnosticKind::ColumnNotFound);
+    // The warehouse name of the relation
+    assert_dbt_valid("select id from raw_shop.payments");
+}
+
+#[test]
+fn dbt_catalog_unusual_names() {
+    // Mixed case and keyword model names
+    assert_dbt_valid("select id from {{ ref('CamelModel') }}");
+    assert_dbt_valid("select id from {{ref('order')}}");
+    let (kind, ..) = dbt_single("select nope from {{ ref('CamelModel') }}");
+    assert_eq!(kind, DiagnosticKind::ColumnNotFound);
+}
+
+#[test]
+fn dbt_catalog_unknown_relations_stay_unknown() {
+    // Not in the catalog (stale or partial catalog)
+    assert_dbt_valid("select anything from {{ ref('not_built_yet') }}");
+    assert_dbt_valid("select anything from {{ source('shop', 'refunds') }}");
+    // Package-qualified and versioned refs
+    assert_dbt_valid("select anything from {{ ref('jaffle', 'stg_orders') }}");
+    assert_dbt_valid("select anything from {{ ref('stg_orders', v=2) }}");
+    assert_dbt_valid("select anything from {{ ref('stg_orders', version=2) }}");
+    // A ref() spanning lines
+    assert_dbt_valid("select anything from {{\n  ref('stg_orders')\n}}");
+}

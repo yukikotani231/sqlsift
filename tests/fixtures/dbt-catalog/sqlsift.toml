@@ -1,0 +1,3 @@
+# A dbt project without schema files: the tables come from target/catalog.json
+# (written by `dbt docs generate`), which sqlsift finds next to dbt_project.yml
+files = ["models/**/*.sql"]

@@ -3611,6 +3611,132 @@ fn template_parse_error_without_templating_suggests_jinja() {
         .assert_stderr_contains("--templating jinja");
 }
 
+/// The dbt project with a `target/catalog.json` in `tests/fixtures/dbt-catalog`
+fn dbt_catalog_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/dbt-catalog")
+        .canonicalize()
+        .expect("dbt-catalog fixture exists")
+}
+
+#[test]
+fn dbt_catalog_in_target_gives_ref_and_source_columns() {
+    let t = TempDir::new("dbt-catalog");
+    // No schema files: the tables come from target/catalog.json
+    let run = t.run_in(&dbt_catalog_fixture(), &["check", "--format", "json"]);
+    run.assert_code(1);
+    let json = run.json();
+    let files = json["files"].as_array().expect("files array");
+    let diagnostics: Vec<(&str, &Value)> = files
+        .iter()
+        .flat_map(|f| {
+            let file = f["file"].as_str().unwrap_or("");
+            f["diagnostics"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |d| (file, d))
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 1, "{json:#}");
+    let (file, d) = diagnostics[0];
+    assert!(file.ends_with("order_typo.sql"), "{file}");
+    assert_eq!(d["code"], "E0002");
+    assert!(
+        d["message"].as_str().unwrap_or("").contains("amount_usd"),
+        "{d:#}"
+    );
+    assert_eq!(d["span"]["line"], 3);
+    assert_eq!(d["span"]["column"], 22);
+
+    // Templating turned off: no catalog is looked for (and schema files are needed)
+    t.run_in(&dbt_catalog_fixture(), &["check", "--templating", "none"])
+        .assert_code(2)
+        .assert_stderr_contains("No schema files specified");
+}
+
+const DBT_MINI_CATALOG: &str = r#"{"nodes": {"model.demo.events": {
+    "metadata": {"schema": "analytics", "name": "events"},
+    "columns": {"user_id": {"type": "integer", "index": 1, "name": "user_id"},
+                "kind": {"type": "text", "index": 2, "name": "kind"}}}}, "sources": {}}"#;
+
+#[test]
+fn dbt_catalog_flag_and_config_key() {
+    let t = with_users_schema("dbt-catalog-key");
+    t.write(
+        "q.sql",
+        "SELECT u.id, e.kind, e.bogus FROM users u JOIN {{ ref('events') }} e ON e.user_id = u.id\n",
+    );
+    t.write("dbt/catalog.json", DBT_MINI_CATALOG);
+    // Without a catalog, the columns of ref() are unknown
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--templating",
+        "jinja",
+        "q.sql",
+    ])
+    .assert_code(0);
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--templating",
+        "jinja",
+        "--dbt-catalog",
+        "dbt/catalog.json",
+        "q.sql",
+    ]);
+    run.assert_code(1).assert_stderr_contains("bogus");
+    assert_eq!(run.count_code("E0002"), 1, "{}", run.stderr);
+
+    // `dbt_catalog` in sqlsift.toml is relative to the config file
+    t.write(
+        "conf/sqlsift.toml",
+        "schema = [\"../schema.sql\"]\ntemplating = \"jinja\"\ndbt_catalog = \"../dbt/catalog.json\"\n",
+    );
+    t.run(&["check", "--config", "conf/sqlsift.toml", "q.sql"])
+        .assert_code(1)
+        .assert_stderr_contains("bogus")
+        .assert_stderr_lacks("unknown key");
+
+    // A configured catalog that doesn't exist or isn't a dbt catalog is an error
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--dbt-catalog",
+        "nope.json",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("dbt catalog not found");
+    t.write("bad.json", "[1, 2]");
+    t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--dbt-catalog",
+        "bad.json",
+        "q.sql",
+    ])
+    .assert_code(2)
+    .assert_stderr_contains("Failed to load dbt catalog");
+}
+
+#[test]
+fn unreadable_dbt_catalog_in_target_is_a_warning() {
+    let t = TempDir::new("dbt-catalog-bad");
+    t.write("dbt_project.yml", "name: demo\n");
+    t.write("target/catalog.json", "{ not json");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write("models/m.sql", "SELECT x FROM {{ ref('events') }}\n");
+    t.run(&["check", "-s", "schema.sql", "models/m.sql"])
+        .assert_code(0)
+        .assert_stderr_contains("Warning: failed to load dbt catalog");
+}
+
 // ---------------------------------------------------------------------------
 // SQL embedded in application code (tests/fixtures/embedded)
 // ---------------------------------------------------------------------------

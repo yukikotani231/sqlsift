@@ -8,6 +8,7 @@
 
 pub mod analyzer;
 pub mod baseline;
+pub mod dbt;
 pub mod dialect;
 pub mod embedded;
 pub mod error;

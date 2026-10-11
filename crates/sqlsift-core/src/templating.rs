@@ -12,7 +12,9 @@
 //!   `{% test %}`, `{% materialization %}` and `{% docs %}` blocks are blanked;
 //!   the body of `{% raw %}...{% endraw %}` is SQL text.
 //! - `{{ source('schema', 'table') }}` where a table name is expected becomes
-//!   `schema.table` when the schema has that table.
+//!   `schema.table` when the catalog has that table, and `{{ ref('model') }}`
+//!   becomes `ref.model` when the catalog has the model from a dbt `catalog.json`
+//!   (see [`crate::dbt`]). Names other than lowercase identifiers are quoted.
 //! - Any other `{{ expression }}` where a table name is expected (after FROM, JOIN,
 //!   INTO, UPDATE, TABLE or USING, e.g. `FROM {{ ref('orders') }}`) becomes an
 //!   identifier made from its text (`___ref__orders____`). It names a table sqlsift
@@ -34,6 +36,7 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
+use crate::dbt;
 use crate::psql::Preprocessed;
 
 /// How query files are templated
@@ -210,6 +213,30 @@ fn source_call(content: &str) -> Option<(&str, &str)> {
         .strip_suffix(')')?;
     let (schema, table) = args.split_once(',')?;
     Some((unquote_name(schema)?, unquote_name(table)?))
+}
+
+/// `ref('model')`: the model name (`None` for a package-qualified or versioned
+/// ref, `ref('package', 'model')`, `ref('model', v=2)`)
+fn ref_call(content: &str) -> Option<&str> {
+    let arg = content
+        .strip_prefix("ref")?
+        .trim_start()
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    unquote_name(arg)
+}
+
+/// A name part as SQL: as is when it is a lowercase identifier (which every
+/// dialect reads as itself), else double-quoted
+fn sql_name_part(name: &str) -> Cow<'_, str> {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("\"{name}\""))
+    }
 }
 
 /// A loop separator like `{{ ',' if not loop.last }}`
@@ -518,13 +545,21 @@ impl Masker<'_, '_> {
         let first_line = text.find('\n').map_or(text, |n| &text[..n]);
         let single_line = first_line.len() == text.len();
         let column = self.column;
-        let source = source_call(content)
-            .filter(|&(schema, table)| single_line && (self.table_exists)(schema, table));
-        match (position, source) {
-            (Position::Table, Some((schema, table))) => {
-                // `{{ source('raw', 'customers') }}` → `raw.customers`, a table of
-                // the schema
-                let name = format!("{schema}.{table}");
+        // A relation the catalog has: `{{ source('raw', 'customers') }}` →
+        // `raw.customers`, `{{ ref('orders') }}` → `ref.orders` (dbt catalog)
+        let relation = if single_line && matches!(position, Position::Table) {
+            source_call(content)
+                .or_else(|| ref_call(content).map(|model| (dbt::REF_SCHEMA, model)))
+                .filter(|&(schema, table)| (self.table_exists)(schema, table))
+                .map(|(schema, table)| {
+                    format!("{}.{}", sql_name_part(schema), sql_name_part(table))
+                })
+                .filter(|name| name.len() <= text.chars().count())
+        } else {
+            None
+        };
+        match (position, relation) {
+            (Position::Table, Some(name)) => {
                 let padding = text.chars().count() - name.len();
                 self.out.push_str(&name);
                 self.out.push_str(&" ".repeat(padding));
@@ -605,7 +640,8 @@ fn find_endraw(sql: &str, from: usize) -> (usize, usize) {
 }
 
 /// Mask Jinja template syntax (see the module docs). `table_exists(schema, table)`
-/// tells whether the schema has a table for `{{ source(schema, table) }}`.
+/// tells whether the catalog has a table for `{{ source(schema, table) }}` (and,
+/// with schema [`dbt::REF_SCHEMA`], for `{{ ref(table) }}`).
 pub(crate) fn mask_jinja<'a>(
     sql: &'a str,
     table_exists: &dyn Fn(&str, &str) -> bool,
@@ -681,7 +717,10 @@ mod tests {
 
     fn template(sql: &str) -> Template<'_> {
         mask_jinja(sql, &|schema, table| {
-            (schema, table) == ("raw", "customers")
+            matches!(
+                (schema, table),
+                ("raw", "customers") | ("ref", "orders" | "Orders" | "a_very_long_model_name")
+            )
         })
     }
 
@@ -765,6 +804,36 @@ mod tests {
         assert!(!template("SELECT * FROM {{ source('raw', 'customers') }}")
             .masked
             .is_substituted(1, 15));
+    }
+
+    #[test]
+    fn known_refs_become_ref_tables() {
+        assert_eq!(
+            mask("SELECT * FROM {{ ref('orders') }} o"),
+            "SELECT * FROM ref.orders          o"
+        );
+        assert_eq!(
+            mask("SELECT * FROM {{ref('Orders')}}"),
+            "SELECT * FROM ref.\"Orders\"     "
+        );
+        assert!(!template("SELECT * FROM {{ ref('orders') }}")
+            .masked
+            .is_substituted(1, 15));
+        // Unknown, package-qualified and versioned refs stay unknown tables
+        assert_eq!(mask("FROM {{ ref('x') }}"), "FROM ___ref__x_____");
+        assert_eq!(
+            mask("FROM {{ ref('p', 'orders') }}"),
+            "FROM ___ref__p____orders_____"
+        );
+        assert_eq!(
+            mask("FROM {{ ref('orders', v=2) }}"),
+            "FROM ___ref__orders___v_2____"
+        );
+        // A ref() that isn't a table name
+        assert_eq!(
+            mask("SELECT '{{ ref(\"orders\") }}'"),
+            "SELECT $1                   "
+        );
     }
 
     #[test]
