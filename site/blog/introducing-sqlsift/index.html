@@ -56,11 +56,12 @@ alt="sqlsift init and check on a project whose migration renamed a column" /></p
   WHERE site_id = ${siteId} AND created_at &lt; ${cutoff}
 `;</code></pre>
 <p>Tests pass and TypeScript is happy, because to both of them the SQL
-is a string. In one open-source app this exact shape kept a
-data-retention job failing for two and a half months before someone
-noticed (<a
-href="https://github.com/Seentics/seentics/commit/d2f0d97">the
-fix</a>).</p>
+is a string. This exact shape happened in a real open-source app: the
+cleanup job kept failing until the maintainers spotted it and <a
+href="https://github.com/Seentics/seentics/commit/d2f0d97">fixed it</a>.
+It isn't carelessness. The rename and the new job came from two separate
+changes a couple of hours apart, and nothing in the toolchain could
+connect them.</p>
 <p>sqlsift reports it the moment it's written:</p>
 <pre class="console"><code>$ npx sqlsift-cli check
 error[E0002]: Column &#39;site_id&#39; not found in table &#39;page_views&#39;
