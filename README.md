@@ -193,8 +193,10 @@ Errors are shown as annotations on the pull request diff. The [CI guide](https:/
 | [E0019](https://yukikotani231.github.io/sqlsift/docs/rules/E0019.html) | not-in-with-nulls | NOT IN over a nullable subquery column |
 | [E0020](https://yukikotani231.github.io/sqlsift/docs/rules/E0020.html) | outer-column-in-subquery | IN subquery selects a column of the outer query |
 | [E0021](https://yukikotani231.github.io/sqlsift/docs/rules/E0021.html) | missing-join-condition | Tables in FROM with no condition linking them |
+| [E0022](https://yukikotani231.github.io/sqlsift/docs/rules/E0022.html) | constant-condition | Condition that is always or never true from the schema |
+| [E0023](https://yukikotani231.github.io/sqlsift/docs/rules/E0023.html) | outer-join-filtered | WHERE condition turns an outer join into an inner join |
 
-E0001-E0017 report queries the database rejects and are errors by default; E0018-E0021 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default.
+E0001-E0017 report queries the database rejects and are errors by default; E0018-E0023 (`suspicious`) report valid queries that almost certainly don't do what was meant and are warnings by default.
 
 Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sqlsift.toml`) or per run (`-A` / `-W` / `-D`), and silenced for a line or a file with `-- sqlsift:disable` / `-- sqlsift:disable-file` comments, or for a whole existing backlog with a baseline (`--write-baseline` / `--baseline`). See [Rules and levels](https://yukikotani231.github.io/sqlsift/docs/guide/rules.html) and [Suppressing diagnostics](https://yukikotani231.github.io/sqlsift/docs/guide/suppression.html).
 

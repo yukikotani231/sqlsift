@@ -192,6 +192,10 @@ pub enum DiagnosticKind {
     OuterColumnInSubquery,
     /// E0021: Comma-separated FROM tables with no condition linking them
     MissingJoinCondition,
+    /// E0022: A condition that is always or never true from the schema
+    ConstantCondition,
+    /// E0023: WHERE condition that turns an outer join into an inner join
+    OuterJoinFiltered,
     /// Parse error
     ParseError,
 }

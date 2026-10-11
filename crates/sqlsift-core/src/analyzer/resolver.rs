@@ -935,6 +935,7 @@ impl<'a> Resolver<'a> {
 
         self.check_grouping(select, query);
         self.check_join_conditions(select);
+        self.check_where_conditions(select);
         if let Some(role) = in_subquery {
             self.check_in_subquery_select(select, role);
         }
@@ -1546,6 +1547,7 @@ impl<'a> Resolver<'a> {
                 for (left, op, right) in chain.into_iter().rev() {
                     self.expr(right);
                     self.check_null_comparison(left, op, right);
+                    self.check_self_comparison(left, op, right);
                     self.check_row_comparison(left, right);
                     left_type = self.check_binary_op(left, op, right, left_type);
                 }
@@ -1783,6 +1785,8 @@ impl<'a> Resolver<'a> {
                 self.expr(left);
                 self.expr(right);
                 self.check_join_comparison(left, right);
+                self.check_null_comparison(left, op, right);
+                self.check_self_comparison(left, op, right);
             }
             other => self.expr(other),
         }

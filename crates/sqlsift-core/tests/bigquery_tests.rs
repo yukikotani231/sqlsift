@@ -112,8 +112,8 @@ fn bigquery_column_types_are_parsed() {
 #[test]
 fn struct_json_and_geography_values_are_never_type_errors() {
     assert_clean(
-        "SELECT order_id FROM analytics.orders \
-         WHERE shipping = shipping AND attributes = '{}' AND delivery_location IS NOT NULL",
+        "SELECT o.order_id FROM analytics.orders o JOIN analytics.orders p ON p.order_id = o.order_id \
+         WHERE o.shipping = p.shipping AND o.attributes = '{}' AND o.delivery_location IS NOT NULL",
     );
     assert_clean(
         "SELECT SAFE_CAST(status AS INT64) + 1, CAST(amount AS BIGNUMERIC) FROM analytics.orders",

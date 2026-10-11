@@ -28,6 +28,8 @@ E0018  null-comparison           suspicious   warn     Comparison with NULL usin
 E0019  not-in-with-nulls         suspicious   warn     NOT IN over a nullable subquery column
 E0020  outer-column-in-subquery  suspicious   warn     IN subquery selects a column of the outer query
 E0021  missing-join-condition    suspicious   warn     Tables in FROM with no condition linking them
+E0022  constant-condition        suspicious   warn     Condition that is always or never true from the schema
+E0023  outer-join-filtered       suspicious   warn     WHERE condition turns an outer join into an inner join
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

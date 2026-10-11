@@ -5,6 +5,8 @@
 //! - E0020 outer-column-in-subquery: `x IN (SELECT c FROM t)` where `t` has no column
 //!   `c`, so `c` is the outer query's column
 //! - E0021 missing-join-condition: `FROM a, b` with nothing that links `a` and `b`
+//! - E0022 constant-condition: `id IS NULL` on a NOT NULL column, `a.x = a.x`
+//! - E0023 outer-join-filtered: `a LEFT JOIN b ... WHERE b.x = 1`, an inner join
 //!
 //! These are reported as warnings by default (category `suspicious`).
 
@@ -335,6 +337,174 @@ impl Resolver<'_> {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // E0022 constant-condition, E0023 outer-join-filtered
+    // ---------------------------------------------------------------------
+
+    /// Report a column compared with itself (`a.x = a.x`)
+    pub(super) fn check_self_comparison(&mut self, left: &Expr, op: &BinaryOperator, right: &Expr) {
+        if !is_comparison_operator(op) {
+            return;
+        }
+        let (Some(l), Some(r)) = (column_parts(left), column_parts(right)) else {
+            return;
+        };
+        if l.len() != r.len() || !l.iter().zip(&r).all(|(a, b)| same_ident(a, b)) {
+            return;
+        }
+        let outcome = match op {
+            BinaryOperator::Eq | BinaryOperator::LtEq | BinaryOperator::GtEq => {
+                "true for every non-NULL value"
+            }
+            _ => "never true",
+        };
+        let column = l
+            .iter()
+            .map(|i| i.value.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let diag = Diagnostic::warning(
+            DiagnosticKind::ConstantCondition,
+            format!("'{column} {op} {column}' compares a column with itself: it is {outcome}"),
+        )
+        .with_help("Compare with the column of the other table, or remove the condition");
+        self.push_at(diag, left);
+    }
+
+    /// Check WHERE of a SELECT for `IS NULL` tests of NOT NULL columns and
+    /// conditions that undo an outer join. Run while the SELECT's scope is current.
+    pub(super) fn check_where_conditions(&mut self, select: &Select) {
+        let Some(selection) = &select.selection else {
+            return;
+        };
+        if self.templated_statement {
+            return;
+        }
+        let mut nullable = HashSet::new();
+        for item in &select.from {
+            outer_join_keys(item, &mut nullable);
+        }
+        let tables = self.catalog_tables_in(&select.from);
+        let mut found = Vec::new();
+
+        // `col IS NULL` anywhere in AND / OR / NOT
+        let mut stack = vec![selection];
+        while let Some(expr) = stack.pop() {
+            match expr {
+                Expr::BinaryOp {
+                    left,
+                    op: BinaryOperator::And | BinaryOperator::Or,
+                    right,
+                } => {
+                    stack.push(right);
+                    stack.push(left);
+                }
+                Expr::UnaryOp { expr, .. } | Expr::Nested(expr) => stack.push(expr),
+                Expr::IsNull(inner) => {
+                    let Some((key, column)) = self.frame_column(inner) else {
+                        continue;
+                    };
+                    if nullable.contains(&key) {
+                        continue;
+                    }
+                    let Some((_, name)) = tables.iter().find(|(k, _)| *k == key) else {
+                        continue;
+                    };
+                    let Some(def) = self
+                        .catalog
+                        .get_table(name)
+                        .and_then(|t| t.get_column(&column))
+                    else {
+                        continue;
+                    };
+                    if !def.nullable {
+                        found.push((
+                            Diagnostic::warning(
+                                DiagnosticKind::ConstantCondition,
+                                format!(
+                                    "Column '{}.{}' is NOT NULL: IS NULL is never true",
+                                    name.name, def.name
+                                ),
+                            )
+                            .with_help("Remove the condition, or test a nullable column"),
+                            inner.as_ref(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // A condition on a column of the optional side of an outer join, AND-ed
+        // into WHERE, removes the rows the join adds without a match
+        let mut reported = HashSet::new();
+        for conjunct in conjuncts(selection) {
+            let Some(column) = null_rejected_column(conjunct) else {
+                continue;
+            };
+            let Some((key, _)) = self.frame_column(column) else {
+                continue;
+            };
+            if !nullable.contains(&key) || !reported.insert(key.clone()) {
+                continue;
+            }
+            let shown = column_parts(column)
+                .map(|p| {
+                    p.iter()
+                        .map(|i| i.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .unwrap_or_default();
+            found.push((
+                Diagnostic::warning(
+                    DiagnosticKind::OuterJoinFiltered,
+                    format!(
+                        "WHERE condition on '{shown}' removes the rows the outer join adds \
+                         without a match in '{key}': it works as an inner join"
+                    ),
+                )
+                .with_help(format!(
+                    "Move the condition into the join's ON clause to keep unmatched rows, \
+                     or write an inner JOIN (or test '{shown} IS NULL OR ...')"
+                )),
+                column,
+            ));
+        }
+        for (diag, at) in found {
+            self.push_at(diag, at);
+        }
+    }
+
+    /// The relation key (lowercase) and column name a column reference resolves to
+    /// in the innermost query block, if it resolves there for certain
+    fn frame_column(&self, expr: &Expr) -> Option<(String, String)> {
+        let parts = column_parts(expr)?;
+        let frame = self.scope.current_ref()?;
+        match parts.as_slice() {
+            [column] => {
+                let mut owner = None;
+                for (key, relation) in &frame.relations {
+                    match relation.column(&column.value, self.dialect) {
+                        ColumnMatch::No => {}
+                        ColumnMatch::Yes(_) if owner.is_none() => owner = Some(key),
+                        _ => return None,
+                    }
+                }
+                Some((owner?.to_lowercase(), column.value.clone()))
+            }
+            [qualifier, column] => {
+                let relation = lookup_ignore_case(&frame.relations, &qualifier.value)?;
+                matches!(
+                    relation.column(&column.value, self.dialect),
+                    ColumnMatch::Yes(_)
+                )
+                .then(|| (qualifier.value.to_lowercase(), column.value.clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn push_at(&mut self, mut diag: Diagnostic, expr: &Expr) {
         diag.span = super::type_check::located_span(expr);
         self.diagnostics.push(diag);
@@ -560,4 +730,82 @@ impl UnionFind {
         let (a, b) = (self.find(a), self.find(b));
         self.0[a] = b;
     }
+}
+
+/// The name parts of a column reference
+fn column_parts(expr: &Expr) -> Option<Vec<&Ident>> {
+    match expr {
+        Expr::Identifier(ident) => Some(vec![ident]),
+        Expr::CompoundIdentifier(idents) => Some(idents.iter().collect()),
+        Expr::Nested(inner) => column_parts(inner),
+        _ => None,
+    }
+}
+
+fn same_ident(a: &Ident, b: &Ident) -> bool {
+    if a.quote_style.is_none() && b.quote_style.is_none() {
+        a.value.eq_ignore_ascii_case(&b.value)
+    } else {
+        a.value == b.value
+    }
+}
+
+/// The column a condition is NULL for when the column is NULL, which then
+/// removes the row: `col = x`, `col > x`, `col IN (...)`, `col BETWEEN ...`,
+/// `col LIKE ...`
+fn null_rejected_column(condition: &Expr) -> Option<&Expr> {
+    let column = match condition {
+        Expr::BinaryOp { left, op, right } if is_comparison_operator(op) => {
+            match (column_parts(left), column_parts(right)) {
+                (Some(_), _) => left.as_ref(),
+                (None, Some(_)) => right.as_ref(),
+                _ => return None,
+            }
+        }
+        Expr::InList { expr, .. }
+        | Expr::Between { expr, .. }
+        | Expr::Like { expr, .. }
+        | Expr::ILike { expr, .. } => expr.as_ref(),
+        Expr::Nested(inner) => return null_rejected_column(inner),
+        _ => return None,
+    };
+    column_parts(column).map(|_| column)
+}
+
+/// Relation keys (lowercase) on the optional side of an outer join of a FROM item:
+/// the right side of LEFT JOIN, the left side of RIGHT JOIN, both of FULL JOIN.
+/// Returns all keys of the item.
+fn outer_join_keys(item: &TableWithJoins, nullable: &mut HashSet<String>) -> Vec<String> {
+    fn factor_keys(factor: &TableFactor, nullable: &mut HashSet<String>) -> Vec<String> {
+        match factor {
+            TableFactor::NestedJoin {
+                table_with_joins,
+                alias: None,
+            } => outer_join_keys(table_with_joins, nullable),
+            TableFactor::Table { name, alias, .. } => alias
+                .as_ref()
+                .map(|a| a.name.value.clone())
+                .or_else(|| name.0.last().map(|i| i.value.clone()))
+                .map(|k| vec![k.to_lowercase()])
+                .unwrap_or_default(),
+            other => factor_alias(other)
+                .map(|a| vec![a.value.to_lowercase()])
+                .unwrap_or_default(),
+        }
+    }
+    let mut keys = factor_keys(&item.relation, nullable);
+    for join in &item.joins {
+        let right = factor_keys(&join.relation, nullable);
+        match &join.join_operator {
+            JoinOperator::LeftOuter(_) => nullable.extend(right.iter().cloned()),
+            JoinOperator::RightOuter(_) => nullable.extend(keys.iter().cloned()),
+            JoinOperator::FullOuter(_) => {
+                nullable.extend(keys.iter().cloned());
+                nullable.extend(right.iter().cloned());
+            }
+            _ => {}
+        }
+        keys.extend(right);
+    }
+    keys
 }

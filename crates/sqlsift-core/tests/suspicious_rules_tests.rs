@@ -205,3 +205,92 @@ fn e0021_bigquery_array_paths_are_linked() {
     assert!(bq("SELECT u.id FROM users u, u.tags t").is_empty());
     assert!(bq("SELECT u.id FROM users u, UNNEST(u.tags) t").is_empty());
 }
+
+// ---------------------------------------------------------------------
+// E0022 constant-condition
+// ---------------------------------------------------------------------
+
+#[test]
+fn e0022_is_null_on_not_null_column() {
+    assert_reports("SELECT id FROM users WHERE id IS NULL", "E0022");
+    assert_reports(
+        "SELECT id FROM users WHERE name IS NULL OR email IS NULL",
+        "E0022",
+    );
+    assert_reports(
+        "SELECT u.id FROM users u JOIN orgs o ON o.oid = u.org_id WHERE NOT (o.owner_id IS NULL)",
+        "E0022",
+    );
+}
+
+#[test]
+fn e0022_is_null_that_can_be_true() {
+    assert_clean("SELECT id FROM users WHERE email IS NULL");
+    // The optional side of an outer join: the anti-join pattern
+    assert_clean(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE o.oid IS NULL",
+    );
+    assert_clean(
+        "SELECT o.oid FROM users u RIGHT JOIN orgs o ON o.oid = u.org_id WHERE u.id IS NULL",
+    );
+    assert_clean("SELECT id FROM users WHERE id IS NOT NULL");
+    // Columns of a subquery or CTE: nullability unknown
+    assert_clean("SELECT s.id FROM (SELECT id FROM users) s WHERE s.id IS NULL");
+}
+
+#[test]
+fn e0022_column_compared_with_itself() {
+    assert_reports("SELECT id FROM users WHERE id = id", "E0022");
+    assert_reports(
+        "SELECT u.id FROM users u JOIN orgs o ON o.oid = o.oid",
+        "E0022",
+    );
+    assert_reports(
+        "SELECT u.id FROM users u WHERE u.org_id <> u.org_id",
+        "E0022",
+    );
+    assert_clean("SELECT u.id FROM users u JOIN users m ON m.id = u.id");
+    assert_clean("SELECT id FROM users WHERE id = org_id");
+}
+
+// ---------------------------------------------------------------------
+// E0023 outer-join-filtered
+// ---------------------------------------------------------------------
+
+#[test]
+fn e0023_where_undoes_outer_join() {
+    assert_reports(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE o.title = 'x'",
+        "E0023",
+    );
+    assert_reports(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE u.id > 1 AND o.owner_id IN (1, 2)",
+        "E0023",
+    );
+    assert_reports(
+        "SELECT o.oid FROM users u RIGHT JOIN orgs o ON o.oid = u.org_id WHERE u.name LIKE 'a%'",
+        "E0023",
+    );
+    assert_reports(
+        "SELECT u.id FROM users u FULL JOIN orgs o ON o.oid = u.org_id WHERE u.email = o.title",
+        "E0023",
+    );
+}
+
+#[test]
+fn e0023_conditions_that_keep_unmatched_rows() {
+    // In ON, on the preserved side, OR-ed with IS NULL, or testing IS NULL
+    assert_clean("SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id AND o.title = 'x'");
+    assert_clean(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE u.name = 'x'",
+    );
+    assert_clean(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE o.title = 'x' OR o.oid IS NULL",
+    );
+    assert_clean(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE coalesce(o.title, '') = ''",
+    );
+    assert_clean(
+        "SELECT u.id FROM users u LEFT JOIN orgs o ON o.oid = u.org_id WHERE o.title IS DISTINCT FROM 'x'",
+    );
+}

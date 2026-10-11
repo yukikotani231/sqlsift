@@ -49,4 +49,6 @@ CREATE TABLE coupons (
 | [E0019](E0019.md) | `not-in-with-nulls` | NOT IN over a nullable subquery column |
 | [E0020](E0020.md) | `outer-column-in-subquery` | IN subquery selects a column of the outer query |
 | [E0021](E0021.md) | `missing-join-condition` | Tables in FROM with no condition linking them |
+| [E0022](E0022.md) | `constant-condition` | Condition that is always or never true from the schema |
+| [E0023](E0023.md) | `outer-join-filtered` | WHERE condition turns an outer join into an inner join |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

@@ -49,6 +49,8 @@
   - [E0019 not-in-with-nulls](rules/E0019.md)
   - [E0020 outer-column-in-subquery](rules/E0020.md)
   - [E0021 missing-join-condition](rules/E0021.md)
+  - [E0022 constant-condition](rules/E0022.md)
+  - [E0023 outer-join-filtered](rules/E0023.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

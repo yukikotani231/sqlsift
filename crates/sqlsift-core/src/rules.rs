@@ -296,6 +296,20 @@ pub const RULES: &[Rule] = &[
         summary: "Tables in FROM with no condition linking them",
     },
     Rule {
+        kind: DiagnosticKind::ConstantCondition,
+        code: "E0022",
+        name: "constant-condition",
+        category: RuleCategory::Suspicious,
+        summary: "Condition that is always or never true from the schema",
+    },
+    Rule {
+        kind: DiagnosticKind::OuterJoinFiltered,
+        code: "E0023",
+        name: "outer-join-filtered",
+        category: RuleCategory::Suspicious,
+        summary: "WHERE condition turns an outer join into an inner join",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",
