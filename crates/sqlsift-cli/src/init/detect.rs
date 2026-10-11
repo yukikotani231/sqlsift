@@ -47,12 +47,22 @@ const SCHEMA_DIR_NAMES: &[&str] = &["schema", "schemas", "ddl"];
 /// File names of schema dumps (`pg_dump --schema-only`, Rails `structure.sql`, ...)
 const DUMP_FILE_NAMES: &[&str] = &["schema.sql", "structure.sql", "database.sql", "db.sql"];
 
-/// Whether a file name is that of a schema dump: one of [`DUMP_FILE_NAMES`], or
-/// ending in `_schema.sql` / `-schema.sql` / `.schema.sql`
-fn is_dump_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    DUMP_FILE_NAMES.contains(&lower.as_str())
-        || [
+/// Whether a file is a schema dump: named one of [`DUMP_FILE_NAMES`], or ending
+/// in `_schema.sql` / `-schema.sql` / `.schema.sql` when it is not one numbered
+/// step of a sequence (`34_cache_schema.sql`, `setup/34/cache_schema.sql`)
+fn is_dump(path: &str) -> bool {
+    let lower = file_name(path).to_ascii_lowercase();
+    if DUMP_FILE_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+    let numbered = lower.starts_with(|c: char| c.is_ascii_digit())
+        || path
+            .split('/')
+            .rev()
+            .skip(1)
+            .any(|c| !c.is_empty() && c.chars().all(|c| c.is_ascii_digit()));
+    !numbered
+        && [
             "_schema.sql",
             "-schema.sql",
             ".schema.sql",
@@ -72,7 +82,47 @@ const TEST_DIR_NAMES: &[&str] = &[
     "__tests__",
     "examples",
     "example",
+    "e2e",
+    "testing",
 ];
+
+/// Path components naming the database a schema source is written for:
+/// `db/mysql/schema.sql`, `migrations/postgres/`. `other` stands for databases
+/// sqlsift has no dialect for.
+const DIALECT_DIR_NAMES: &[(&str, &str)] = &[
+    ("postgres", "postgresql"),
+    ("postgresql", "postgresql"),
+    ("pg", "postgresql"),
+    ("pgsql", "postgresql"),
+    ("mysql", "mysql"),
+    ("mariadb", "mysql"),
+    ("sqlite", "sqlite"),
+    ("sqlite3", "sqlite"),
+    ("h2", "other"),
+    ("hsqldb", "other"),
+    ("derby", "other"),
+    ("oracle", "other"),
+    ("mssql", "other"),
+    ("sqlserver", "other"),
+    ("clickhouse", "other"),
+];
+
+fn dir_dialect(component: &str) -> Option<&'static str> {
+    let lower = component.to_ascii_lowercase();
+    DIALECT_DIR_NAMES
+        .iter()
+        .find(|(name, _)| *name == lower)
+        .map(|(_, dialect)| *dialect)
+}
+
+/// The database the paths of a schema source name, if any
+fn path_dialect(source: &SchemaSource) -> Option<&'static str> {
+    let mut paths: Vec<&str> = source.schema_dir.iter().map(String::as_str).collect();
+    paths.extend(source.schema.iter().map(String::as_str));
+    paths
+        .iter()
+        .find_map(|p| p.split('/').rev().find_map(dir_dialect))
+}
 
 /// What the schema is read from
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,8 +328,24 @@ fn is_sql(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".sql")
 }
 
+/// Whether a path is in test data: a component in [`TEST_DIR_NAMES`], or one like
+/// `integration_test`, `e2e-tests` or `test_data`
 fn in_test_dir(path: &str) -> bool {
-    path.split('/').any(|c| TEST_DIR_NAMES.contains(&c))
+    path.split('/').any(|c| {
+        let lower = c.to_ascii_lowercase();
+        TEST_DIR_NAMES.contains(&lower.as_str())
+            || ["_test", "_tests", "-test", "-tests"]
+                .iter()
+                .any(|suffix| lower.ends_with(suffix))
+            || ["test_", "test-", "tests_", "tests-"]
+                .iter()
+                .any(|prefix| lower.starts_with(prefix))
+    })
+}
+
+/// Number of tables SQL text creates
+fn count_tables(sql: &str) -> usize {
+    sql.to_ascii_lowercase().matches("create table").count()
 }
 
 /// Whether SQL text defines tables (so a directory of it is a schema source)
@@ -318,7 +384,8 @@ pub fn detect(root: &Path) -> Detection {
             sqlc_entries.push((sqlc_file.clone(), entry));
         }
     }
-    let mut candidates: Vec<(u8, SchemaSource)> = Vec::new();
+    // (rank, tables created, source)
+    let mut candidates: Vec<(u8, usize, SchemaSource)> = Vec::new();
     if !sqlc_entries.is_empty() {
         detection.sqlc = true;
         let mut schema_dirs: Vec<String> = Vec::new();
@@ -371,6 +438,7 @@ pub fn detect(root: &Path) -> Detection {
         schema_files.extend(dirs.map(|d| format!("{d}/*.sql")));
         if schema_dir.is_some() || !schema_files.is_empty() {
             candidates.push((
+                0,
                 0,
                 SchemaSource {
                     label: format!("sqlc schema ({sqlc_file})"),
@@ -472,6 +540,30 @@ pub fn detect(root: &Path) -> Detection {
             }
         }
     }
+    // A migrations directory with one subdirectory per database
+    // (`migrations/mysql/`, `migrations/postgres/`) is one source per database
+    let dirs: Vec<String> = migration_dirs.keys().cloned().collect();
+    for dir in dirs {
+        let Some(files) = migration_dirs.remove(&dir) else {
+            continue;
+        };
+        let mut rest = Vec::new();
+        let mut per_dialect: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for file in files {
+            let below = file[dir.len()..].trim_start_matches('/');
+            match below.split_once('/') {
+                Some((sub, _)) if dir_dialect(sub).is_some() => per_dialect
+                    .entry(format!("{dir}/{sub}"))
+                    .or_default()
+                    .push(file),
+                _ => rest.push(file),
+            }
+        }
+        if !rest.is_empty() {
+            migration_dirs.insert(dir, rest);
+        }
+        migration_dirs.extend(per_dialect);
+    }
     for (dir, files) in &migration_dirs {
         let texts: Vec<String> = files.iter().filter_map(|f| tree.read(f)).collect();
         if !texts.iter().any(|t| has_ddl(t)) {
@@ -487,6 +579,7 @@ pub fn detect(root: &Path) -> Detection {
         let rank = if in_test_dir(dir) { rank + 10 } else { rank };
         candidates.push((
             rank,
+            texts.iter().map(|t| count_tables(t)).sum(),
             SchemaSource {
                 label: label.to_string(),
                 schema: Vec::new(),
@@ -497,11 +590,7 @@ pub fn detect(root: &Path) -> Detection {
     }
 
     // Schema dumps and directories of hand-written DDL
-    let mut dumps: Vec<&String> = tree
-        .files
-        .iter()
-        .filter(|f| is_dump_name(file_name(f)))
-        .collect();
+    let mut dumps: Vec<&String> = tree.files.iter().filter(|f| is_dump(f)).collect();
     dumps.sort_by_key(|f| (depth(f), (*f).clone()));
     for dump in dumps {
         if migration_dirs.keys().any(|d| is_under(dump, d)) {
@@ -513,15 +602,19 @@ pub fn detect(root: &Path) -> Detection {
         if !has_ddl(&text) {
             continue;
         }
-        let rails = dump.ends_with("db/structure.sql");
+        let rails = dump == "db/structure.sql" || dump.ends_with("/db/structure.sql");
+        let ecto = dump == "priv/repo/structure.sql" || dump.ends_with("/priv/repo/structure.sql");
         let label = if rails {
             "Rails structure.sql"
+        } else if ecto {
+            "Ecto structure.sql"
         } else {
             "schema dump"
         };
-        let rank = if rails { 1 } else { 3 } + if in_test_dir(dump) { 10 } else { 0 };
+        let rank = if rails || ecto { 1 } else { 3 } + if in_test_dir(dump) { 10 } else { 0 };
         candidates.push((
             rank,
+            count_tables(&text),
             SchemaSource {
                 label: label.to_string(),
                 schema: vec![dump.clone()],
@@ -539,15 +632,14 @@ pub fn detect(root: &Path) -> Detection {
     }
     for dir in schema_dirs {
         let files: Vec<&String> = tree.under(&dir).filter(|f| is_sql(f)).collect();
-        if !files
-            .iter()
-            .any(|f| tree.read(f).is_some_and(|t| has_ddl(&t)))
-        {
+        let texts: Vec<String> = files.iter().filter_map(|f| tree.read(f)).collect();
+        if !texts.iter().any(|t| has_ddl(t)) {
             continue;
         }
         let rank = if in_test_dir(&dir) { 13 } else { 3 };
         candidates.push((
             rank,
+            texts.iter().map(|t| count_tables(t)).sum(),
             SchemaSource {
                 label: "schema directory".to_string(),
                 schema: Vec::new(),
@@ -593,14 +685,32 @@ pub fn detect(root: &Path) -> Detection {
         detection.dbt = Some(DbtProject { dir, has_catalog });
     }
 
-    // Pick the schema source: lowest rank, then shallowest, then most files
-    candidates.sort_by(|(ra, a), (rb, b)| {
+    // Dialect hints that don't depend on the schema source, to prefer a source
+    // written for that database
+    let project_dialects: Vec<DialectHint> = env_dialects(&tree)
+        .into_iter()
+        .chain(compose_dialects(&tree))
+        .chain(dependency_dialects(&tree))
+        .collect();
+    let preferred = dialects
+        .first()
+        .or(project_dialects.first())
+        .map(|hint| hint.dialect);
+    let other_database = |source: &SchemaSource| {
+        preferred.is_some() && path_dialect(source).is_some_and(|d| Some(d) != preferred)
+    };
+
+    // Pick the schema source: lowest rank, not written for another database,
+    // then most tables, then shallowest, then most files
+    candidates.sort_by(|(ra, ta, a), (rb, tb, b)| {
         ra.cmp(rb)
+            .then_with(|| other_database(a).cmp(&other_database(b)))
+            .then_with(|| tb.cmp(ta))
             .then_with(|| depth(&a.paths()).cmp(&depth(&b.paths())))
             .then_with(|| b.sql_files.cmp(&a.sql_files))
             .then_with(|| a.paths().cmp(&b.paths()))
     });
-    for (_, source) in &candidates {
+    for (_, _, source) in &candidates {
         if let Some(dir) = &source.schema_dir {
             excluded.extend(tree.under(dir).filter(|f| is_sql(f)).cloned());
         }
@@ -613,7 +723,7 @@ pub fn detect(root: &Path) -> Detection {
     let mut seen_paths = BTreeSet::new();
     let mut candidates = candidates
         .into_iter()
-        .map(|(_, s)| s)
+        .map(|(_, _, s)| s)
         .filter(|s| seen_paths.insert(s.paths()));
     detection.schema = candidates.next();
     detection.other_schemas = candidates.collect();
@@ -755,10 +865,14 @@ pub fn detect(root: &Path) -> Detection {
     detection.queries = queries;
 
     // Dialect hints from the rest of the project, least specific last
-    dialects.extend(env_dialects(&tree));
-    dialects.extend(compose_dialects(&tree));
-    dialects.extend(dependency_dialects(&tree));
+    dialects.extend(project_dialects);
     if let Some(schema) = &detection.schema {
+        if let Some(dialect) = path_dialect(schema).filter(|d| *d != "other") {
+            dialects.push(DialectHint {
+                dialect,
+                source: format!("directory of {}", schema.paths()),
+            });
+        }
         if let Some(hint) = sniff_dialect(&tree, schema) {
             dialects.push(hint);
         }
@@ -770,6 +884,26 @@ pub fn detect(root: &Path) -> Detection {
         detection.other_dialects = dialects
             .filter(|d| d.dialect != chosen.dialect && seen.insert(d.dialect))
             .collect();
+    }
+
+    // A schema written for another database than the dialect
+    if let (Some(schema), Some(chosen)) = (&detection.schema, &detection.dialect) {
+        match path_dialect(schema) {
+            Some("other") => detection.notes.push(format!(
+                "{} looks written for a database sqlsift has no dialect for: \
+                 point `schema` at the {} schema if the project has one",
+                schema.paths(),
+                chosen.dialect
+            )),
+            Some(dialect) if dialect != chosen.dialect => detection.notes.push(format!(
+                "{} looks written for {dialect}, but the dialect is {}: \
+                 point `schema` at the {} schema if the project has one",
+                schema.paths(),
+                chosen.dialect,
+                chosen.dialect
+            )),
+            _ => {}
+        }
     }
 
     add_notes(&tree, &mut detection, prisma_schema.as_deref());
@@ -1254,7 +1388,7 @@ fn compose_dialects(tree: &Tree) -> Vec<DialectHint> {
 }
 
 /// Dialects of database driver dependencies (package.json, go.mod, Gemfile,
-/// Python requirements, Cargo.toml)
+/// Python requirements, Cargo.toml, mix.exs)
 fn dependency_dialects(tree: &Tree) -> Vec<DialectHint> {
     // (manifest file name, dependency text, dialect)
     const DRIVERS: &[(&str, &str, &str)] = &[
@@ -1295,6 +1429,9 @@ fn dependency_dialects(tree: &Tree) -> Vec<DialectHint> {
         ("Cargo.toml", "tokio-postgres", "postgresql"),
         ("Cargo.toml", "rusqlite", "sqlite"),
         ("Cargo.toml", "mysql_async", "mysql"),
+        ("mix.exs", ":postgrex", "postgresql"),
+        ("mix.exs", ":myxql", "mysql"),
+        ("mix.exs", ":ecto_sqlite3", "sqlite"),
     ];
     let mut hints: Vec<DialectHint> = Vec::new();
     let manifests: BTreeSet<&str> = DRIVERS.iter().map(|(m, _, _)| *m).collect();
@@ -1366,6 +1503,34 @@ fn package_dependencies(json: &str) -> String {
     names
 }
 
+/// SQL text without its `--` and `/* */` comments (which may quote anything,
+/// e.g. Prisma's warnings quote column names in backticks)
+fn strip_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while !rest.is_empty() {
+        let line = rest.find("--");
+        let block = rest.find("/*");
+        match (line, block) {
+            (Some(l), b) if b.map_or(true, |b| l < b) => {
+                out.push_str(&rest[..l]);
+                rest = rest[l..].find('\n').map_or("", |end| &rest[l + end..]);
+            }
+            (_, Some(b)) => {
+                out.push_str(&rest[..b]);
+                rest = rest[b + 2..]
+                    .find("*/")
+                    .map_or("", |end| &rest[b + 2 + end + 2..]);
+            }
+            _ => {
+                out.push_str(rest);
+                rest = "";
+            }
+        }
+    }
+    out
+}
+
 /// The dialect suggested by the schema SQL itself
 fn sniff_dialect(tree: &Tree, schema: &SchemaSource) -> Option<DialectHint> {
     let mut files: Vec<&String> = schema.schema.iter().collect();
@@ -1377,7 +1542,7 @@ fn sniff_dialect(tree: &Tree, schema: &SchemaSource) -> Option<DialectHint> {
         let Some(text) = tree.read(file) else {
             continue;
         };
-        let lower = text.to_ascii_lowercase();
+        let lower = strip_comments(&text).to_ascii_lowercase();
         pg += [
             "serial",
             "timestamptz",
@@ -1423,6 +1588,50 @@ mod tests {
         assert_eq!(join("backend", "../db/schema.sql"), "db/schema.sql");
         assert_eq!(join("backend", "."), "backend");
         assert_eq!(join("a", "b/./c"), "a/b/c");
+    }
+
+    #[test]
+    fn dump_names() {
+        assert!(is_dump("db/schema.sql"));
+        assert!(is_dump("sql/app_schema.sql"));
+        assert!(!is_dump("cmd/setup/34/34_cache_schema.sql"));
+        assert!(!is_dump("cmd/setup/34/cache_schema.sql"));
+        assert!(!is_dump("db/users.sql"));
+    }
+
+    #[test]
+    fn test_directories() {
+        assert!(in_test_dir("cli/integration_test/v2/migrations"));
+        assert!(in_test_dir("e2e-tests/db/schema.sql"));
+        assert!(in_test_dir("pkg/test_data/schema.sql"));
+        assert!(in_test_dir("examples/db/schema.sql"));
+        assert!(!in_test_dir("db/migrations/0001_contest.sql"));
+        assert!(!in_test_dir("server/latest/schema.sql"));
+    }
+
+    #[test]
+    fn dialect_directories() {
+        let source = |dir: &str| SchemaSource {
+            label: String::new(),
+            schema: Vec::new(),
+            schema_dir: Some(dir.to_string()),
+            sql_files: 1,
+        };
+        assert_eq!(
+            path_dialect(&source("db/migrations/postgres")),
+            Some("postgresql")
+        );
+        assert_eq!(path_dialect(&source("db/h2")), Some("other"));
+        assert_eq!(path_dialect(&source("db/migrations")), None);
+    }
+
+    #[test]
+    fn strips_comments() {
+        assert_eq!(
+            strip_comments("-- drops `a`\nSELECT 1; /* `b` */ SELECT 2;"),
+            "\nSELECT 1;  SELECT 2;"
+        );
+        assert_eq!(strip_comments("SELECT 1 /* open"), "SELECT 1 ");
     }
 
     #[test]

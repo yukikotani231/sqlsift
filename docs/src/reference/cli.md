@@ -44,14 +44,14 @@ Looks at the project, writes a commented `sqlsift.toml` in `DIR`, runs a first `
 | `supabase/migrations/` | `schema_dir`, `dialect = "postgresql"` |
 | Drizzle output (`drizzle/`, `out` of `drizzle.config.*`) | `schema_dir`, `dialect` from the config's `dialect` |
 | Flyway (`V1__name.sql`), golang-migrate / sqlx (`*.up.sql`), goose, dbmate or plain SQL migrations in a `migrations/` / `migration/` / `migrate/` directory | `schema_dir` |
-| `db/structure.sql` (Rails), `schema.sql`, `*_schema.sql` dumps, `schema/` directories of DDL | `schema` / `schema_dir`; for Rails, `dialect` from `config/database.yml` |
+| `db/structure.sql` (Rails), `priv/repo/structure.sql` (Ecto), `schema.sql`, `*_schema.sql` dumps, `schema/` directories of DDL | `schema` / `schema_dir`; for Rails, `dialect` from `config/database.yml` |
 | `dbt_project.yml` | `files` for the models (`model-paths`); the dialect from `profiles.yml` in the project or the `dbt-<adapter>` requirement |
 | Other `.sql` files | `files`, grouped by directory and kept clear of the schema files (with `ignore` where needed) |
 | `.ts` / `.js` / `.vue` / `.svelte` files with `` sql`...` `` or Prisma `` $queryRaw`...` `` templates | `files`, and `embedded_sql_tags` for `$queryRaw` / `$executeRaw` |
 | `.rs` files with sqlx `query!("...")` / `query_as!(T, "...")` macros or `sqlx::query("...")` calls | `files` |
 | `.py` files passing SQL to `cur.execute("...")`, `conn.fetch("...")`, `text("...")` and the other [default calls](../guide/queries.md#sql-in-python) | `files` |
 
-When several schema sources are found, the most specific one is used and the others are written as comments. The dialect comes from the most specific source: the tool's own configuration first, then `DATABASE_URL` in `.env.example` / `.env.sample` / `.env`, database images in `docker-compose.yml`, database drivers in `package.json`, `go.mod`, `Gemfile`, Python requirements or `Cargo.toml`, and finally the syntax of the schema files; otherwise PostgreSQL. Disagreeing hints are printed. When the first check reports many diagnostics, `init` suggests [a baseline](../guide/suppression.md#an-existing-backlog-baseline).
+When several schema sources are found, the most specific one is used and the others are written as comments: a tool's own layout first, then the source creating the most tables, then the shallowest. Sources under test data (`test/`, `fixtures/`, `examples/`, `integration_test/`, ...) come last. A directory with one subdirectory per database (`migrations/mysql/`, `migrations/postgres/`, `db/h2/`) is one source per database, and the one for the project's dialect is preferred. The dialect comes from the most specific source: the tool's own configuration first, then `DATABASE_URL` in `.env.example` / `.env.sample` / `.env`, database images in `docker-compose.yml`, database drivers in `package.json`, `go.mod`, `Gemfile`, Python requirements, `Cargo.toml` or `mix.exs`, and finally the directory or the syntax of the schema files (comments aside); otherwise PostgreSQL. Disagreeing hints are printed. When the first check reports many diagnostics, `init` suggests [a baseline](../guide/suppression.md#an-existing-backlog-baseline).
 
 Exit codes: `0` when the configuration was written (whatever the first check found), `2` when `sqlsift.toml` already exists (without `--force`) or the options are invalid.
 

@@ -544,3 +544,129 @@ fn dialect_option_and_project_directory_argument() {
     assert_eq!(bad.code, Some(2));
     assert!(bad.stderr.contains("Unknown dialect"), "{}", bad.stderr);
 }
+
+#[test]
+fn larger_migrations_directory_and_dialect_subdirectories() {
+    let p = Project::new("dialect-dirs");
+    // A small, shallow migrations directory of something else
+    p.write(
+        "config/migrations/mysql/0001_config.up.sql",
+        "CREATE TABLE configs (id VARCHAR(26) PRIMARY KEY);\n",
+    )
+    .write(
+        "config/migrations/postgres/0001_config.up.sql",
+        "CREATE TABLE configs (id VARCHAR(26) PRIMARY KEY);\n",
+    )
+    // The application's migrations, one subdirectory per database
+    .write(
+        "server/channels/db/migrations/mysql/0001_users.up.sql",
+        "CREATE TABLE users (id VARCHAR(26) PRIMARY KEY) ENGINE=InnoDB;\n",
+    )
+    .write(
+        "server/channels/db/migrations/mysql/0002_posts.up.sql",
+        "CREATE TABLE posts (id VARCHAR(26) PRIMARY KEY) ENGINE=InnoDB;\n",
+    )
+    .write(
+        "server/channels/db/migrations/postgres/0001_users.up.sql",
+        "-- Warnings: drops `legacy`\nCREATE TABLE users (id VARCHAR(26) PRIMARY KEY);\n",
+    )
+    .write(
+        "server/channels/db/migrations/postgres/0002_posts.up.sql",
+        "CREATE TABLE posts (id VARCHAR(26) PRIMARY KEY, props JSONB);\n",
+    )
+    .write(
+        "docker-compose.yml",
+        "services:\n  db:\n    image: postgres:16\n",
+    )
+    .write("server/store/users.sql", "SELECT id FROM users;\n");
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("postgresql"));
+    assert_eq!(
+        string(&table, "schema_dir").as_deref(),
+        Some("server/channels/db/migrations/postgres"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(strings(&table, "files"), ["server/store/**/*.sql"]);
+    assert!(
+        run.stdout.contains("All 1 file(s) passed"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn schema_for_the_dialect_among_per_database_dumps() {
+    let p = Project::new("per-database");
+    p.write("src/main/resources/db/h2/schema.sql", USERS)
+        .write(
+            "src/main/resources/db/mysql/schema.sql",
+            "CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, email TEXT NOT NULL);\n",
+        )
+        .write(
+            "src/main/resources/db/postgres/schema.sql",
+            "CREATE TABLE users (id SERIAL PRIMARY KEY, email TEXT NOT NULL);\n",
+        )
+        .write(
+            "docker-compose.yml",
+            "services:\n  db:\n    image: mysql:9\n",
+        );
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("mysql"));
+    assert_eq!(
+        strings(&table, "schema"),
+        ["src/main/resources/db/mysql/schema.sql"],
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn ecto_structure_sql_and_mix_dialect() {
+    let p = Project::new("ecto");
+    p.write("priv/repo/structure.sql", USERS)
+        .write(
+            "priv/ingest_repo/structure.sql",
+            "CREATE TABLE events (name String) ENGINE = MergeTree ORDER BY name;\n\
+             CREATE TABLE sessions (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+        )
+        .write(
+            "mix.exs",
+            "defp deps do\n  [{:postgrex, \">= 0.0.0\"}, {:ecto_ch, \"~> 0.3\"}]\nend\n",
+        );
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("postgresql"));
+    assert_eq!(strings(&table, "schema"), ["priv/repo/structure.sql"]);
+    assert!(run.stdout.contains("Ecto structure.sql"), "{}", run.stdout);
+    assert!(run.stdout.contains("mix.exs: :postgrex"), "{}", run.stdout);
+}
+
+#[test]
+fn numbered_setup_steps_and_integration_tests_are_not_schemas() {
+    let p = Project::new("not-schemas");
+    p.write(
+        "cmd/setup/34/34_cache_schema.sql",
+        "CREATE TABLE cache.objects (id TEXT PRIMARY KEY);\n",
+    )
+    .write(
+        "cli/integration_test/v2/migrations/1_init/up.sql",
+        "CREATE TABLE fixture (id INT);\n",
+    )
+    .write("db/migrations/0001_users.up.sql", USERS);
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(
+        string(&table, "schema_dir").as_deref(),
+        Some("db/migrations"),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("schema dump"), "{}", run.stdout);
+}
