@@ -6,6 +6,7 @@ sqlsift [OPTIONS] <COMMAND>
 Commands:
   init    Detect the project layout and write sqlsift.toml
   check   Check SQL files against schema definitions
+  impact  Show the queries a schema change breaks or fixes
   rules   List all rules with their category and default level
   schema  Display the schema sqlsift loaded (tables, views, enum types)
   parse   Parse SQL and display AST (for debugging)
@@ -91,6 +92,58 @@ Options:
 Command-line options override `sqlsift.toml`. `-A`, `-W` and `-D` accept a rule code (`E0006`), a rule name (`ambiguous-column`) or a category (`suspicious`), and can be repeated.
 
 Exit codes: `0` no errors, `1` errors reported (or more warnings than `--max-warnings`), `2` usage or configuration error (including a missing or invalid baseline file). Diagnostics in the baseline don't count; see [Baseline](../guide/suppression.md#an-existing-backlog-baseline).
+
+## `sqlsift impact`
+
+```
+sqlsift impact [OPTIONS] [MIGRATIONS]...
+
+Arguments:
+  [MIGRATIONS]...           Migration (schema) files whose effect is shown (glob patterns
+                            supported). Required unless --base is given.
+
+Options:
+      --base <REV>          Also the schema files added or changed since the current branch
+                            left this git revision (e.g. origin/main), uncommitted and
+                            untracked files included
+      --queries <PATTERN>   Query files to check (repeatable, glob patterns supported)
+                            [default: `files` in sqlsift.toml]
+  -s, --schema <FILE>       Schema definition file (repeatable)
+      --schema-dir <DIR>    Directory containing schema files
+      --ignore <PATTERN>    Skip query files matching a glob pattern (repeatable)
+  -c, --config <FILE>       Path to configuration file
+  -A, --allow <RULE>        Turn a rule or category off (alias: --disable)
+  -W, --warn <RULE>         Report a rule or category as warnings
+  -D, --deny <RULE>         Report a rule or category as errors
+  -d, --dialect <NAME>      SQL dialect [default: postgresql]
+      --templating <ENGINE> Query file templating: jinja, none
+      --dbt-catalog <PATH>  dbt catalog.json (alpha)
+  -f, --format <FORMAT>     Output format: human, json, sarif, github [default: human]
+```
+
+`impact` builds the schema twice, without and with the migrations, checks the query files against both and reports only the diagnostics that differ: those the change introduces and those it fixes. Problems the queries already had are not shown.
+
+- A migration that is one of the schema files is left out of the "before" schema together with every schema file after it (files are applied in filename order). A migration that isn't one of them is applied after all schema files.
+- Only query files that name a changed table or view are checked, so the run stays fast on large projects. Changes that can affect any query (enum types, the search path, functions the schema defines) check every file.
+- A diagnostic whose message changes but stays at the same place (a different type in a type mismatch) counts as the same problem.
+
+```console
+$ sqlsift impact --base origin/main
+Impact of migrations/0042_rename_email.sql
+  changed table public.users
+
+error[E0002]: Column 'email' not found in table 'users'
+  --> queries/users.sql:12:12
+   ...
+    = help: 'email' was renamed to 'email_address' in migrations/0042_rename_email.sql:1
+
+The change introduces 1 problem(s) in 1 file(s) and fixes 0
+Checked 3 of 41 query file(s); the others name no changed table or view
+```
+
+With `--format json` the output is `{"migrations": [...], "changes": [{"name", "kind", "relation"}], "other_changes": bool, "introduced": [...], "resolved": [...]}`, where `introduced` and `resolved` list files and diagnostics as [`check --format json`](output-formats.md) does. `sarif` and `github` report what the change introduces.
+
+Exit codes: `0` the change introduces no errors, `1` it does, `2` usage or configuration error.
 
 ## `sqlsift schema`
 
