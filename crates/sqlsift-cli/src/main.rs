@@ -384,7 +384,11 @@ fn load_dbt_catalogs(catalog: &mut Catalog, files: &[DbtCatalogFile]) -> Result<
                 "Loaded dbt catalog"
             ),
             Err(e) if *configured => {
-                miette::bail!("Failed to load dbt catalog {}: {}", path.display(), e)
+                return Err(miette::miette!(
+                    "Failed to load dbt catalog {}: {}",
+                    path.display(),
+                    e
+                ));
             }
             Err(e) => eprintln!(
                 "Warning: failed to load dbt catalog {}: {}; ref() and source() columns are unknown",
