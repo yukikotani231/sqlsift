@@ -4,12 +4,13 @@
 sqlsift [OPTIONS] <COMMAND>
 
 Commands:
-  init    Detect the project layout and write sqlsift.toml
-  check   Check SQL files against schema definitions
-  impact  Show the queries a schema change breaks or fixes
-  rules   List all rules with their category and default level
-  schema  Display the schema sqlsift loaded (tables, views, enum types)
-  parse   Parse SQL and display AST (for debugging)
+  init      Detect the project layout and write sqlsift.toml
+  check     Check SQL files against schema definitions
+  impact    Show the queries a schema change breaks or fixes
+  describe  Describe what each query returns: its output columns and their types
+  rules     List all rules with their category and default level
+  schema    Display the schema sqlsift loaded (tables, views, enum types)
+  parse     Parse SQL and display AST (for debugging)
 
 Global options:
   -v, --verbose   Enable verbose logging to stderr (-vv for debug)
@@ -148,6 +149,78 @@ With `--format json` the output is `{"migrations": [...], "changes": [{"name", "
 With `--references`, the JSON output also has `references`: `[{"file", "lines": [{"line", "uses": ["public.users", "public.users.email", ...]}]}]`.
 
 Exit codes: `0` the change introduces no errors, `1` it does, `2` usage or configuration error.
+
+## `sqlsift describe`
+
+```
+sqlsift describe [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...                SQL, TypeScript or JavaScript files to describe (glob patterns
+                            supported) [default: `files` in sqlsift.toml]
+
+Options:
+  -s, --schema <FILE>       Schema definition file (repeatable)
+      --schema-dir <DIR>    Directory containing schema files
+      --ignore <PATTERN>    Skip query files matching a glob pattern (repeatable)
+  -c, --config <FILE>       Path to configuration file
+  -d, --dialect <NAME>      SQL dialect [default: postgresql]
+      --templating <ENGINE> Query file templating: jinja, none
+      --dbt-catalog <PATH>  dbt catalog.json (alpha)
+  -f, --format <FORMAT>     Output format: human, json [default: human]
+```
+
+`describe` lists every SELECT, INSERT, UPDATE and DELETE of the query files with what it returns: its output columns, their types and whether they can be NULL, and the types of its parameters. Queries are found as `check` finds them (sqlc / aiosql / HugSQL query names, SQL in tagged templates, dbt models), from the schema alone, without a database. Use it to generate types for raw SQL, or to see what a query returns.
+
+```console
+$ sqlsift describe queries/users.sql
+queries/users.sql:2 GetUser (select)
+  parameters: $1 text
+  id           bigint not null
+  name         text null
+  order_count  bigint not null
+```
+
+for
+
+```sql
+-- name: GetUser :one
+SELECT u.id, u.name, count(o.id) AS order_count
+FROM users u LEFT JOIN orders o ON o.user_id = u.id
+WHERE u.email = $1
+GROUP BY u.id;
+```
+
+sqlsift never guesses: a name, type or NULL-ability it can't tell is `null` in JSON (`?` or nothing in the listing).
+
+- **Columns**: `null` (`columns unknown`) when they can't be determined, such as `SELECT *` over an unknown table or a dbt model whose template tags may add columns. INSERT, UPDATE and DELETE return their RETURNING list, or no columns.
+- **Names**: an unaliased expression is named as PostgreSQL names it (`count(*)` is `count`, unquoted names are lowercase). In other dialects, and for expressions PostgreSQL calls `?column?`, the name is `null`.
+- **`nullable`**: `false` only when the column certainly can't be NULL: a NOT NULL or primary key column that is not on the optional side of an outer join, a literal, `count(...)`, an `IS NULL` test, an operator or function over such values. Aggregates other than `count`, scalar subqueries, CASE without ELSE and ROLLUP / CUBE rows are `true`.
+- **Parameters** (`$1`, `?`, `:name`, `@name`, `sqlc.arg(name)`, `${...}` in tagged templates): typed after what they are compared with, inserted into or assigned to, a cast (`$1::date`), IN lists, BETWEEN, LIKE, `= ANY($1)` (an array) and LIMIT / OFFSET. A parameter used where different types are expected has type `null`. Named parameters keep their name and are numbered in order of first appearance.
+
+With `--format json` the output is an array with one object per query:
+
+```json
+[
+  {
+    "file": "queries/users.sql",
+    "line": 2,
+    "column": 1,
+    "name": "GetUser",
+    "kind": "select",
+    "columns": [
+      { "name": "id", "type": "bigint", "nullable": false },
+      { "name": "name", "type": "text", "nullable": true },
+      { "name": "order_count", "type": "bigint", "nullable": false }
+    ],
+    "parameters": [{ "index": 1, "name": null, "type": "text" }]
+  }
+]
+```
+
+`kind` is `select`, `insert`, `update` or `delete`. Types are written as the dialect names them.
+
+Exit codes: `0` the files have no errors, `1` they do (their columns may be unknown or wrong; run `check` to see the errors), `2` usage or configuration error.
 
 ## `sqlsift schema`
 
