@@ -269,6 +269,11 @@ impl Resolver<'_> {
         let (ExpressionType::Known(lt), ExpressionType::Known(rt)) = (left_type, right_type) else {
             return;
         };
+        // A type whose operators sqlsift doesn't model may define this one
+        // (MONEY * INTEGER, a domain over a number, ...)
+        if !lt.has_known_arithmetic() || !rt.has_known_arithmetic() {
+            return;
+        }
         if SqlType::temporal_arithmetic_result(lt, arith_op, rt).is_some() {
             return;
         }
@@ -498,7 +503,7 @@ impl Resolver<'_> {
             Expr::Nested(inner) => self.infer_expr_type(inner),
             Expr::BinaryOp { .. } => self.infer_binary_chain_type(expr),
             Expr::Cast { data_type, .. } => {
-                ExpressionType::of_column(&SqlType::from_ast(data_type))
+                ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             Expr::Function(func) => self.infer_function_return_type(func),
             Expr::Interval(_) => ExpressionType::Known(SqlType::Interval),
@@ -512,7 +517,7 @@ impl Resolver<'_> {
             }
             // Typed literals such as DATE '2024-01-01'
             Expr::TypedString { data_type, .. } => {
-                ExpressionType::of_column(&SqlType::from_ast(data_type))
+                ExpressionType::of_column(&SqlType::from_ast_in(data_type, self.dialect))
             }
             // Scalar subquery: the type of its single column
             Expr::Subquery(query) => match self
@@ -614,10 +619,23 @@ impl Resolver<'_> {
                 }
                 _ => ExpressionType::Unknown,
             },
-            "AVG" => ExpressionType::Known(SqlType::Decimal {
-                precision: None,
-                scale: None,
-            }),
+            // AVG of numbers is NUMERIC (or floating point), AVG of INTERVAL an
+            // interval; other argument types (MONEY, ...) are left unknown
+            "AVG" => match self.infer_first_arg_type(func) {
+                ExpressionType::Known(t @ (SqlType::Real | SqlType::DoublePrecision)) => {
+                    ExpressionType::Known(t)
+                }
+                ExpressionType::Known(t) if t.is_numeric() => {
+                    ExpressionType::Known(SqlType::Decimal {
+                        precision: None,
+                        scale: None,
+                    })
+                }
+                ExpressionType::Known(SqlType::Interval) => {
+                    ExpressionType::Known(SqlType::Interval)
+                }
+                _ => ExpressionType::Unknown,
+            },
 
             // Functions returning the type of their first argument
             "MIN" | "MAX" | "COALESCE" | "NULLIF" | "IFNULL" | "GREATEST" | "LEAST" => {

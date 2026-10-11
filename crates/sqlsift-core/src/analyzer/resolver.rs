@@ -542,7 +542,11 @@ impl<'a> Resolver<'a> {
         self.scope.push(hides_parent);
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
-                self.define_cte(cte, with.recursive);
+                // Snowflake: a CTE is recursive when it references itself, with or
+                // without the RECURSIVE keyword
+                let recursive = with.recursive
+                    || (self.dialect == SqlDialect::Snowflake && self.references_itself(cte));
+                self.define_cte(cte, recursive);
             }
         }
 
@@ -577,6 +581,19 @@ impl<'a> Resolver<'a> {
 
         self.scope.pop();
         columns
+    }
+
+    /// Whether the body of `cte` reads a relation with the CTE's (unqualified) name
+    fn references_itself(&self, cte: &sqlparser::ast::Cte) -> bool {
+        let name = self.catalog.ident_name(&cte.alias.name);
+        let found =
+            sqlparser::ast::visit_relations(&cte.query, |relation| match relation.0.as_slice() {
+                [ident] if self.catalog.ident_name(ident) == name => {
+                    std::ops::ControlFlow::Break(())
+                }
+                _ => std::ops::ControlFlow::Continue(()),
+            });
+        found.is_break()
     }
 
     /// Register a CTE of the current query
@@ -692,6 +709,28 @@ impl<'a> Resolver<'a> {
             self.table_with_joins(table_with_joins);
         }
 
+        // Hive / Databricks `LATERAL VIEW [OUTER] explode(expr) alias AS c1, ...`: the
+        // generator's argument sees the FROM clause, and its output is a relation with
+        // the column aliases (of unknown types; any columns without aliases)
+        for (i, view) in select.lateral_views.iter().enumerate() {
+            self.expr(&view.lateral_view);
+            let key = view
+                .lateral_view_name
+                .0
+                .last()
+                .map_or_else(|| format!("?lateral_view{i}"), |n| n.value.clone());
+            let names: Vec<String> = view
+                .lateral_col_alias
+                .iter()
+                .map(|c| c.value.clone())
+                .collect();
+            let columns = Relation::rename_columns(None, &names);
+            self.scope.current().relations.insert(
+                key.clone(),
+                Relation::new(RelationKind::Function, key, columns),
+            );
+        }
+
         // DISTINCT ON (...) expressions
         if let Some(Distinct::On(exprs)) = &select.distinct {
             for expr in exprs {
@@ -796,15 +835,29 @@ impl<'a> Resolver<'a> {
                 }
                 SelectItem::UnnamedExpr(expr) => {
                     let name = implicit_column_name(expr).unwrap_or_else(|| UNNAMED_COLUMN.into());
-                    columns.push(Column::new(name, self.infer_expr_type(expr)));
+                    let mut column = Column::new(name, self.infer_expr_type(expr));
+                    // Only a column reference is named the same in every dialect
+                    column.guessed_name =
+                        !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_));
+                    columns.push(column);
                 }
                 SelectItem::Wildcard(options) => {
                     if frame.relations.is_empty() {
                         return None;
                     }
-                    let mut star = Vec::new();
+                    let mut star: Vec<Column> = Vec::new();
                     for relation in frame.relations.values() {
-                        star.extend(relation.star_columns()?.cloned());
+                        for column in relation.star_columns()? {
+                            // A column merged by USING / NATURAL JOIN appears once
+                            // (also when the merge couldn't be tied to a relation)
+                            let merged = frame.using_columns.contains(&column.name.to_lowercase())
+                                && star
+                                    .iter()
+                                    .any(|c| c.name.eq_ignore_ascii_case(&column.name));
+                            if !merged {
+                                star.push(column.clone());
+                            }
+                        }
                     }
                     columns.extend(self.apply_wildcard_options(star, options)?);
                 }
@@ -855,7 +908,7 @@ impl<'a> Resolver<'a> {
                 .iter_mut()
                 .find(|c| c.name.eq_ignore_ascii_case(&rename.ident.value))
             {
-                col.name.clone_from(&rename.alias.value);
+                col.rename(&rename.alias.value);
             }
         }
         Some(columns)
@@ -1487,19 +1540,25 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Position of a Snowflake date part keyword argument (`DATEADD(day, ...)`,
-    /// `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`), which the parser represents
-    /// as a column reference
+    /// Position of a Snowflake or Redshift date part keyword argument
+    /// (`DATEADD(day, ...)`, `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`,
+    /// `DATE_PART(h, ts)`), which the parser represents as a column reference
     fn date_part_arg(&self, func: &sqlparser::ast::Function) -> Option<usize> {
-        if self.dialect != SqlDialect::Snowflake {
-            return None;
-        }
+        let is_date_part: fn(&str) -> bool = match self.dialect {
+            SqlDialect::Snowflake => is_snowflake_date_part,
+            SqlDialect::Redshift => is_redshift_date_part,
+            _ => return None,
+        };
         let name = func.name.0.last()?.value.to_ascii_uppercase();
-        let index = match name.as_str() {
-            "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
-            | "DATE_TRUNC" | "DATE_PART" => 0,
-            "LAST_DAY" => 1,
-            "TIME_SLICE" => 2,
+        let index = match (name.as_str(), self.dialect) {
+            (
+                "DATEADD" | "TIMEADD" | "TIMESTAMPADD" | "DATEDIFF" | "TIMEDIFF" | "TIMESTAMPDIFF"
+                | "DATE_TRUNC" | "DATE_PART",
+                _,
+            )
+            | ("DATEPART" | "PGDATE_PART", SqlDialect::Redshift) => 0,
+            ("LAST_DAY", SqlDialect::Snowflake) => 1,
+            ("TIME_SLICE", SqlDialect::Snowflake) => 2,
             _ => return None,
         };
         let FunctionArguments::List(list) = &func.args else {
@@ -1507,7 +1566,7 @@ impl<'a> Resolver<'a> {
         };
         match list.args.get(index)? {
             FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))
-                if ident.quote_style.is_none() && is_snowflake_date_part(&ident.value) =>
+                if ident.quote_style.is_none() && is_date_part(&ident.value) =>
             {
                 Some(index)
             }
@@ -1597,8 +1656,14 @@ impl<'a> Resolver<'a> {
                     .push(relation_not_in_from(schema_id, table_id));
                 return;
             };
-            if !matches!(relation.column(column_name, self.dialect), ColumnMatch::No) {
-                return;
+            match relation.column(column_name, self.dialect) {
+                ColumnMatch::No => {}
+                ColumnMatch::Duplicate => {
+                    self.diagnostics
+                        .push(duplicate_column(relation, column_name, column_span));
+                    return;
+                }
+                ColumnMatch::Yes(_) | ColumnMatch::Maybe => return,
             }
             let mut diag = Diagnostic::error(
                 DiagnosticKind::ColumnNotFound,
@@ -1641,6 +1706,12 @@ impl<'a> Resolver<'a> {
                     )),
                 );
             }
+            ColumnLookup::Duplicate(key) => {
+                if let Some(relation) = self.scope.relation(&key) {
+                    let diag = duplicate_column(relation, column_name, column_span);
+                    self.diagnostics.push(diag);
+                }
+            }
             ColumnLookup::NotFound => {
                 // An output column alias (valid in ORDER BY / GROUP BY)
                 let is_alias = self.scope.current_ref().is_some_and(|f| {
@@ -1657,6 +1728,8 @@ impl<'a> Resolver<'a> {
                         || is_date_part_keyword(column_name)
                         || (self.dialect == SqlDialect::BigQuery
                             && super::bigquery::is_date_part(column_name))
+                        || (self.dialect == SqlDialect::Redshift
+                            && is_redshift_niladic_function(column_name))
                         || column_name.starts_with('@'));
                 if is_alias || is_relation || is_keyword {
                     return;
@@ -2015,6 +2088,54 @@ fn flatten_columns() -> Vec<Column> {
     ]
 }
 
+/// Redshift functions called without parentheses that the parser represents as
+/// identifiers (`SYSDATE`, `CURRENT_USER`)
+fn is_redshift_niladic_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "SYSDATE" | "CURRENT_USER" | "CURRENT_USER_ID" | "SESSION_USER" | "USER"
+    )
+}
+
+/// Redshift date and time parts and their abbreviations, as accepted by DATEADD,
+/// DATEDIFF, DATE_PART, DATE_TRUNC, ...
+fn is_redshift_date_part(name: &str) -> bool {
+    is_snowflake_date_part(name)
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "millennium"
+                | "millennia"
+                | "mil"
+                | "mils"
+                | "century"
+                | "centuries"
+                | "c"
+                | "cent"
+                | "cents"
+                | "decade"
+                | "decades"
+                | "dec"
+                | "decs"
+                | "y"
+                | "weeks"
+                | "minutes"
+                | "msecs"
+                | "msecond"
+                | "mseconds"
+                | "millisec"
+                | "millisecs"
+                | "millisecon"
+                | "microsec"
+                | "microsecs"
+                | "microsecond"
+                | "microseconds"
+                | "usecs"
+                | "usecond"
+                | "useconds"
+                | "timezone"
+        )
+}
+
 /// Snowflake date and time parts and their abbreviations, as accepted by DATEADD,
 /// DATEDIFF, DATE_TRUNC, DATE_PART, LAST_DAY, ...
 fn is_snowflake_date_part(name: &str) -> bool {
@@ -2127,6 +2248,26 @@ fn implicit_column_name(expr: &Expr) -> Option<String> {
         Expr::Case { .. } => Some("case".to_string()),
         _ => None,
     }
+}
+
+/// E0006 for a reference to a column name that a CTE or subquery outputs more than
+/// once (`SELECT *` over a join of two relations that both have it)
+fn duplicate_column(relation: &Relation, column: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticKind::AmbiguousColumn,
+        format!(
+            "Column '{}' is ambiguous ({} '{}' has more than one column named '{}')",
+            column,
+            relation.kind_name(),
+            relation.name,
+            column
+        ),
+    )
+    .with_span(span)
+    .with_help(format!(
+        "Select the columns of {} by name and alias the duplicates instead of using '*'",
+        relation.name
+    ))
 }
 
 /// Help for a column of a catalog table that doesn't exist

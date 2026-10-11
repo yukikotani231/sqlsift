@@ -33,7 +33,7 @@ glob = "0.3"
 
 # Async / LSP
 tower-lsp = "0.20"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"] }
 
 # Internal crates
 sqlsift-core = { path = "crates/sqlsift-core", version = "0.1.5" }
@@ -43,6 +43,12 @@ sqlsift-core = { path = "crates/sqlsift-core", version = "0.1.5" }
 inherits = "release"
 lto = "thin"
 strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
