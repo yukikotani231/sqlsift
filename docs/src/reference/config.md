@@ -1,6 +1,6 @@
 # Configuration file
 
-`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents, or use the file given with `--config <FILE>`. The language server reads it from the workspace root. Command-line options override values from the file.
+`sqlsift check` and `sqlsift schema` look for `sqlsift.toml` in the current directory and its parents, or use the file given with `--config <FILE>`. The language server reads it from the workspace root. Command-line options override values from the file. [`sqlsift init`](cli.md#sqlsift-init) writes a commented starting point for your project.
 
 ```toml
 # Schema

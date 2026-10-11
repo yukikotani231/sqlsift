@@ -212,7 +212,11 @@ impl<'a> Resolver<'a> {
 
         // Check if specified columns exist
         for col_ident in &insert.columns {
-            if !table_def.column_exists(&col_ident.value) {
+            if let Some(column) = table_def.case_mismatched_column(col_ident) {
+                let owner = format!("table '{table_name}'");
+                self.diagnostics
+                    .push(case_mismatch_diagnostic(col_ident, column, &owner));
+            } else if !table_def.column_exists(&col_ident.value) {
                 let mut diag = Diagnostic::error(
                     DiagnosticKind::ColumnNotFound,
                     format!(
@@ -490,6 +494,12 @@ impl<'a> Resolver<'a> {
         table_name: &QualifiedName,
         col: &Ident,
     ) {
+        if let Some(column) = table_def.case_mismatched_column(col) {
+            let owner = format!("table '{table_name}'");
+            self.diagnostics
+                .push(case_mismatch_diagnostic(col, column, &owner));
+            return;
+        }
         if table_def.column_exists(&col.value) {
             return;
         }
@@ -1946,7 +1956,18 @@ impl<'a> Resolver<'a> {
                         .push(duplicate_column(relation, column_name, column_span));
                     return;
                 }
-                ColumnMatch::Yes(_) | ColumnMatch::Maybe => return,
+                ColumnMatch::Yes(_) => {
+                    if let Some(column) = relation.case_mismatched_column(column_ident) {
+                        let owner = format!("{} '{}'", relation.kind_name(), relation.name);
+                        self.diagnostics.push(case_mismatch_diagnostic(
+                            column_ident,
+                            column,
+                            &owner,
+                        ));
+                    }
+                    return;
+                }
+                ColumnMatch::Maybe => return,
             }
             let mut diag = Diagnostic::error(
                 DiagnosticKind::ColumnNotFound,
@@ -1971,7 +1992,12 @@ impl<'a> Resolver<'a> {
 
         // Unqualified column reference: the innermost query block that has it wins
         match self.scope.column(column_name, self.dialect) {
-            ColumnLookup::Found(_) | ColumnLookup::Unknown => {}
+            ColumnLookup::Found(_) => {
+                if let Some(diag) = self.case_mismatch(column_ident) {
+                    self.diagnostics.push(diag);
+                }
+            }
+            ColumnLookup::Unknown => {}
             // BigQuery: in GROUP BY, HAVING, QUALIFY and ORDER BY a name that is an
             // output column alias is the alias, even when input columns have it
             // (PostgreSQL's GROUP BY prefers input columns, so it stays ambiguous)
@@ -2061,6 +2087,29 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// E0002 for an unqualified reference that resolves to a case-sensitive column
+    /// (`"authorId"`) only by ignoring case, unless it may name an output column
+    /// alias (ORDER BY / GROUP BY)
+    fn case_mismatch(&self, column_ident: &Ident) -> Option<Diagnostic> {
+        if !self.catalog.case_sensitive_names {
+            return None;
+        }
+        let relation = self
+            .scope
+            .column_relation(&column_ident.value, self.dialect)?;
+        let column = relation.case_mismatched_column(column_ident)?;
+        let is_alias = self.scope.current_ref().is_some_and(|f| {
+            f.select_aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&column_ident.value))
+        });
+        if is_alias {
+            return None;
+        }
+        let owner = format!("{} '{}'", relation.kind_name(), relation.name);
+        Some(case_mismatch_diagnostic(column_ident, column, &owner))
+    }
+
     /// Whether the database supplies a value for `col` when an INSERT omits it
     fn column_has_implicit_value(&self, table: &TableDef, col: &ColumnDef) -> bool {
         if col.nullable
@@ -2089,6 +2138,16 @@ impl<'a> Resolver<'a> {
             self.similar_table(table_name),
         ) {
             (Some(hint), _, _, _) | (None, Some(hint), _, _) | (None, None, Some(hint), _) => hint,
+            // PostgreSQL: `post` (or `"post"`) doesn't match a table created as `"Post"`
+            (None, None, None, Some(suggestion))
+                if self.catalog.case_sensitive_names
+                    && !suggestion.contains('.')
+                    && suggestion.eq_ignore_ascii_case(&table_name.to_string()) =>
+            {
+                format!(
+                    "Table names are case-sensitive when quoted; did you mean \"{suggestion}\"?"
+                )
+            }
             (None, None, None, Some(suggestion)) => format!("Did you mean '{suggestion}'?"),
             (None, None, None, None) => self.missing_table_hint(table_name),
         };
@@ -2581,6 +2640,28 @@ fn duplicate_column(relation: &Relation, column: &str, span: Span) -> Diagnostic
 }
 
 /// Help for a column of a catalog table that doesn't exist
+/// E0002 for a reference to a column created with a quoted, not all lowercase name
+/// (`"authorId"`) in another case: PostgreSQL folds the unquoted `authorId` to
+/// `authorid` and compares quoted names exactly
+fn case_mismatch_diagnostic(ident: &Ident, column: &str, owner: &str) -> Diagnostic {
+    let folded = ident.value.to_lowercase();
+    let message = if ident.quote_style.is_some() {
+        format!("Column {ident} not found in {owner}")
+    } else if folded == ident.value {
+        format!("Column '{folded}' not found in {owner}")
+    } else {
+        format!(
+            "Column '{}' not found in {owner} (unquoted names fold to lowercase: '{folded}')",
+            ident.value
+        )
+    };
+    Diagnostic::error(DiagnosticKind::ColumnNotFound, message)
+        .with_span(Span::from_sqlparser(&ident.span))
+        .with_help(format!(
+            "Column names are case-sensitive when quoted; did you mean \"{column}\"?"
+        ))
+}
+
 fn missing_table_column_help(table: &TableDef, name: &str) -> Option<String> {
     missing_column_help(
         table.former_column(name),

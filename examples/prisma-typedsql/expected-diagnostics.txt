@@ -1,0 +1,5 @@
+# Diagnostics `sqlsift check broken/...` must report (checked in CI by
+# scripts/check-examples.sh): <file>:<line>:<column> <code>
+broken/sql/getDraftsByAuthor.sql:3:19 E0002
+broken/src/admin.ts:8:23 E0003
+broken/src/admin.ts:16:10 E0001

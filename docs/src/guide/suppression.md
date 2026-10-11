@@ -49,7 +49,7 @@ Ignored files aren't parsed at all, and editors show no diagnostics for them. Se
 
 ## An existing backlog: baseline
 
-To adopt sqlsift on a project that already has many diagnostics, record them in a baseline file and get reports only for new ones:
+To adopt sqlsift on a project that already has many diagnostics, record them in a baseline file and get reports only for new ones. (In GitHub Actions, the action's [`diff-base` input](../integrations/ci.md#report-only-what-a-pull-request-introduces) does this for each pull request without a committed file.)
 
 ```bash
 sqlsift check --write-baseline

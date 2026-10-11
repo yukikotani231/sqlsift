@@ -1,0 +1,7 @@
+# Prisma Migrate writes plain SQL migrations: apply them in order.
+schema_dir = "prisma/migrations"
+# TypedSQL files, and raw queries in the TypeScript code.
+files = ["prisma/sql/*.sql", "src/**/*.ts"]
+dialect = "postgresql"
+# prisma.$queryRaw`...` / prisma.$executeRaw`...`, and Prisma.sql`...` fragments.
+embedded_sql_tags = ["sql", "$queryRaw", "$executeRaw"]

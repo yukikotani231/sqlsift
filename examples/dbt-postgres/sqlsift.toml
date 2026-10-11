@@ -1,0 +1,7 @@
+# The source tables, so the columns of {{ source('raw', ...) }} are checked.
+schema = ["warehouse/raw.sql"]
+files = ["models/**/*.sql"]
+dialect = "postgresql"
+# Jinja is masked automatically because dbt_project.yml is next to this file.
+# After `dbt docs generate`, the columns of {{ ref(...) }} are read from
+# target/catalog.json too (alpha).

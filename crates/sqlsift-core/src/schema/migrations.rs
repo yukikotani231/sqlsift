@@ -1,5 +1,6 @@
-//! Support for migration tool conventions: rollback (down/undo) files and
-//! dbmate's `-- migrate:up` / `-- migrate:down` sections.
+//! Support for migration tool conventions: rollback (down/undo) files,
+//! dbmate's `-- migrate:up` / `-- migrate:down` sections and goose's
+//! `-- +goose Up` / `-- +goose Down` sections.
 //!
 //! Only the "up" direction describes the schema, so rollback SQL must not be
 //! applied when building the catalog.
@@ -46,14 +47,15 @@ fn is_flyway_undo(name: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c == '.' || c == '_')
 }
 
-/// Blank out dbmate "down" sections: every line after a `-- migrate:down`
-/// marker, up to the next `-- migrate:up` marker (or the end of the file).
+/// Blank out dbmate and goose "down" sections: every line after a
+/// `-- migrate:down` (dbmate) or `-- +goose Down` (goose) marker, up to the
+/// next `-- migrate:up` / `-- +goose Up` marker (or the end of the file).
 ///
 /// Removed text is replaced with spaces (newlines are kept), so byte offsets
 /// and line numbers of the remaining statements are unchanged. Input without
 /// a down marker is returned as is.
 pub fn strip_down_migrations(sql: &str) -> Cow<'_, str> {
-    if !sql.contains("migrate:down") {
+    if !sql.contains("migrate:down") && !sql.contains("+goose") {
         return Cow::Borrowed(sql);
     }
 
@@ -79,10 +81,22 @@ enum Marker {
     Down,
 }
 
-/// Recognize a dbmate marker line: `-- migrate:up` or `-- migrate:down`,
-/// optionally followed by options such as `transaction:false`.
+/// Recognize a dbmate marker line (`-- migrate:up` or `-- migrate:down`,
+/// optionally followed by options such as `transaction:false`) or a goose one
+/// (`-- +goose Up` or `-- +goose Down`).
 fn migrate_marker(line: &str) -> Option<Marker> {
     let rest = line.trim_start().strip_prefix("--")?.trim_start();
+    if let Some(goose) = rest.strip_prefix("+goose") {
+        let word = goose.split_whitespace().next()?;
+        return if word.eq_ignore_ascii_case("down") {
+            Some(Marker::Down)
+        } else if word.eq_ignore_ascii_case("up") {
+            Some(Marker::Up)
+        } else {
+            // `StatementBegin`, `StatementEnd`, `NO TRANSACTION`, ...
+            None
+        };
+    }
     let rest = rest.strip_prefix("migrate:")?;
     let (marker, after) = match rest.strip_prefix("down") {
         Some(after) => (Marker::Down, after),

@@ -7,7 +7,7 @@ This repository is a Rust workspace for `sqlsift`, with four crates under `crate
 - `sqlsift-lsp`: Language Server Protocol backend.
 - `sqlsift-wasm`: WebAssembly bindings for the browser playground in `site/`.
 
-VS Code integration lives in `editors/vscode/` (TypeScript client extension). The user guide (mdBook) is in `docs/`. SQL test inputs are in `tests/fixtures/`; `tests/corpus/` is a harness that runs sqlsift over public real-world projects (not part of CI). Release tooling and automation configs are at the root (`release-plz.toml`, `dist-workspace.toml`, `scripts/release.sh`). `CLAUDE.md` has a detailed architecture overview and the steps for adding rules, types and options.
+VS Code integration lives in `editors/vscode/` (TypeScript client extension). The user guide (mdBook) is in `docs/`. SQL test inputs are in `tests/fixtures/`, example projects per stack in `examples/`; `tests/corpus/` is a harness that runs sqlsift over public real-world projects (not part of CI). Release tooling and automation configs are at the root (`release-plz.toml`, `dist-workspace.toml`, `scripts/release.sh`). `CLAUDE.md` has a detailed architecture overview and the steps for adding rules, types and options.
 
 ## Build, Test, and Development Commands
 - `cargo build --all-targets`: Build all crates and targets in the workspace.

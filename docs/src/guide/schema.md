@@ -19,17 +19,19 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 |-------|---------------|
 | **Prisma** | `sqlsift check --schema-dir prisma/migrations queries/*.sql` |
 | **Rails** (`schema_format = :sql`) | `sqlsift check --schema db/structure.sql queries/*.sql` |
-| **sqlx / golang-migrate / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
+| **sqlx / golang-migrate / goose / Flyway / dbmate** | `sqlsift check --schema-dir migrations queries/*.sql` |
 | **`pg_dump --schema-only`** | `sqlsift check --schema schema.sql queries/*.sql` |
 | **`mysqldump --no-data`** | `sqlsift check -d mysql --schema schema.sql queries/*.sql` |
 | **Hand-written DDL** | `sqlsift check --schema schema/*.sql queries/**/*.sql` |
+
+The [example projects](../integrations/examples.md) show complete setups for sqlc, Prisma TypedSQL, postgres.js, plain SQL migrations, MySQL and dbt.
 
 ## Migrations: only the "up" direction
 
 When reading migrations, sqlsift applies only the "up" direction:
 
 - `--schema-dir` skips rollback files: `*.down.sql` (sqlx, golang-migrate) and Flyway undo files `U<version>__*.sql`.
-- In any schema file, everything after a dbmate `-- migrate:down` marker (up to the next `-- migrate:up`) is ignored.
+- In any schema file, everything after a dbmate `-- migrate:down` or goose `-- +goose Down` marker (up to the next `-- migrate:up` / `-- +goose Up`) is ignored.
 - Files passed explicitly with `--schema` are always loaded, even if their name looks like a rollback.
 
 ## What sqlsift understands

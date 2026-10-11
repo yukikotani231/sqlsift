@@ -3,6 +3,7 @@
 mod args;
 mod config;
 mod dbt;
+mod init;
 mod output;
 
 use std::collections::HashSet;
@@ -256,11 +257,12 @@ fn glob_base(pattern: &str) -> PathBuf {
         .collect()
 }
 
-/// Expand a glob pattern into matching paths (sorted, as returned by `glob`)
+/// Expand a glob pattern into the files it matches (sorted, as returned by
+/// `glob`). Directories are skipped: `dir/**/*` names the files under `dir`.
 fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>> {
     let paths = glob::glob(pattern)
         .map_err(|e| miette::miette!("Invalid glob pattern '{}': {}", pattern, e))?;
-    Ok(paths.flatten().collect())
+    Ok(paths.flatten().filter(|path| !path.is_dir()).collect())
 }
 
 /// Load the configuration file given with `--config`, or discover `sqlsift.toml`
@@ -910,6 +912,20 @@ fn run(args: Args) -> Result<bool> {
 
             Ok(total_errors > 0 || too_many_warnings.is_some())
         }
+
+        Command::Init {
+            dir,
+            force,
+            dialect,
+            no_check,
+            dry_run,
+        } => init::run(&init::InitOptions {
+            dir: dir.unwrap_or_else(|| PathBuf::from(".")),
+            force,
+            dialect,
+            no_check,
+            dry_run,
+        }),
 
         Command::Rules => {
             print_rules();

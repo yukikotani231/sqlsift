@@ -261,6 +261,15 @@ impl Catalog {
         }
     }
 
+    /// Whether a column created with this name matches references only by exact
+    /// case: with PostgreSQL rules, a quoted name that is not all lowercase
+    /// (`"authorId"`). Unquoted references fold to lowercase and never match it.
+    pub fn is_case_sensitive_column(&self, ident: &Ident) -> bool {
+        self.case_sensitive_names
+            && ident.quote_style.is_some()
+            && ident.value != ident.value.to_lowercase()
+    }
+
     /// Convert a (possibly schema-qualified) object name to a [`QualifiedName`],
     /// applying [`Self::ident_name`] to each part
     ///
@@ -708,6 +717,18 @@ impl TableDef {
             .map(|(_, v)| v)
     }
 
+    /// The case-sensitive column (see [`ColumnDef::case_sensitive`]) that a
+    /// reference matches only ignoring case: PostgreSQL rejects the reference
+    /// (`authorId` folds to `authorid`, which `"authorId"` is not)
+    pub fn case_mismatched_column(&self, ident: &Ident) -> Option<&str> {
+        case_mismatched_column(
+            self.columns
+                .values()
+                .map(|c| (c.name.as_str(), c.case_sensitive)),
+            ident,
+        )
+    }
+
     /// Check if a column exists
     pub fn column_exists(&self, name: &str) -> bool {
         self.get_column(name).is_some()
@@ -739,6 +760,11 @@ pub struct ColumnDef {
     /// be given by INSERT or UPDATE
     #[serde(default)]
     pub generated: bool,
+    /// Created with a quoted name that is not all lowercase under PostgreSQL rules
+    /// (`"authorId"`): only a quoted reference with the same case matches it
+    /// (see [`Catalog::is_case_sensitive_column`])
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub case_sensitive: bool,
 }
 
 impl ColumnDef {
@@ -752,6 +778,7 @@ impl ColumnDef {
             identity: None,
             auto_increment: false,
             generated: false,
+            case_sensitive: false,
         }
     }
 
@@ -854,6 +881,32 @@ pub struct ViewDef {
     #[serde(default)]
     pub column_types: Vec<SqlType>,
     pub materialized: bool,
+}
+
+/// Of columns given as `(name, case_sensitive)`, the case-sensitive one that a
+/// reference matches only ignoring case. `None` when the reference matches a column
+/// exactly as PostgreSQL compares names (unquoted references fold to lowercase), or
+/// matches a column that is not case-sensitive, or matches none at all.
+pub fn case_mismatched_column<'a>(
+    columns: impl IntoIterator<Item = (&'a str, bool)>,
+    ident: &Ident,
+) -> Option<&'a str> {
+    let folded = if ident.quote_style.is_none() {
+        Cow::Owned(ident.value.to_lowercase())
+    } else {
+        Cow::Borrowed(ident.value.as_str())
+    };
+    let mut mismatched = None;
+    for (name, case_sensitive) in columns {
+        if !name.eq_ignore_ascii_case(&ident.value) {
+            continue;
+        }
+        if !case_sensitive || name == folded {
+            return None;
+        }
+        mismatched.get_or_insert(name);
+    }
+    mismatched
 }
 
 #[cfg(test)]

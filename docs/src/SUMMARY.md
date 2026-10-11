@@ -18,6 +18,7 @@
 
 # Integrations
 
+- [Example projects](integrations/examples.md)
 - [CI and GitHub Actions](integrations/ci.md)
 - [Pre-commit hooks](integrations/pre-commit.md)
 - [Editors](integrations/editors.md)

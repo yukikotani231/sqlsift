@@ -107,6 +107,35 @@ pub enum Command {
         write_baseline: bool,
     },
 
+    /// Detect the project layout and write sqlsift.toml
+    ///
+    /// Finds the schema (sqlc configuration, Prisma / Supabase / Drizzle / Flyway /
+    /// golang-migrate / goose / dbmate migrations, schema dumps, dbt catalogs), the
+    /// query files (.sql files, sqlc queries, Prisma TypedSQL, dbt models, SQL in
+    /// TypeScript / JavaScript tagged templates) and the dialect, writes a commented
+    /// sqlsift.toml, runs a first check and prints a summary and the next steps.
+    /// Never asks questions.
+    Init {
+        /// Project directory [default: current directory]
+        dir: Option<PathBuf>,
+
+        /// Overwrite an existing sqlsift.toml
+        #[arg(long)]
+        force: bool,
+
+        /// SQL dialect to write instead of the detected one
+        #[arg(short, long)]
+        dialect: Option<String>,
+
+        /// Don't run a first check after writing sqlsift.toml
+        #[arg(long)]
+        no_check: bool,
+
+        /// Print the configuration to stdout instead of writing sqlsift.toml
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// List all rules with their category and default level
     Rules,
 

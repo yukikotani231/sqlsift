@@ -3,9 +3,9 @@ name: GitHub Action
 on:
   push:
     branches: [main]
-    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**"]
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/action-diff/**"]
   pull_request:
-    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**"]
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/action-diff/**"]
   workflow_dispatch:
 
 # Read-only token: these jobs only build and test
@@ -55,3 +55,63 @@ jobs:
         run: |
           test "${{ steps.invalid.outputs.exit-code }}" = "1"
           python3 -c "import json; d = json.load(open('results.sarif')); assert d['runs'][0]['results'], 'no SARIF results'"
+
+      # diff-base: only the diagnostics a change introduces are reported.
+      # tests/fixtures/action-diff has one existing problem; a commit made here
+      # adds a migration that breaks another query.
+      - name: Record the base commit
+        id: base
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: "diff-base: existing problems are not reported"
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema-dir: tests/fixtures/action-diff/db
+          files: tests/fixtures/action-diff/queries/*.sql
+          diff-base: ${{ steps.base.outputs.sha }}
+
+      - name: Add a migration that breaks a query
+        shell: bash
+        run: |
+          echo "ALTER TABLE users DROP COLUMN email;" > tests/fixtures/action-diff/db/002_drop_email.sql
+          git add tests/fixtures/action-diff/db/002_drop_email.sql
+          git -c user.name=ci -c user.email=ci@example.com commit --quiet -m "drop email"
+
+      - name: "diff-base: the new problem is reported"
+        id: diff
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema-dir: tests/fixtures/action-diff/db
+          files: tests/fixtures/action-diff/queries/*.sql
+          diff-base: ${{ steps.base.outputs.sha }}
+          sarif-file: diff.sarif
+          fail-on-error: "false"
+
+      - name: "Without diff-base every problem is reported"
+        id: full
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema-dir: tests/fixtures/action-diff/db
+          files: tests/fixtures/action-diff/queries/*.sql
+          sarif-file: full.sarif
+          fail-on-error: "false"
+
+      - name: Check diff-base outputs
+        shell: bash
+        run: |
+          test "${{ steps.diff.outputs.exit-code }}" = "1"
+          test "${{ steps.full.outputs.exit-code }}" = "1"
+          python3 - <<'EOF'
+          import json
+          diff = json.load(open('diff.sarif'))['runs'][0]['results']
+          full = json.load(open('full.sarif'))['runs'][0]['results']
+          assert len(diff) == 1 and "'email'" in diff[0]['message']['text'], diff
+          assert len(full) == 2, full
+          EOF
+          # The temporary worktree and baseline are cleaned up
+          test "$(git worktree list | wc -l)" -eq 1
+          ! git status --porcelain --untracked-files=all | grep sqlsift-diff-baseline
