@@ -22,7 +22,9 @@
     "static-analysis",
     "postgresql",
     "mysql",
-    "sqlite"
+    "sqlite",
+    "snowflake",
+    "bigquery"
   ],
   "activationEvents": [
     "onLanguage:sql",

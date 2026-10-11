@@ -34,7 +34,7 @@ Options:
   -A, --allow <RULE>        Turn a rule or category off (alias: --disable)
   -W, --warn <RULE>         Report a rule or category as warnings
   -D, --deny <RULE>         Report a rule or category as errors
-  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite, snowflake, bigquery, redshift, databricks [default: postgresql]
       --templating <ENGINE> Query file templating: jinja (dbt models), none [default: jinja
                             when dbt_project.yml is in the current or the config file's
                             directory or above the query file, else none]
@@ -69,7 +69,7 @@ Options:
   -s, --schema <FILE>       Schema definition file (repeatable)
       --schema-dir <DIR>    Directory containing schema files
   -c, --config <FILE>       Path to configuration file
-  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+  -d, --dialect <NAME>      SQL dialect: postgresql, mysql, sqlite, snowflake, bigquery, redshift, databricks [default: postgresql]
   -f, --format <FORMAT>     Output format: human, json [default: human]
 ```
 

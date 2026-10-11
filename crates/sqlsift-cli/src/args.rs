@@ -67,7 +67,7 @@ pub enum Command {
         #[arg(short = 'D', long = "deny", value_name = "RULE")]
         deny: Vec<String>,
 
-        /// SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+        /// SQL dialect: postgresql, mysql, sqlite, snowflake, bigquery, redshift, databricks [default: postgresql]
         #[arg(short, long)]
         dialect: Option<String>,
 
@@ -129,7 +129,7 @@ pub enum Command {
         #[arg(short, long = "config", value_name = "FILE")]
         config: Option<PathBuf>,
 
-        /// SQL dialect: postgresql, mysql, sqlite [default: postgresql]
+        /// SQL dialect: postgresql, mysql, sqlite, snowflake, bigquery, redshift, databricks [default: postgresql]
         #[arg(short, long)]
         dialect: Option<String>,
 

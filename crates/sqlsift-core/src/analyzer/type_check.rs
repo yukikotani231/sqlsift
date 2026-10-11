@@ -17,7 +17,6 @@ use sqlparser::ast::{
     Insert, SetExpr, Spanned, Value,
 };
 
-use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
 #[cfg(test)]
 use crate::schema::Catalog;
@@ -104,7 +103,7 @@ impl Resolver<'_> {
     ) -> Option<(String, String)> {
         match (left, right) {
             (ExpressionType::Known(lt), ExpressionType::Known(rt)) => {
-                if self.dialect != SqlDialect::PostgreSQL && is_integer_boolean_pair(lt, rt) {
+                if self.dialect.has_integer_booleans() && is_integer_boolean_pair(lt, rt) {
                     // MySQL BOOLEAN is TINYINT(1); SQLite stores booleans as integers
                     return None;
                 }
@@ -370,7 +369,7 @@ impl Resolver<'_> {
                     .map_or(col_def.is_primary_key, |pk| {
                         pk.columns.len() == 1 && pk.columns[0].eq_ignore_ascii_case(&col_def.name)
                     });
-                let generates_key = self.dialect != SqlDialect::PostgreSQL
+                let generates_key = self.dialect.null_generates_integer_key()
                     && single_column_key
                     && col_def.data_type.is_integer();
                 if !col_def.nullable
@@ -754,6 +753,7 @@ fn is_integer_boolean_pair(a: &SqlType, b: &SqlType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialect::SqlDialect;
     use crate::schema::SchemaBuilder;
 
     /// Resolve and type check one statement

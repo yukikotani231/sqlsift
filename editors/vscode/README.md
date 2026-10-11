@@ -53,7 +53,7 @@ schema = ["db/schema.sql"]
 # Or specify a directory (recursively finds *.sql)
 # schema_dir = "db/migrations"
 
-# SQL dialect: "postgresql" (default), "mysql" or "sqlite"
+# SQL dialect: "postgresql" (default), "mysql", "sqlite", or (alpha) "snowflake", "bigquery", "redshift", "databricks"
 # dialect = "postgresql"
 
 # Template literal tags checked as SQL in TypeScript / JavaScript files

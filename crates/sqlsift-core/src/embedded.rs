@@ -774,10 +774,7 @@ fn placeholder(
     end: usize,
     dialect: SqlDialect,
 ) -> Option<(usize, usize)> {
-    let parameter = match dialect {
-        SqlDialect::PostgreSQL => "$1",
-        SqlDialect::MySQL | SqlDialect::SQLite => "?",
-    };
+    let parameter = dialect.bind_parameter();
 
     // The SQL word before the interpolation
     let word_end = skip_space_back(out, start);

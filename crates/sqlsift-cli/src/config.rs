@@ -44,7 +44,7 @@ pub struct Config {
     #[serde(default)]
     pub ignore: Vec<String>,
 
-    /// SQL dialect ("postgresql", "mysql", "sqlite")
+    /// SQL dialect ("postgresql", "mysql", "sqlite", "snowflake", "bigquery", "redshift", "databricks")
     #[serde(default)]
     pub dialect: Option<String>,
 

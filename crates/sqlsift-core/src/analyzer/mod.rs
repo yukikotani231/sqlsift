@@ -225,9 +225,9 @@ impl<'a> Analyzer<'a> {
             Templating::None => Template::unchanged(sql),
         };
         let source = match self.dialect {
-            SqlDialect::PostgreSQL => psql::preprocess(&template.masked.text),
+            dialect if dialect.is_psql() => psql::preprocess(&template.masked.text),
             SqlDialect::MySQL => mysql::preprocess(&template.masked.text),
-            SqlDialect::SQLite => Preprocessed::unchanged(&template.masked.text),
+            _ => Preprocessed::unchanged(&template.masked.text),
         };
         // sqlc parameters (`sqlc.arg(name)`, `@name`) become placeholders
         let text = sqlc::mask_parameters(&source.text, self.dialect);
@@ -428,7 +428,7 @@ impl<'a> Analyzer<'a> {
                 match self.dialect {
                     SqlDialect::MySQL => mysql::parse_insert_set(dialect.as_ref(), text)
                         .map_or(Err(error), |parsed| parsed.map(|s| vec![s])),
-                    SqlDialect::PostgreSQL | SqlDialect::SQLite => Err(error),
+                    _ => Err(error),
                 }
             });
             let error = match parsed {

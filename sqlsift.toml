@@ -30,7 +30,8 @@ schema = [
 # Or use schema directory to automatically include all .sql files
 # schema_dir = "db/schema"
 
-# SQL dialect: "postgresql" (default), "mysql", or "sqlite"
+# SQL dialect: "postgresql" (default), "mysql", "sqlite",
+# or (alpha) "snowflake", "bigquery", "redshift", "databricks"
 # dialect = "postgresql"
 
 # Query file templating: "jinja" (dbt models) or "none". When unset, Jinja
