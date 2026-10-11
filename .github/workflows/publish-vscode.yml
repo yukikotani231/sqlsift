@@ -149,6 +149,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Releases are immutable once published, so a release that is already
+          # out (e.g. a manual re-run) keeps its assets; the Marketplace job is
+          # independent of this one.
+          if [[ "$(gh api "repos/${{ github.repository }}/releases/tags/${{ steps.tag.outputs.tag }}" --jq .immutable)" == "true" ]]; then
+            echo "::warning::Release ${{ steps.tag.outputs.tag }} is immutable; VSIX files not attached"
+            exit 0
+          fi
           for vsix in vsix/*.vsix; do
             gh release upload "${{ steps.tag.outputs.tag }}" "$vsix" \
               --repo "${{ github.repository }}"

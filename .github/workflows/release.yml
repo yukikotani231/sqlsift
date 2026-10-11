@@ -340,7 +340,8 @@ jobs:
         run: npm config set registry https://registry.npmjs.org/
       - run: |
           for pkg in npm/*-npm-package.tar.gz; do
-            npm publish --access public --provenance "$pkg"
+            # "./" so npm reads a local tarball, not the GitHub shorthand npm/<repo>
+            npm publish --access public --provenance "./$pkg"
           done
 
   announce:
