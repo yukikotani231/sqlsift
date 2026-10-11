@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "sqlsift-cli"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "clap",
  "glob",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "sqlsift-core"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "glob",
  "indexmap",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "sqlsift-lsp"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "glob",
  "serde",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "sqlsift-wasm"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
