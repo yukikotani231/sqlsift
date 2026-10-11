@@ -44,10 +44,15 @@ on:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: "Publish the npm packages of an existing GitHub Release (e.g. v0.2.0) instead of building a release"
+        required: false
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
+    if: ${{ !inputs.npm_tag }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
@@ -309,6 +314,33 @@ jobs:
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
             npm publish --access public --provenance "./npm/${pkg}"
+          done
+
+  # Manual recovery: publish the npm packages attached to an existing GitHub
+  # Release (used when publish-npm failed after the release was created).
+  # It lives in this file because npm trusted publishing is bound to release.yml.
+  republish-npm:
+    if: ${{ inputs.npm_tag }}
+    runs-on: "ubuntu-22.04"
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.npm_tag }}
+    steps:
+      - name: Fetch npm packages from the release
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*-npm-package.tar.gz' --dir npm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Upgrade npm for OIDC trusted publishing support
+        run: npm install -g npm@latest
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
+      - run: |
+          for pkg in npm/*-npm-package.tar.gz; do
+            npm publish --access public --provenance "$pkg"
           done
 
   announce:
