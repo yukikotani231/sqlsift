@@ -332,6 +332,9 @@ pub(super) struct Frame {
     /// The enclosing frame is not visible from this one (a non-LATERAL subquery in FROM
     /// can't see the FROM clause it appears in)
     pub(super) hides_parent: bool,
+    /// Relations only reachable through a qualifier, never by an unqualified column
+    /// or `*` (PostgreSQL 18 `RETURNING old.*, new.*`)
+    pub(super) row_aliases: IndexMap<String, Relation>,
 }
 
 impl Frame {
@@ -350,7 +353,8 @@ impl Frame {
         name: &Ident,
     ) -> Option<&Relation> {
         let Some(schema) = schema else {
-            return lookup_ignore_case(&self.relations, &name.value);
+            return lookup_ignore_case(&self.relations, &name.value)
+                .or_else(|| lookup_ignore_case(&self.row_aliases, &name.value));
         };
         let (schema, table) = (catalog.ident_name(schema), catalog.ident_name(name));
         let by_qualified_name = self.relations.values().find(|r| {
@@ -439,8 +443,10 @@ impl Scope {
 
     /// A relation by alias or name, innermost first
     pub(super) fn relation(&self, name: &str) -> Option<&Relation> {
-        self.visible()
-            .find_map(|frame| lookup_ignore_case(&frame.relations, name))
+        self.visible().find_map(|frame| {
+            lookup_ignore_case(&frame.relations, name)
+                .or_else(|| lookup_ignore_case(&frame.row_aliases, name))
+        })
     }
 
     /// A relation by `[schema.]name` as a column reference or `schema.table.*`

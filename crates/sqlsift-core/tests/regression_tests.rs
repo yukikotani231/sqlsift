@@ -1286,3 +1286,42 @@ fn json_table_columns_are_the_listed_ones() {
         );
     }
 }
+// #280: PostgreSQL 18 RETURNING old / new
+#[test]
+fn returning_old_and_new_rows() {
+    let schema = "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+                  CREATE TABLE posts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL);";
+    for sql in [
+        "UPDATE users SET name = 'x' RETURNING old.name, new.name",
+        "UPDATE users u SET name = 'x' RETURNING old.id, new.*",
+        "DELETE FROM users RETURNING old.*",
+        "INSERT INTO users (name) VALUES ('a') RETURNING OLD.name, NEW.name",
+        // A relation of the statement named `old` takes precedence
+        "UPDATE users SET name = 'x' FROM posts old WHERE old.user_id = users.id RETURNING old.title",
+    ] {
+        let diagnostics = analyze(schema, SqlDialect::PostgreSQL, sql);
+        assert!(diagnostics.is_empty(), "{sql}: {diagnostics:#?}");
+    }
+    for (sql, kind) in [
+        (
+            "UPDATE users SET name = 'x' RETURNING old.nope",
+            DiagnosticKind::ColumnNotFound,
+        ),
+        ("SELECT old.name FROM users", DiagnosticKind::TableNotFound),
+    ] {
+        assert_eq!(
+            kinds(&analyze(schema, SqlDialect::PostgreSQL, sql)),
+            vec![kind],
+            "{sql}"
+        );
+    }
+    // Only PostgreSQL has them
+    assert_eq!(
+        kinds(&analyze(
+            schema,
+            SqlDialect::SQLite,
+            "UPDATE users SET name = 'x' RETURNING old.name"
+        )),
+        vec![DiagnosticKind::TableNotFound]
+    );
+}

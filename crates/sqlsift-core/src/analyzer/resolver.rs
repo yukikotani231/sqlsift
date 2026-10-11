@@ -166,7 +166,8 @@ impl<'a> Resolver<'a> {
                     from,
                     update.selection.as_ref(),
                 );
-                let columns = self.returning(update.returning.as_deref());
+                let target = relation_key(&update.table.relation);
+                let columns = self.returning(update.returning.as_deref(), target.as_deref());
                 self.scope.pop();
                 columns
             }
@@ -422,7 +423,10 @@ impl<'a> Resolver<'a> {
             .table_alias
             .as_ref()
             .map_or_else(|| table_name.name.clone(), |a| a.alias.value.clone());
-        self.scope.current().relations.insert(key, target.clone());
+        self.scope
+            .current()
+            .relations
+            .insert(key.clone(), target.clone());
         if let Some(on) = &insert.on {
             // MySQL row alias: INSERT ... VALUES (...) AS new ON DUPLICATE KEY UPDATE c = new.c
             let row_alias = insert
@@ -444,7 +448,7 @@ impl<'a> Resolver<'a> {
                 relations.shift_remove(row_alias);
             }
         }
-        self.returning(insert.returning.as_deref())
+        self.returning(insert.returning.as_deref(), Some(&key))
     }
 
     /// Resolve the source query of INSERT ... SELECT, which can't see the target table
@@ -580,14 +584,33 @@ impl<'a> Resolver<'a> {
         self.diagnostics.push(diag);
     }
 
-    /// Resolve a RETURNING list against the statement's tables
-    fn returning(&mut self, returning: Option<&[SelectItem]>) -> Option<Vec<Column>> {
+    /// Resolve a RETURNING list against the statement's tables. `target` is the
+    /// scope key of the table the statement changes: PostgreSQL 18 names its row
+    /// before and after the change `old` and `new` there (a relation of the
+    /// statement with that name takes precedence).
+    fn returning(
+        &mut self,
+        returning: Option<&[SelectItem]>,
+        target: Option<&str>,
+    ) -> Option<Vec<Column>> {
         let items = returning?;
+        if self.dialect == SqlDialect::PostgreSQL {
+            let frame = self.scope.current();
+            if let Some(relation) =
+                target.and_then(|t| lookup_ignore_case(&frame.relations, t).cloned())
+            {
+                for name in ["old", "new"] {
+                    frame.row_aliases.insert(name.to_string(), relation.clone());
+                }
+            }
+        }
         let span = Span::with_location(0, 0, 0);
         for item in items {
             self.select_item(item, &span);
         }
-        self.projection_columns(items)
+        let columns = self.projection_columns(items);
+        self.scope.current().row_aliases.clear();
+        columns
     }
 
     /// Resolve an UPDATE statement in the current (statement) frame
@@ -690,7 +713,8 @@ impl<'a> Resolver<'a> {
             self.check_aggregates_in(where_expr, Clause::Where);
         }
 
-        self.returning(delete.returning.as_deref())
+        let target = tables.first().and_then(|t| relation_key(&t.relation));
+        self.returning(delete.returning.as_deref(), target.as_deref())
     }
 
     // ---------------------------------------------------------------------
