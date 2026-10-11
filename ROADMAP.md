@@ -21,11 +21,15 @@ Also in v0.2: rules E0009-E0027, including the first `suspicious` and `restricti
 | Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
 | Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks (alpha released; next: feedback from real projects) | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
 | dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` (alpha released; next: feedback from real projects) | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
-| SQL in Rust code (sqlx `query!` / `query_as!`) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
-| SQL in Python code (configurable call names) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
-| Baseline strict mode and maintenance tooling | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
-| `sqlsift impact`: show which queries a migration breaks | [#230](https://github.com/yukikotani231/sqlsift/issues/230) |
-| `sqlsift describe`: each query's columns and types as JSON | [#231](https://github.com/yukikotani231/sqlsift/issues/231) |
+| SQL in Rust code (sqlx `query!` / `query_as!`) (done) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
+| SQL in Python code (configurable call names) (done) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
+| Baseline strict mode and maintenance tooling (done) | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
+| `sqlsift impact`: show which queries a migration breaks (done) | [#230](https://github.com/yukikotani231/sqlsift/issues/230) |
+| `sqlsift describe`: each query's columns and types as JSON (done) | [#231](https://github.com/yukikotani231/sqlsift/issues/231) |
+| `sqlsift unused`: tables and columns no query uses (done) | [#265](https://github.com/yukikotani231/sqlsift/issues/265) |
+| Suspicious joins: a JOIN that doesn't follow the foreign key (E0030), aggregates multiplied by a one-to-many join (E0031) (done) | [#266](https://github.com/yukikotani231/sqlsift/issues/266), [#294](https://github.com/yukikotani231/sqlsift/issues/294) |
+| Newer PostgreSQL and MySQL syntax, and mismatches MySQL / SQLite convert at run time (E0029) | [#279](https://github.com/yukikotani231/sqlsift/issues/279)-[#284](https://github.com/yukikotani231/sqlsift/issues/284) |
+| `sqlsift init` in larger repositories, query files in UTF-16 or other encodings (done) | [#275](https://github.com/yukikotani231/sqlsift/issues/275), [#276](https://github.com/yukikotani231/sqlsift/issues/276) |
 
 ## v0.4: own PostgreSQL parser
 
