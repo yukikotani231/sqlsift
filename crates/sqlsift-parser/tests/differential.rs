@@ -73,6 +73,9 @@ fn select_subset_matches_sqlparser() {
          CURRENT_USER, EXTRACT(YEAR FROM d), x COLLATE \"C\", t AT TIME ZONE 'UTC', \
          E'a\\nb', B'101', X'1f', U&'d' FROM t LIMIT ALL",
         "SELECT a FROM t WHERE b LIKE 'x!%' ESCAPE '!' AND c @@ d",
+        "SELECT ~1, @ -1, |/ 4, ||/ 8, f(@x) FROM t",
+        "SELECT 1 FROM t LIMIT 1 FOR UPDATE OF t SKIP LOCKED FOR SHARE NOWAIT",
+        "SELECT 1 FROM t FOR UPDATE LIMIT 1",
         "INSERT INTO s.t AS x (a, b) VALUES (1, DEFAULT), ($1, 2) \
          ON CONFLICT (a) DO UPDATE SET b = EXCLUDED.b WHERE x.b IS NULL RETURNING *",
         "INSERT INTO t (a) SELECT a FROM u ON CONFLICT ON CONSTRAINT c DO NOTHING",

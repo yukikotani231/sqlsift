@@ -22,8 +22,8 @@ pub(crate) fn select_stmt(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at_kw("order") {
         order_by_clause(p);
     }
-    // PostgreSQL takes LIMIT and OFFSET in either order.
-    for _ in 0..2 {
+    // PostgreSQL takes LIMIT, OFFSET and locking clauses in any order.
+    loop {
         if p.at_kw("limit") {
             let c = p.start();
             p.bump();
@@ -39,9 +39,42 @@ pub(crate) fn select_stmt(p: &mut Parser<'_>) -> CompletedMarker {
                 p.eat_kw("row");
             }
             c.complete(p, SyntaxKind::OffsetClause);
+        } else if p.at_kw("for") {
+            locking_clause(p);
+        } else {
+            break;
         }
     }
     m.complete(p, SyntaxKind::SelectStmt)
+}
+
+fn locking_clause(p: &mut Parser<'_>) {
+    let c = p.start();
+    p.bump();
+    if p.eat_kw("no") {
+        p.expect_kw("key");
+        p.expect_kw("update");
+    } else if p.eat_kw("key") {
+        p.expect_kw("share");
+    } else if !p.eat_kw("update") {
+        p.expect_kw("share");
+    }
+    if p.eat_kw("of") {
+        loop {
+            if at_col_id(p) {
+                name(p, false);
+            } else {
+                p.error("expected a table name");
+            }
+            if !p.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+    }
+    if !p.eat_kw("nowait") && p.eat_kw("skip") {
+        p.expect_kw("locked");
+    }
+    c.complete(p, SyntaxKind::LockingClause);
 }
 
 /// Set operations: `INTERSECT` binds tighter than `UNION` and `EXCEPT`, all left-associative.

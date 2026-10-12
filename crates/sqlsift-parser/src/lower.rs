@@ -173,8 +173,10 @@ impl Lowering<'_> {
         let mut order_by = None;
         let mut limit = None;
         let mut offset = None;
+        let mut locks = vec![];
         for child in node.nodes() {
             match child.kind {
+                SyntaxKind::LockingClause => locks.push(self.lock(child)?),
                 SyntaxKind::OrderByClause => order_by = Some(self.order_by(child)?),
                 SyntaxKind::LimitClause => {
                     // `LIMIT ALL` is no limit.
@@ -229,11 +231,39 @@ impl Lowering<'_> {
             order_by,
             limit_clause,
             fetch: None,
-            locks: vec![],
+            locks,
             for_clause: None,
             settings: None,
             format_clause: None,
             pipe_operators: vec![],
+        })
+    }
+
+    fn lock(&self, node: &SyntaxNode) -> Result<ast::LockClause> {
+        if self.has_kw(node, "key") {
+            return unsupported("FOR NO KEY UPDATE / FOR KEY SHARE");
+        }
+        let names: Vec<_> = node.nodes().collect();
+        let of = match names[..] {
+            [] => None,
+            [name] => Some(object_name(self.name_parts(name)?)),
+            _ => return unsupported("FOR ... OF several tables"),
+        };
+        let nonblock = if self.has_kw(node, "nowait") {
+            Some(ast::NonBlock::Nowait)
+        } else if self.has_kw(node, "skip") {
+            Some(ast::NonBlock::SkipLocked)
+        } else {
+            None
+        };
+        Ok(ast::LockClause {
+            lock_type: if self.has_kw(node, "update") {
+                ast::LockType::Update
+            } else {
+                ast::LockType::Share
+            },
+            of,
+            nonblock,
         })
     }
 
@@ -1103,6 +1133,11 @@ impl Lowering<'_> {
                 let op = match self.text(op) {
                     "-" => UnaryOperator::Minus,
                     "+" => UnaryOperator::Plus,
+                    "~" => UnaryOperator::BitwiseNot,
+                    "@" => UnaryOperator::PGAbs,
+                    "|/" => UnaryOperator::PGSquareRoot,
+                    "||/" => UnaryOperator::PGCubeRoot,
+                    "!!" => UnaryOperator::PGPrefixFactorial,
                     _ if self.is_kw(op, "not") => UnaryOperator::Not,
                     other => return unsupported(format!("prefix operator {other}")),
                 };

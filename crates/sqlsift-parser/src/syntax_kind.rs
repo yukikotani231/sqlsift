@@ -110,6 +110,8 @@ pub enum SyntaxKind {
     OrderByClause,
     SortItem,
     LimitClause,
+    /// `FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE [OF t, ...] [NOWAIT | SKIP LOCKED]`
+    LockingClause,
     OffsetClause,
     /// A dotted name (`schema.table`, `t.col`, `t.*`)
     Name,

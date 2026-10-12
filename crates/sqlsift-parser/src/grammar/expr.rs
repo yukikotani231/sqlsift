@@ -271,7 +271,12 @@ fn prefix(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         operand(p, NOT);
         return Some(m.complete(p, SyntaxKind::PrefixExpr));
     }
-    if p.at_op("-") || p.at_op("+") {
+    // `|/` and `||/` are lexed as one operator; `@`, `~`, `!!` are PostgreSQL's prefix
+    // operators (absolute value, bitwise not, factorial).
+    if ["-", "+", "~", "@", "|/", "||/", "!!"]
+        .iter()
+        .any(|op| p.at_op(op))
+    {
         let m = p.start();
         p.bump();
         operand(p, MUL);
