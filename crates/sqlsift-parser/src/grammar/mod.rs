@@ -149,9 +149,13 @@ fn at_col_id(p: &mut Parser<'_>) -> bool {
     nth_is_col_id(p, 0)
 }
 
-/// Whether the current token starts a query (`SELECT ...`).
+/// Whether the current token starts a query: `SELECT`, `WITH`, or parentheses around one.
 fn at_query_start(p: &mut Parser<'_>) -> bool {
-    p.at_kw("select")
+    let mut n = 0;
+    while p.nth(n) == SyntaxKind::LParen {
+        n += 1;
+    }
+    p.nth_kw(n, "select") || p.nth_kw(n, "with")
 }
 
 pub(crate) fn source_file(p: &mut Parser<'_>) {
@@ -173,7 +177,7 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 }
 
 fn statement(p: &mut Parser<'_>) {
-    if at_query_start(p) {
+    if p.at_kw("select") || p.at_kw("with") || (p.at(SyntaxKind::LParen) && at_query_start(p)) {
         select_stmt(p);
     } else {
         let m = p.start();

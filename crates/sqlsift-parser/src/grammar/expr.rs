@@ -1,7 +1,7 @@
 //! Expressions: a Pratt parser with PostgreSQL's operator precedence (the table in the
 //! "Operator Precedence" section of the manual, as sqlparser's PostgreSQL dialect has it).
 
-use super::{close_paren, is_reserved, name, select_stmt, types::type_name};
+use super::{at_query_start, close_paren, is_reserved, name, select_stmt, types::type_name};
 use crate::parser::{CompletedMarker, Parser};
 use crate::SyntaxKind;
 
@@ -157,7 +157,7 @@ fn predicate_tail(p: &mut Parser<'_>) -> SyntaxKind {
         if p.at(SyntaxKind::LParen) {
             let m = p.start();
             p.bump();
-            let kind = if p.at_kw("select") {
+            let kind = if at_query_start(p) {
                 select_stmt(p);
                 SyntaxKind::SubqueryExpr
             } else {
@@ -275,7 +275,9 @@ fn single(p: &mut Parser<'_>, kind: SyntaxKind) -> CompletedMarker {
 fn paren(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump();
-    if p.at_kw("select") {
+    // `((SELECT 1) + 1)` is an expression: only a query right after the parenthesis makes
+    // this a subquery.
+    if p.at_kw("select") || p.at_kw("with") {
         select_stmt(p);
         close_paren(p);
         return m.complete(p, SyntaxKind::SubqueryExpr);
@@ -362,7 +364,7 @@ fn exists(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump();
     p.bump();
-    if p.at_kw("select") {
+    if at_query_start(p) {
         select_stmt(p);
     } else {
         p.error("expected SELECT");

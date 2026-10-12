@@ -7,12 +7,13 @@
 //! would produce or not at all. The differential test checks that.
 
 use sqlparser::ast::{
-    self, BinaryOperator, CaseWhen, CastKind, Distinct, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, Join,
-    JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, Offset, OffsetRows,
-    OrderBy, OrderByExpr, OrderByKind, OrderByOptions, Query, Select, SelectFlavor, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, Statement, TableAlias, TableAliasColumnDef,
-    TableFactor, TableWithJoins, UnaryOperator, Value, ValueWithSpan, WildcardAdditionalOptions,
+    self, BinaryOperator, CaseWhen, CastKind, Cte, CteAsMaterialized, Distinct, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
+    Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, Offset,
+    OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, Query, Select, SelectFlavor,
+    SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement,
+    TableAlias, TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value,
+    ValueWithSpan, WildcardAdditionalOptions, With,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan};
@@ -197,9 +198,22 @@ impl Lowering<'_> {
                 offset,
                 limit_by: vec![],
             });
+        let with = node
+            .child(SyntaxKind::WithClause)
+            .map(|w| self.with(w))
+            .transpose()?;
+        let body = node
+            .nodes()
+            .find(|n| {
+                matches!(
+                    n.kind,
+                    SyntaxKind::SimpleSelect | SyntaxKind::SetOperation | SyntaxKind::ParenSelect
+                )
+            })
+            .ok_or_else(|| Unsupported("query body".into()))?;
         Ok(Query {
-            with: None,
-            body: Box::new(SetExpr::Select(Box::new(self.select(node)?))),
+            with,
+            body: Box::new(self.set_expr(body)?),
             order_by,
             limit_clause,
             fetch: None,
@@ -208,6 +222,93 @@ impl Lowering<'_> {
             settings: None,
             format_clause: None,
             pipe_operators: vec![],
+        })
+    }
+
+    fn set_expr(&self, node: &SyntaxNode) -> Result<SetExpr> {
+        match node.kind {
+            SyntaxKind::SimpleSelect => Ok(SetExpr::Select(Box::new(self.select(node)?))),
+            SyntaxKind::ParenSelect => {
+                Ok(SetExpr::Query(Box::new(self.query(child_query(node)?)?)))
+            }
+            SyntaxKind::SetOperation => {
+                let parts: Vec<_> = node.nodes().collect();
+                let [left, right] = parts[..] else {
+                    return unsupported("set operation");
+                };
+                let tokens: Vec<_> = node.tokens().collect();
+                let op = if self.is_kw(tokens[0], "union") {
+                    SetOperator::Union
+                } else if self.is_kw(tokens[0], "intersect") {
+                    SetOperator::Intersect
+                } else {
+                    SetOperator::Except
+                };
+                let set_quantifier = match tokens.get(1) {
+                    Some(t) if self.is_kw(t, "all") => SetQuantifier::All,
+                    Some(t) if self.is_kw(t, "distinct") => SetQuantifier::Distinct,
+                    _ => SetQuantifier::None,
+                };
+                Ok(SetExpr::SetOperation {
+                    left: Box::new(self.set_expr(left)?),
+                    op,
+                    set_quantifier,
+                    right: Box::new(self.set_expr(right)?),
+                })
+            }
+            kind => unsupported(format!("{kind:?} as a query body")),
+        }
+    }
+
+    fn with(&self, node: &SyntaxNode) -> Result<With> {
+        let tokens: Vec<_> = node.tokens().collect();
+        let mut cte_tables = vec![];
+        for cte in node.nodes() {
+            let name = cte
+                .tokens()
+                .next()
+                .ok_or_else(|| Unsupported("CTE name".into()))?;
+            let columns = match cte.child(SyntaxKind::ColumnList) {
+                Some(list) => self
+                    .column_list(list)?
+                    .into_iter()
+                    .map(|name| TableAliasColumnDef {
+                        name,
+                        data_type: None,
+                    })
+                    .collect(),
+                None => vec![],
+            };
+            let materialized = if self.has_kw(cte, "not") {
+                Some(CteAsMaterialized::NotMaterialized)
+            } else if self.has_kw(cte, "materialized") {
+                Some(CteAsMaterialized::Materialized)
+            } else {
+                None
+            };
+            let closing = cte
+                .tokens()
+                .last()
+                .ok_or_else(|| Unsupported("CTE".into()))?;
+            cte_tables.push(Cte {
+                alias: TableAlias {
+                    explicit: false,
+                    name: self.ident(name)?,
+                    columns,
+                    at: None,
+                },
+                query: Box::new(self.query(child_query(cte)?)?),
+                from: None,
+                materialized,
+                closing_paren_token: ast::helpers::attached_token::AttachedToken(
+                    TokenWithSpan::new(Token::RParen, self.span(closing.range)),
+                ),
+            });
+        }
+        Ok(With {
+            with_token: self.attached(tokens[0]),
+            recursive: tokens.get(1).is_some_and(|t| self.is_kw(t, "recursive")),
+            cte_tables,
         })
     }
 

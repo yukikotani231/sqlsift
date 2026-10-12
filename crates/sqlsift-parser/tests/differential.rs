@@ -48,6 +48,13 @@ fn select_subset_matches_sqlparser() {
         "SELECT $1, 'it''s', N'n', $$dollar$$, $tag$x$tag$, 1.5e3, TRUE, NULL",
         "SELECT a\n  FROM t\n -- comment\n WHERE b = 'x' /* block */ AND c < 2",
         "SELECT f(), s.f(a, b) FROM t",
+        "WITH x (a) AS (SELECT 1), y AS MATERIALIZED (SELECT 2), \
+         z AS NOT MATERIALIZED (SELECT 3) SELECT a FROM x",
+        "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r) SELECT * FROM r",
+        "SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 EXCEPT ALL SELECT 4 ORDER BY 1 LIMIT 1",
+        "(SELECT a FROM t ORDER BY a LIMIT 1) UNION DISTINCT (SELECT b FROM u)",
+        "SELECT * FROM (WITH c AS (SELECT 1) SELECT * FROM c) s \
+         WHERE x IN (SELECT 1 UNION SELECT 2)",
     ] {
         assert_same(sql);
     }

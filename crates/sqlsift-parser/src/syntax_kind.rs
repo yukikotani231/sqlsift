@@ -55,7 +55,18 @@ pub enum SyntaxKind {
     OpaqueStmt,
     /// Tokens the parser could not place
     Error,
+    /// A query: `[WITH ...] body [ORDER BY] [LIMIT] [OFFSET]`, the body being a
+    /// `SimpleSelect`, a `SetOperation` or a `ParenSelect`.
     SelectStmt,
+    /// `SELECT ... [FROM] [WHERE] [GROUP BY] [HAVING]`
+    SimpleSelect,
+    /// `a UNION [ALL] b`, `INTERSECT`, `EXCEPT`
+    SetOperation,
+    /// A parenthesized query as an operand of a set operation
+    ParenSelect,
+    WithClause,
+    /// `name [(cols)] AS [[NOT] MATERIALIZED] (query)`
+    Cte,
     SelectClause,
     TargetList,
     TargetItem,

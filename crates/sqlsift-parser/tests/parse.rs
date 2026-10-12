@@ -47,74 +47,75 @@ fn select_tree() {
         "\
 SourceFile
   SelectStmt
-    SelectClause
-      Ident \"SELECT\"
-      TargetList
-        TargetItem
-          ColumnRef
-            Name
-              Ident \"t\"
-              Dot \".\"
-              Ident \"a\"
-          Alias
-            Ident \"AS\"
-            Ident \"x\"
-        Comma \",\"
-        TargetItem
-          FuncCall
-            Name
-              Ident \"count\"
-            ArgList
-              LParen \"(\"
-              Star
-                Operator \"*\"
-              RParen \")\"
-    FromClause
-      Ident \"FROM\"
-      JoinExpr
-        TableRef
-          Name
-            Ident \"s\"
-            Dot \".\"
-            Ident \"t\"
-          Alias
-            Ident \"t\"
-        Ident \"LEFT\"
-        Ident \"JOIN\"
-        TableRef
-          Name
-            Ident \"u\"
-        JoinCondition
-          Ident \"ON\"
-          BinaryExpr
+    SimpleSelect
+      SelectClause
+        Ident \"SELECT\"
+        TargetList
+          TargetItem
             ColumnRef
               Name
                 Ident \"t\"
                 Dot \".\"
-                Ident \"id\"
-            Operator \"=\"
+                Ident \"a\"
+            Alias
+              Ident \"AS\"
+              Ident \"x\"
+          Comma \",\"
+          TargetItem
+            FuncCall
+              Name
+                Ident \"count\"
+              ArgList
+                LParen \"(\"
+                Star
+                  Operator \"*\"
+                RParen \")\"
+      FromClause
+        Ident \"FROM\"
+        JoinExpr
+          TableRef
+            Name
+              Ident \"s\"
+              Dot \".\"
+              Ident \"t\"
+            Alias
+              Ident \"t\"
+          Ident \"LEFT\"
+          Ident \"JOIN\"
+          TableRef
+            Name
+              Ident \"u\"
+          JoinCondition
+            Ident \"ON\"
+            BinaryExpr
+              ColumnRef
+                Name
+                  Ident \"t\"
+                  Dot \".\"
+                  Ident \"id\"
+              Operator \"=\"
+              ColumnRef
+                Name
+                  Ident \"u\"
+                  Dot \".\"
+                  Ident \"id\"
+      WhereClause
+        Ident \"WHERE\"
+        BinaryExpr
+          BinaryExpr
             ColumnRef
               Name
-                Ident \"u\"
-                Dot \".\"
-                Ident \"id\"
-    WhereClause
-      Ident \"WHERE\"
-      BinaryExpr
-        BinaryExpr
-          ColumnRef
-            Name
-              Ident \"a\"
-          Operator \"+\"
-          BinaryExpr
-            Literal
-              Number \"1\"
-            Operator \"*\"
-            Literal
-              Number \"2\"
-        Operator \">\"
-        Literal
-          Number \"3\"
+                Ident \"a\"
+            Operator \"+\"
+            BinaryExpr
+              Literal
+                Number \"1\"
+              Operator \"*\"
+              Literal
+                Number \"2\"
+          Operator \">\"
+          Literal
+            Number \"3\"
 ",
     );
 }
@@ -152,9 +153,13 @@ fn recovers_inside_a_statement() {
     let sql = "SELECT a, FROM t WHERE b";
     let parse = parse(sql);
     assert_eq!(parse.errors.len(), 1, "{:?}", parse.errors);
-    let stmt = parse.statements().next().unwrap();
-    assert!(stmt.child(SyntaxKind::FromClause).is_some());
-    assert!(stmt.child(SyntaxKind::WhereClause).is_some());
+    let select = parse
+        .statements()
+        .next()
+        .and_then(|s| s.child(SyntaxKind::SimpleSelect))
+        .unwrap();
+    assert!(select.child(SyntaxKind::FromClause).is_some());
+    assert!(select.child(SyntaxKind::WhereClause).is_some());
 }
 
 /// Unbalanced closing parentheses don't stop the parser.

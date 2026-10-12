@@ -1,13 +1,129 @@
 //! `SELECT` statements.
 
 use super::{
-    at_col_id, close_paren, column_list, expr, is_reserved, is_type_func_name, name, nth_is_col_id,
+    at_col_id, at_query_start, close_paren, column_list, expr, is_reserved, is_type_func_name,
+    name, nth_is_col_id,
 };
 use crate::parser::{CompletedMarker, Parser};
 use crate::SyntaxKind;
 
-/// `SELECT ... [FROM] [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT] [OFFSET]`
+/// A query: `[WITH ...] body [ORDER BY] [LIMIT] [OFFSET]`.
 pub(crate) fn select_stmt(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    if p.at_kw("with") {
+        with_clause(p);
+    }
+    set_expr(p, 0);
+    if p.at_kw("order") {
+        order_by_clause(p);
+    }
+    // PostgreSQL takes LIMIT and OFFSET in either order.
+    for _ in 0..2 {
+        if p.at_kw("limit") {
+            let c = p.start();
+            p.bump();
+            if !p.eat_kw("all") {
+                required_expr(p);
+            }
+            c.complete(p, SyntaxKind::LimitClause);
+        } else if p.at_kw("offset") {
+            let c = p.start();
+            p.bump();
+            required_expr(p);
+            if !p.eat_kw("rows") {
+                p.eat_kw("row");
+            }
+            c.complete(p, SyntaxKind::OffsetClause);
+        }
+    }
+    m.complete(p, SyntaxKind::SelectStmt)
+}
+
+/// Set operations: `INTERSECT` binds tighter than `UNION` and `EXCEPT`, all left-associative.
+fn set_expr(p: &mut Parser<'_>, min: u8) {
+    let Some(mut lhs) = set_primary(p) else {
+        return;
+    };
+    loop {
+        let prec = if p.at_kw("union") || p.at_kw("except") {
+            1
+        } else if p.at_kw("intersect") {
+            2
+        } else {
+            break;
+        };
+        if prec <= min {
+            break;
+        }
+        let m = lhs.precede(p);
+        p.bump();
+        if !p.eat_kw("all") {
+            p.eat_kw("distinct");
+        }
+        set_expr(p, prec);
+        lhs = m.complete(p, SyntaxKind::SetOperation);
+    }
+}
+
+fn set_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    if p.at_kw("select") {
+        return Some(simple_select(p));
+    }
+    if p.at(SyntaxKind::LParen) && at_query_start(p) {
+        let m = p.start();
+        p.bump();
+        select_stmt(p);
+        close_paren(p);
+        return Some(m.complete(p, SyntaxKind::ParenSelect));
+    }
+    p.error("expected SELECT");
+    None
+}
+
+/// `WITH [RECURSIVE] cte, ...`
+fn with_clause(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump();
+    p.eat_kw("recursive");
+    loop {
+        let c = p.start();
+        if at_col_id(p) {
+            p.bump();
+        } else {
+            p.error("expected a name");
+        }
+        if p.at(SyntaxKind::LParen) {
+            column_list(p);
+        }
+        p.expect_kw("as");
+        if p.at_kw("not") && p.nth_kw(1, "materialized") {
+            p.bump();
+            p.bump();
+        } else {
+            p.eat_kw("materialized");
+        }
+        if p.at(SyntaxKind::LParen) {
+            p.bump();
+            if at_query_start(p) {
+                select_stmt(p);
+            } else {
+                // Data-modifying statements come with INSERT / UPDATE / DELETE.
+                p.error("expected a query");
+            }
+            close_paren(p);
+        } else {
+            p.error("expected (");
+        }
+        c.complete(p, SyntaxKind::Cte);
+        if !p.eat(SyntaxKind::Comma) {
+            break;
+        }
+    }
+    m.complete(p, SyntaxKind::WithClause);
+}
+
+/// `SELECT ... [FROM] [WHERE] [GROUP BY] [HAVING]`
+fn simple_select(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     select_clause(p);
     if p.at_kw("from") {
@@ -32,29 +148,7 @@ pub(crate) fn select_stmt(p: &mut Parser<'_>) -> CompletedMarker {
         required_expr(p);
         c.complete(p, SyntaxKind::HavingClause);
     }
-    if p.at_kw("order") {
-        order_by_clause(p);
-    }
-    // PostgreSQL takes LIMIT and OFFSET in either order.
-    for _ in 0..2 {
-        if p.at_kw("limit") {
-            let c = p.start();
-            p.bump();
-            if !p.eat_kw("all") {
-                required_expr(p);
-            }
-            c.complete(p, SyntaxKind::LimitClause);
-        } else if p.at_kw("offset") {
-            let c = p.start();
-            p.bump();
-            required_expr(p);
-            if !p.eat_kw("rows") {
-                p.eat_kw("row");
-            }
-            c.complete(p, SyntaxKind::OffsetClause);
-        }
-    }
-    m.complete(p, SyntaxKind::SelectStmt)
+    m.complete(p, SyntaxKind::SimpleSelect)
 }
 
 fn required_expr(p: &mut Parser<'_>) {
@@ -247,8 +341,8 @@ fn from_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(SyntaxKind::LParen) {
         let m = p.start();
         p.bump();
-        let kind = if p.at_kw("select") {
-            super::select_stmt(p);
+        let kind = if at_query_start(p) {
+            select_stmt(p);
             SyntaxKind::SubqueryRef
         } else {
             from_item(p);
