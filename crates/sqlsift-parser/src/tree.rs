@@ -1,7 +1,7 @@
 //! The concrete syntax tree: every token of the input, trivia included, under nodes.
 //!
 //! This is a plain owned tree to start with. The parser only emits events
-//! ([`crate::parser::Event`]), so the representation can change (an arena per statement,
+//! (start node, token, finish node), so the representation can change (an arena per statement,
 //! see #257) without touching the grammar.
 
 use crate::SyntaxKind;
