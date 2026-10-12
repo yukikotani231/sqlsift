@@ -26,6 +26,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 glob.workspace = true
 mimalloc.workspace = true
+# Experimental (#257): `--features inhouse-parser`, then `SQLSIFT_PARSER=inhouse` runs
+# the analyzer on the in-house PostgreSQL parser. Not in releases.
+sqlsift-parser = { path = "../sqlsift-parser", optional = true }
+
+[features]
+inhouse-parser = ["dep:sqlsift-parser"]
 
 [lints]
 workspace = true

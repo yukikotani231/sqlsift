@@ -227,6 +227,14 @@ impl SchemaBuilder {
         // A `SET search_path` applies to the rest of its file only
         let search_path = self.catalog.search_path.clone();
 
+        if let Some(parser) = crate::parser_hook::statement_parser()
+            .filter(|_| self.dialect == SqlDialect::PostgreSQL)
+        {
+            self.parse_statements_with(parser, sql);
+            self.catalog.search_path = search_path;
+            return;
+        }
+
         // Try parsing the entire SQL first (fast path)
         match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
@@ -249,43 +257,71 @@ impl SchemaBuilder {
     ///
     /// Skipped statements that define tables, views or types produce a warning.
     fn parse_statements_individually(&mut self, sql: &str) {
-        let dialect = self.dialect.parser_dialect();
-
         for raw_stmt in split_sql_statements(sql, self.dialect) {
             if raw_stmt.trim().is_empty() {
                 continue;
             }
+            self.parse_one(sql, raw_stmt);
+        }
+    }
 
-            // Parse the untrimmed text so parser locations are relative to `raw_stmt`
-            let parsed = Parser::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
-                // BigQuery: retry with nested type parameter lists closed by `> >`
-                // (sqlparser rejects some `>>`); only locations past them shift
-                match self.dialect {
-                    SqlDialect::BigQuery => {
-                        crate::analyzer::bigquery::split_closing_angle_brackets(raw_stmt)
-                            .and_then(|split| Parser::parse_sql(dialect.as_ref(), &split).ok())
-                            .ok_or(err)
-                    }
-                    _ => Err(err),
+    /// Parses and applies one statement, `raw_stmt` (a subslice of `sql`), with
+    /// sqlparser.
+    fn parse_one(&mut self, sql: &str, raw_stmt: &str) {
+        let dialect = self.dialect.parser_dialect();
+        // Parse the untrimmed text so parser locations are relative to `raw_stmt`
+        let parsed = Parser::parse_sql(dialect.as_ref(), raw_stmt).or_else(|err| {
+            // BigQuery: retry with nested type parameter lists closed by `> >`
+            // (sqlparser rejects some `>>`); only locations past them shift
+            match self.dialect {
+                SqlDialect::BigQuery => {
+                    crate::analyzer::bigquery::split_closing_angle_brackets(raw_stmt)
+                        .and_then(|split| Parser::parse_sql(dialect.as_ref(), &split).ok())
+                        .ok_or(err)
                 }
-            });
-            match parsed {
-                Ok(stmts) => {
-                    // `raw_stmt` is a subslice of `sql`
-                    let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
-                    let (line, column) = line_column_at(sql, offset);
-                    self.line_offset = line - 1;
-                    self.column_offset = column;
-                    for stmt in stmts {
-                        self.process_statement(&stmt);
-                    }
-                    self.line_offset = 0;
-                    self.column_offset = 1;
+                _ => Err(err),
+            }
+        });
+        match parsed {
+            Ok(stmts) => {
+                // `raw_stmt` is a subslice of `sql`
+                let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
+                let (line, column) = line_column_at(sql, offset);
+                self.line_offset = line - 1;
+                self.column_offset = column;
+                for stmt in stmts {
+                    self.process_statement(&stmt);
                 }
-                Err(err) => {
-                    // `raw_stmt` is a subslice of `sql`
-                    let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
-                    self.process_unparsed_statement(sql, offset, raw_stmt, &err);
+                self.line_offset = 0;
+                self.column_offset = 1;
+            }
+            Err(err) => {
+                // `raw_stmt` is a subslice of `sql`
+                let offset = raw_stmt.as_ptr() as usize - sql.as_ptr() as usize;
+                self.process_unparsed_statement(sql, offset, raw_stmt, &err);
+            }
+        }
+    }
+
+    /// Parses `sql` with the parser of [`crate::parser_hook`], sqlparser for the
+    /// statements it leaves to it.
+    fn parse_statements_with(&mut self, parser: crate::parser_hook::StatementParser, sql: &str) {
+        use crate::parser_hook::Parsed;
+        for item in parser(sql) {
+            let raw_stmt = &sql[item.range.clone()];
+            match item.parsed {
+                // Locations are relative to `sql`
+                Parsed::Statement(statement) => self.process_statement(&statement),
+                Parsed::Fallback => self.parse_one(sql, raw_stmt),
+                Parsed::SyntaxError { message, offset } => {
+                    let (line, column) = crate::parser_hook::line_column(
+                        raw_stmt,
+                        offset.saturating_sub(item.range.start).min(raw_stmt.len()),
+                    );
+                    let error = sqlparser::parser::ParserError::ParserError(format!(
+                        "{message} at Line: {line}, Column: {column}"
+                    ));
+                    self.process_unparsed_statement(sql, item.range.start, raw_stmt, &error);
                 }
             }
         }

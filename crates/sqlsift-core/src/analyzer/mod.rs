@@ -826,6 +826,11 @@ impl<'a> Analyzer<'a> {
     /// change its columns (`UNLOGGED`, `WITH NO DATA`, ...); if it still doesn't
     /// parse, the table or view it defines is returned with its position.
     fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> ParsedStatements {
+        if self.dialect == SqlDialect::PostgreSQL {
+            if let Some(parser) = crate::parser_hook::statement_parser() {
+                return self.parse_statements_with(parser, sql, lines);
+            }
+        }
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
@@ -852,66 +857,118 @@ impl<'a> Analyzer<'a> {
         let mut statements = Vec::new();
         let mut skipped = Vec::new();
         for range in ranges {
-            let (line, column) = lines.line_column(range.start);
-            let origin = Origin { line, column };
-            let text = &sql[range.clone()];
-            let error = match Parser::parse_sql(dialect.as_ref(), text) {
-                Ok(parsed) => {
-                    statements.extend(parsed.into_iter().map(|s| (s, origin)));
-                    continue;
-                }
-                Err(error) => error,
-            };
-            let retried = mask_unsupported_clauses(self.dialect, text, false)
-                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                .or_else(|| match self.dialect {
-                    // `t.$1` positional columns
-                    SqlDialect::Snowflake => {
-                        snowflake::mask_positional_columns(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                    }
-                    // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
-                    dialect_kind if dialect_kind.is_psql() => {
-                        mask_row_lock_strength(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                    }
-                    _ => None,
-                });
-            if let Some(parsed) = retried {
+            self.parse_range(sql, range, lines, &mut statements, &mut skipped, true);
+        }
+        (statements, skipped)
+    }
+
+    /// Parses one statement's text (`sql[range]`) on its own with sqlparser, retrying
+    /// without clauses it doesn't parse; see [`Self::parse_statements`]. A syntax error
+    /// is reported if `report_error`.
+    fn parse_range(
+        &mut self,
+        sql: &str,
+        range: Range<usize>,
+        lines: &LineIndex,
+        statements: &mut Vec<(Statement, Origin)>,
+        skipped: &mut Vec<(Origin, SkippedDefinition)>,
+        report_error: bool,
+    ) {
+        let dialect = self.dialect.parser_dialect();
+        let (line, column) = lines.line_column(range.start);
+        let origin = Origin { line, column };
+        let text = &sql[range.clone()];
+        let error = match Parser::parse_sql(dialect.as_ref(), text) {
+            Ok(parsed) => {
                 statements.extend(parsed.into_iter().map(|s| (s, origin)));
-                continue;
+                return;
             }
-            // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
-            // statistics or procedural blocks only, nothing to check
-            if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
-                continue;
-            }
-            // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
-            // functions and types only, no relation to check
-            if self.dialect.is_psql()
-                && starts_with_words(dialect.as_ref(), text, &["CREATE", "EXTENSION"])
-            {
-                continue;
-            }
-            // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
-            if self.dialect == SqlDialect::Snowflake
-                && snowflake::is_unanalyzed_statement(dialect.as_ref(), text)
-            {
-                continue;
-            }
-            if let Some((kind, name)) = unparsed_definition(self.dialect, text) {
-                let start = range.start + (text.len() - text.trim_start().len());
-                skipped.push((
-                    origin,
-                    SkippedDefinition {
-                        kind,
-                        name: Some(name),
-                        line: Some(lines.line_column(start).0),
-                    },
-                ));
-            }
+            Err(error) => error,
+        };
+        let retried = mask_unsupported_clauses(self.dialect, text, false)
+            .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+            .or_else(|| match self.dialect {
+                // `t.$1` positional columns
+                SqlDialect::Snowflake => snowflake::mask_positional_columns(dialect.as_ref(), text)
+                    .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok()),
+                // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
+                dialect_kind if dialect_kind.is_psql() => {
+                    mask_row_lock_strength(dialect.as_ref(), text)
+                        .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                }
+                _ => None,
+            });
+        if let Some(parsed) = retried {
+            statements.extend(parsed.into_iter().map(|s| (s, origin)));
+            return;
+        }
+        // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
+        // statistics or procedural blocks only, nothing to check
+        if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
+            return;
+        }
+        // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
+        // functions and types only, no relation to check
+        if self.dialect.is_psql()
+            && starts_with_words(dialect.as_ref(), text, &["CREATE", "EXTENSION"])
+        {
+            return;
+        }
+        // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
+        if self.dialect == SqlDialect::Snowflake
+            && snowflake::is_unanalyzed_statement(dialect.as_ref(), text)
+        {
+            return;
+        }
+        if let Some((kind, name)) = unparsed_definition(self.dialect, text) {
+            let start = range.start + (text.len() - text.trim_start().len());
+            skipped.push((
+                origin,
+                SkippedDefinition {
+                    kind,
+                    name: Some(name),
+                    line: Some(lines.line_column(start).0),
+                },
+            ));
+        }
+        if report_error {
             self.diagnostics
                 .push(parse_error_diagnostic(&error, sql, range, lines));
+        }
+    }
+
+    /// [`Self::parse_statements`] with the parser of [`crate::parser_hook`]: its
+    /// statements as they are, sqlparser for the ones it leaves to it.
+    fn parse_statements_with(
+        &mut self,
+        parser: crate::parser_hook::StatementParser,
+        sql: &str,
+        lines: &LineIndex,
+    ) -> ParsedStatements {
+        use crate::parser_hook::Parsed;
+        let mut statements = Vec::new();
+        let mut skipped = Vec::new();
+        for item in parser(sql) {
+            match item.parsed {
+                Parsed::Statement(statement) => statements.push((*statement, Origin::START)),
+                Parsed::Fallback => {
+                    // Valid PostgreSQL: a statement sqlparser can't parse isn't an error
+                    self.parse_range(sql, item.range, lines, &mut statements, &mut skipped, false);
+                }
+                Parsed::SyntaxError { message, offset } => {
+                    // Located the way sqlparser locates its errors: in the statement's text
+                    let text = &sql[item.range.start..];
+                    let (line, column) = crate::parser_hook::line_column(
+                        text,
+                        offset.saturating_sub(item.range.start).min(text.len()),
+                    );
+                    let error = ParserError::ParserError(format!(
+                        "{message} at Line: {line}, Column: {column}"
+                    ));
+                    self.diagnostics
+                        .push(parse_error_diagnostic(&error, sql, item.range, lines));
+                }
+            }
         }
         (statements, skipped)
     }

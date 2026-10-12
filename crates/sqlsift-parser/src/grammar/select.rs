@@ -1,5 +1,6 @@
 //! `SELECT` statements.
 
+use super::types::type_name;
 use super::{
     at_col_id, at_query_start, close_paren, column_list, expr, is_reserved, is_type_func_name,
     name, nth_is_col_id,
@@ -482,9 +483,35 @@ pub(crate) fn table_alias(p: &mut Parser<'_>) {
         p.bump();
     }
     if p.at(SyntaxKind::LParen) {
-        column_list(p);
+        if nth_is_col_id(p, 1) && !matches!(p.nth(2), SyntaxKind::Comma | SyntaxKind::RParen) {
+            column_def_list(p);
+        } else {
+            column_list(p);
+        }
     }
     m.complete(p, SyntaxKind::Alias);
+}
+
+/// `(name type, ...)`: the column definitions of a function returning `record`
+/// (`jsonb_to_recordset(x) AS t(a int, b text)`), as `ColumnDef`s in `TableElements`.
+fn column_def_list(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump();
+    loop {
+        let c = p.start();
+        if at_col_id(p) || p.at(SyntaxKind::Ident) {
+            p.bump();
+            type_name(p);
+        } else {
+            p.error("expected a column definition");
+        }
+        c.complete(p, SyntaxKind::ColumnDef);
+        if !p.eat(SyntaxKind::Comma) {
+            break;
+        }
+    }
+    close_paren(p);
+    m.complete(p, SyntaxKind::TableElements);
 }
 
 pub(crate) fn order_by_clause(p: &mut Parser<'_>) {

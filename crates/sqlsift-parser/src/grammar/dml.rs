@@ -1,7 +1,7 @@
 //! `INSERT`, `UPDATE` and `DELETE`.
 
 use super::select::{from_item, required_expr, select_stmt, table_alias, target_list};
-use super::{at_col_id, at_query_start, close_paren, column_list, name};
+use super::{at_col_id, at_index_elem_start, at_query_start, close_paren, column_list, name};
 use crate::parser::{CompletedMarker, Parser};
 use crate::SyntaxKind;
 
@@ -93,6 +93,9 @@ fn on_conflict(p: &mut Parser<'_>) {
             // Index expressions: columns, or expressions in parentheses.
             p.bump();
             loop {
+                if !at_index_elem_start(p) {
+                    p.error("expected a column, a function call or an expression in parentheses");
+                }
                 required_expr(p);
                 if !p.eat(SyntaxKind::Comma) {
                     break;

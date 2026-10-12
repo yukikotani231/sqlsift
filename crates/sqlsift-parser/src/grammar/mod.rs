@@ -264,6 +264,15 @@ fn name(p: &mut Parser<'_>, star: bool) {
     m.complete(p, SyntaxKind::Name);
 }
 
+/// Whether an index element (`index_elem` in `gram.y`) can start here: a column, a
+/// function call or a parenthesized expression, not a bare literal or parameter.
+fn at_index_elem_start(p: &mut Parser<'_>) -> bool {
+    matches!(
+        p.current(),
+        SyntaxKind::Ident | SyntaxKind::QuotedIdent | SyntaxKind::LParen
+    )
+}
+
 /// `(a, b, c)`
 fn column_list(p: &mut Parser<'_>) {
     let m = p.start();

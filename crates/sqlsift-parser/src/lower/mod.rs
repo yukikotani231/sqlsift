@@ -792,16 +792,30 @@ impl Lowering<'_> {
 
     fn table_alias(&self, alias: &SyntaxNode) -> Result<TableAlias> {
         let explicit = alias.tokens().count() > 1;
-        let columns = match alias.child(SyntaxKind::ColumnList) {
-            Some(list) => self
-                .column_list(list)?
+        let columns = if let Some(list) = alias.child(SyntaxKind::ColumnList) {
+            self.column_list(list)?
                 .into_iter()
                 .map(|name| TableAliasColumnDef {
                     name,
                     data_type: None,
                 })
-                .collect(),
-            None => vec![],
+                .collect()
+        } else if let Some(defs) = alias.child(SyntaxKind::TableElements) {
+            defs.nodes()
+                .map(|def| {
+                    let (Some(name), Some(data_type)) =
+                        (def.tokens().next(), def.child(SyntaxKind::TypeName))
+                    else {
+                        return unsupported("column definition");
+                    };
+                    Ok(TableAliasColumnDef {
+                        name: self.ident(name)?,
+                        data_type: Some(self.data_type(data_type)?),
+                    })
+                })
+                .collect::<Result<_>>()?
+        } else {
+            vec![]
         };
         Ok(TableAlias {
             explicit,

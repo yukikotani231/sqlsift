@@ -18,6 +18,7 @@ pub mod ignore;
 pub mod impact;
 mod mysql;
 mod named_queries;
+pub mod parser_hook;
 mod psql;
 pub mod python;
 pub mod rules;

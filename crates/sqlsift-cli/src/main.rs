@@ -39,6 +39,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(args.verbose, args.quiet);
+    #[cfg(feature = "inhouse-parser")]
+    inhouse_parser::install();
 
     match run(args) {
         Ok(has_errors) => {
@@ -1535,5 +1537,36 @@ fn run(args: Args) -> Result<bool> {
 
             Ok(false)
         }
+    }
+}
+
+/// Experimental (#257): PostgreSQL text read by the in-house parser when
+/// `SQLSIFT_PARSER=inhouse`, statements it can't lower by sqlparser as before.
+#[cfg(feature = "inhouse-parser")]
+mod inhouse_parser {
+    use sqlsift_core::parser_hook::{set_statement_parser, Parsed, ParsedStatement};
+    use sqlsift_parser::analysis::{statements, Outcome};
+
+    pub fn install() {
+        if std::env::var("SQLSIFT_PARSER").is_ok_and(|v| v == "inhouse") {
+            set_statement_parser(parse);
+        }
+    }
+
+    fn parse(source: &str) -> Vec<ParsedStatement> {
+        statements(source)
+            .into_iter()
+            .map(|s| ParsedStatement {
+                range: s.range.to_range(),
+                parsed: match s.outcome {
+                    Outcome::Lowered(statement) => Parsed::Statement(statement),
+                    Outcome::Unsupported(_) => Parsed::Fallback,
+                    Outcome::SyntaxError(e) => Parsed::SyntaxError {
+                        message: e.message,
+                        offset: e.range.start as usize,
+                    },
+                },
+            })
+            .collect()
     }
 }

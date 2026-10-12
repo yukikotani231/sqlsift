@@ -8,6 +8,7 @@
 //! analyzer can run on this parser's output unchanged, and the differential test compares
 //! the two parsers on the same input. See issue #257.
 
+pub mod analysis;
 pub mod diff;
 mod grammar;
 pub mod lexer;

@@ -3,7 +3,10 @@
 use super::expr::b_expr;
 use super::select::{required_expr, select_stmt};
 use super::types::type_name;
-use super::{at_col_id, at_query_start, close_paren, column_list, name, skip_balanced_until};
+use super::{
+    at_col_id, at_index_elem_start, at_query_start, close_paren, column_list, name,
+    skip_balanced_until,
+};
 use crate::parser::{CompletedMarker, Parser};
 use crate::SyntaxKind;
 
@@ -255,6 +258,9 @@ fn create_index(p: &mut Parser<'_>) -> CompletedMarker {
 /// `expr [COLLATE c] [opclass] [ASC | DESC] [NULLS FIRST | LAST]`
 fn index_elem(p: &mut Parser<'_>) {
     let m = p.start();
+    if !at_index_elem_start(p) {
+        p.error("expected a column, a function call or an expression in parentheses");
+    }
     if b_expr(p).is_none() {
         p.error("expected a column or an expression");
     }

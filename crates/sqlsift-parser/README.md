@@ -26,13 +26,34 @@ cargo run -p sqlsift-parser --bin sqlsift-parser-diff -- [-v] [-e] <files or dir
 It prints a count per outcome (`same`, `spans differ`, `different`, `unsupported`,
 `only ours`, `neither`), the unsupported reasons, and every statement whose AST differs.
 
+## Running sqlsift on it
+
+`analysis::statements` splits a file into statements and lowers each one. The CLI built
+with the `inhouse-parser` feature reads PostgreSQL files (queries and schema) with it when
+`SQLSIFT_PARSER=inhouse` is set (`sqlsift_core::parser_hook`): lowered statements are
+analyzed as they are, the others are parsed by sqlparser as before, and a statement this
+parser reads but sqlparser can't is skipped without a parse error.
+
+```bash
+cargo build --release -p sqlsift-cli --features inhouse-parser
+python3 tests/corpus/run.py <projects>                          # sqlparser
+SQLSIFT_PARSER=inhouse python3 tests/corpus/run.py <projects>   # this parser
+```
+
+Comparing the two `out/results/` is the go / no-go check of #257: no new false positive,
+and at least the same detections.
+
 ## Status
 
-Covered: `SELECT` with target lists, `DISTINCT [ON]`, `FROM` (tables, aliases with column
-lists, subqueries, parenthesized joins, every join type), `WHERE`, `GROUP BY`, `HAVING`,
-`ORDER BY`, `LIMIT`, `OFFSET`, and expressions (operators with PostgreSQL precedence,
-`IS`, `IN`, `BETWEEN`, `LIKE` / `ILIKE` / `SIMILAR TO`, `CASE`, `CAST`, `::`, `EXISTS`,
-scalar subqueries, row constructors, function calls, parameters, all literal kinds).
+Statements: `SELECT` (`WITH [RECURSIVE]`, set operations, `VALUES`, joins, subqueries,
+`LATERAL`, table functions, `WINDOW`, locking clauses), `INSERT` / `UPDATE` / `DELETE`
+(`ON CONFLICT`, `RETURNING`), `CREATE TABLE`, `CREATE [MATERIALIZED] VIEW`, `CREATE TYPE`,
+`CREATE INDEX`, `ALTER TABLE`, `DROP`. Expressions: operators with PostgreSQL precedence,
+`IS`, `IN`, `BETWEEN`, `LIKE` / `ILIKE` / `SIMILAR TO`, `ANY` / `ALL`, `CASE`, `CAST`,
+`::`, `EXISTS`, `ARRAY`, subscripts and field selection, window functions with `FILTER` /
+`WITHIN GROUP`, `EXTRACT`, `substring(... FROM ...)` and the other SQL-standard forms,
+typed literals, `COLLATE`, `AT TIME ZONE`, all literal kinds. Everything else is an
+`OpaqueStmt`.
 
-Next: `WITH`, set operations, window functions and `FILTER`, table functions and
-`LATERAL`, `ANY` / `ALL`, then `INSERT` / `UPDATE` / `DELETE`.
+Next: the analyzer reading the tree directly, one check at a time, then an arena per
+statement.

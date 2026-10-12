@@ -482,11 +482,16 @@ fn paren(p: &mut Parser<'_>) -> CompletedMarker {
 /// A column reference (`a`, `t.a`, `t.*`) or a function call (`f(x)`, `s.f(x)`).
 fn name_or_call(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    let first = p.nth_text(0).to_ascii_lowercase();
+    let single = p.nth(1) != SyntaxKind::Dot;
     name(p, true);
     if !p.at(SyntaxKind::LParen) {
         return m.complete(p, SyntaxKind::ColumnRef);
     }
-    arg_list(p);
+    match first.as_str() {
+        "substring" | "overlay" | "position" | "trim" if single => special_args(p, &first),
+        _ => arg_list(p),
+    }
     if p.at_kw("within") && p.nth_kw(1, "group") {
         let c = p.start();
         p.bump();
@@ -525,6 +530,44 @@ fn name_or_call(p: &mut Parser<'_>) -> CompletedMarker {
         c.complete(p, SyntaxKind::OverClause);
     }
     m.complete(p, SyntaxKind::FuncCall)
+}
+
+/// The arguments of the SQL-standard forms `substring(a FROM b FOR c)`,
+/// `overlay(a PLACING b FROM c FOR d)`, `position(a IN b)` and
+/// `trim([BOTH | LEADING | TRAILING] [x] FROM y)`, or plain arguments. Keywords are kept
+/// as tokens between the argument expressions.
+fn special_args(p: &mut Parser<'_>, function: &str) {
+    let args = p.start();
+    p.bump(); // (
+    if function == "trim" && p.at_any_kw(&["both", "leading", "trailing"]) {
+        p.bump();
+    }
+    if p.at(SyntaxKind::RParen) {
+        close_paren(p);
+        args.complete(p, SyntaxKind::ArgList);
+        return;
+    }
+    if !p.at_kw("from") {
+        // `position(a IN b)`: the first operand stops before IN (`b_expr` in gram.y).
+        let prec = if function == "position" { LIKE } else { 0 };
+        if expr_bp(p, prec).is_none() {
+            p.error("expected an expression");
+        }
+    }
+    loop {
+        if p.eat(SyntaxKind::Comma)
+            || p.eat_kw("from")
+            || p.eat_kw("for")
+            || (function == "overlay" && p.eat_kw("placing"))
+            || (function == "position" && p.eat_kw("in"))
+        {
+            operand(p, 0);
+        } else {
+            break;
+        }
+    }
+    close_paren(p);
+    args.complete(p, SyntaxKind::ArgList);
 }
 
 /// `(args [ORDER BY ...])`, `(*)`, `(DISTINCT args)`
