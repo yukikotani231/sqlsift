@@ -8,7 +8,7 @@
 
 **Schema-aware static analysis for SQL. No database needed.**
 
-Think of it as a type checker for your SQL: sqlsift replays your migrations into an in-memory schema and checks every query against it — in `.sql` files, sqlc and aiosql query files, and `` sql`...` `` templates in TypeScript / JavaScript. It runs offline in milliseconds, so it fits in your editor, pre-commit hooks and CI.
+Think of it as a type checker for your SQL: sqlsift replays your migrations into an in-memory schema and checks every query against it — in `.sql` files, sqlc and aiosql query files, `` sql`...` `` templates in TypeScript / JavaScript, sqlx queries in Rust, and SQL strings passed to database calls in Python and Go. It runs offline in milliseconds, so it fits in your editor, pre-commit hooks and CI.
 
 **▶ [Try it in your browser](https://sqlsift.dev/)** — no install; the playground runs sqlsift locally via WebAssembly, so your SQL never leaves the page. **📖 [Read the user guide](https://sqlsift.dev/docs/)** for everything else.
 
@@ -96,7 +96,7 @@ In an existing project, start with:
 sqlsift init
 ```
 
-It finds your schema (sqlc config, Prisma / Supabase / Drizzle / Flyway / golang-migrate / goose / dbmate migrations, `structure.sql` or `schema.sql` dumps, dbt), your queries (`.sql` files, Prisma TypedSQL, dbt models, `` sql`...` `` templates in TypeScript / JavaScript) and the dialect, writes a commented `sqlsift.toml`, runs a first check and prints the next steps. It never overwrites an existing `sqlsift.toml` without `--force`; `--dry-run` only prints the configuration. See [`sqlsift init`](https://sqlsift.dev/docs/reference/cli.html#sqlsift-init).
+It finds your schema (sqlc config, Prisma / Supabase / Drizzle / Flyway / golang-migrate / goose / dbmate migrations, `structure.sql` or `schema.sql` dumps, dbt), your queries (`.sql` files, Prisma TypedSQL, dbt models, `` sql`...` `` templates in TypeScript / JavaScript, sqlx queries in Rust, database calls in Python and Go) and the dialect, writes a commented `sqlsift.toml`, runs a first check and prints the next steps. It never overwrites an existing `sqlsift.toml` without `--force`; `--dry-run` only prints the configuration. See [`sqlsift init`](https://sqlsift.dev/docs/reference/cli.html#sqlsift-init).
 
 Or pass everything on the command line:
 
@@ -121,6 +121,11 @@ git show :queries/users.sql | sqlsift check -s schema.sql --stdin-filename queri
 # (sql`...`; node_modules and dist are skipped; more tags with
 # `embedded_sql_tags` in sqlsift.toml)
 sqlsift check -s schema.sql 'src/**/*.ts'
+
+# SQL strings passed to database/sql, sqlx and pgx calls in Go
+# (db.QueryContext(ctx, "..."); vendor is skipped; more calls with
+# `embedded_sql_go_functions` in sqlsift.toml)
+sqlsift check -s schema.sql 'internal/**/*.go'
 ```
 
 To avoid repeating flags, add a `sqlsift.toml` to your project root:
@@ -152,7 +157,7 @@ sqlsift only needs SQL files for the schema, so it works with whatever produces 
 
 Rollback migrations are skipped automatically; see [Loading your schema](https://sqlsift.dev/docs/guide/schema.html).
 
-**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [Prisma TypedSQL](examples/prisma-typedsql), [aiosql (Python)](examples/aiosql), [postgres.js](examples/postgres-js), [sqlx (Rust)](examples/sqlx), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
+**Example projects**, each with a ready-to-copy `sqlsift.toml` and checked in CI: [sqlc (Go)](examples/sqlc-go), [database/sql, sqlx and pgx (Go)](examples/go-database-sql), [Prisma TypedSQL](examples/prisma-typedsql), [aiosql (Python)](examples/aiosql), [postgres.js](examples/postgres-js), [sqlx (Rust)](examples/sqlx), [plain SQL + migrations](examples/postgres-migrations) (a migration renames a column that a query still uses), [MySQL](examples/mysql) and [dbt on PostgreSQL](examples/dbt-postgres). See [`examples/`](examples).
 
 ## Editor Integration
 
@@ -221,7 +226,7 @@ Every rule can be set to `off`, `warn` or `error` per project (`[rules]` in `sql
 
 The [user guide](https://sqlsift.dev/docs/) covers:
 
-- [Loading your schema](https://sqlsift.dev/docs/guide/schema.html) and [checking queries](https://sqlsift.dev/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc, aiosql and HugSQL query files with named parameters, and SQL in TypeScript tagged templates)
+- [Loading your schema](https://sqlsift.dev/docs/guide/schema.html) and [checking queries](https://sqlsift.dev/docs/guide/queries.html) (stdin, ignore patterns, DDL and psql scripts in query files, dbt / Jinja templates, sqlc, aiosql and HugSQL query files with named parameters, SQL in TypeScript tagged templates, and SQL in Rust, Python and Go code)
 - [Dialects and SQL support](https://sqlsift.dev/docs/guide/sql-support.html), including what type checking covers
 - [Command line](https://sqlsift.dev/docs/reference/cli.html), [configuration file](https://sqlsift.dev/docs/reference/config.html) and [output formats](https://sqlsift.dev/docs/reference/output-formats.html) reference
 - [Troubleshooting](https://sqlsift.dev/docs/guide/troubleshooting.html)
@@ -239,7 +244,7 @@ The [user guide](https://sqlsift.dev/docs/) covers:
 
 - [x] Per-rule and per-category levels (`off` / `warn` / `error`)
 - [x] Baseline of known diagnostics (`--write-baseline`, `baseline` in `sqlsift.toml`)
-- [x] SQL embedded in application code (sqlc, aiosql and HugSQL query names and parameters, TypeScript tagged templates)
+- [x] SQL embedded in application code (sqlc, aiosql and HugSQL query names and parameters, TypeScript tagged templates, sqlx in Rust, database calls in Python and Go)
 - [x] `sqlsift init`, example projects per stack, and a GitHub Action that reports only what a pull request introduces
 - [x] 28 rules, including `suspicious` warnings and opt-in `restriction` rules
 - [x] Snowflake, BigQuery, Redshift and Databricks dialects and dbt `catalog.json` (alpha)
