@@ -1,14 +1,16 @@
-//! Lowering of schema statements (`CREATE TABLE`, ...).
+//! Lowering of schema statements (`CREATE TABLE / VIEW / TYPE / INDEX`, `ALTER TABLE`,
+//! `DROP`).
 
 use sqlparser::ast::helpers::stmt_create_table::CreateTableBuilder;
 use sqlparser::ast::{
-    CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, ConstraintCharacteristics,
-    ConstraintReferenceMatchKind, CreateIndex, CreateTableOptions, CreateView, DeferrableInitial,
-    Expr, ForeignKeyConstraint, GeneratedAs, GeneratedExpressionMode, Ident, IndexColumn,
-    IndexType, KeyOrIndexDisplay, NullsDistinctOption, ObjectType, OnCommit, OrderByExpr,
-    OrderByOptions, PrimaryKeyConstraint, ReferentialAction, Statement, TableConstraint,
-    UniqueConstraint, UserDefinedTypeCompositeAttributeDef, UserDefinedTypeRepresentation,
-    ViewColumnDef, WithData,
+    AlterColumnOperation, AlterTable, AlterTableOperation, CheckConstraint, ColumnDef,
+    ColumnOption, ColumnOptionDef, ConstraintCharacteristics, ConstraintReferenceMatchKind,
+    CreateIndex, CreateTableOptions, CreateView, DeferrableInitial, DropBehavior, Expr,
+    ForeignKeyConstraint, GeneratedAs, GeneratedExpressionMode, Ident, IndexColumn, IndexType,
+    KeyOrIndexDisplay, NullsDistinctOption, ObjectType, OnCommit, OrderByExpr, OrderByOptions,
+    Owner, PrimaryKeyConstraint, ReferentialAction, RenameTableNameKind, Statement,
+    TableConstraint, UniqueConstraint, UserDefinedTypeCompositeAttributeDef,
+    UserDefinedTypeRepresentation, ViewColumnDef, WithData,
 };
 
 use super::{object_name, unquote, unsupported, Lowering, Result};
@@ -59,7 +61,7 @@ impl Lowering<'_> {
             for element in elements.nodes() {
                 match element.kind {
                     SyntaxKind::ColumnDef => columns.push(self.column_def(element)?),
-                    SyntaxKind::TableConstraint => {
+                    SyntaxKind::TableConstraint if !self.not_valid(element) => {
                         constraints.push(self.table_constraint(element)?);
                     }
                     kind => return unsupported(format!("{kind:?}")),
@@ -169,6 +171,9 @@ impl Lowering<'_> {
     }
 
     fn column_option(&self, node: &SyntaxNode) -> Result<ColumnOptionDef> {
+        if self.not_valid(node) {
+            return unsupported("NOT VALID");
+        }
         let (name, kws) = self.constraint_head(node)?;
         let characteristics = self.characteristics(node)?;
         let kws: Vec<&str> = kws.iter().map(String::as_str).collect();
@@ -263,13 +268,26 @@ impl Lowering<'_> {
 
     /// `DEFERRABLE`, `INITIALLY ...` after a unique, primary or foreign key, each at most
     /// once (as sqlparser takes them).
+    /// Whether the last attribute of a constraint is `NOT VALID` (`ALTER TABLE ... ADD
+    /// CONSTRAINT` only). [`Self::characteristics`] leaves it out.
+    fn not_valid(&self, node: &SyntaxNode) -> bool {
+        node.nodes()
+            .filter(|n| n.kind == SyntaxKind::ConstraintAttribute)
+            .last()
+            .is_some_and(|a| self.keywords(a) == ["not", "valid"])
+    }
+
     fn characteristics(&self, node: &SyntaxNode) -> Result<Option<ConstraintCharacteristics>> {
         let mut cc = ConstraintCharacteristics::default();
         let mut any = false;
-        for attribute in node
+        let mut attributes: Vec<_> = node
             .nodes()
             .filter(|n| n.kind == SyntaxKind::ConstraintAttribute)
-        {
+            .collect();
+        if self.not_valid(node) {
+            attributes.pop();
+        }
+        for attribute in attributes {
             any = true;
             let kws = self.keywords(attribute);
             match kws.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -662,6 +680,224 @@ impl Lowering<'_> {
             purge: false,
             temporary: false,
             table: None,
+        })
+    }
+
+    /// The single-token names (`Name` nodes) directly in a node, as identifiers.
+    fn simple_names(&self, node: &SyntaxNode) -> Result<Vec<Ident>> {
+        node.nodes()
+            .filter(|n| n.kind == SyntaxKind::Name)
+            .map(|n| match n.tokens().next() {
+                Some(t) => self.ident(t),
+                None => unsupported("name"),
+            })
+            .collect()
+    }
+
+    pub(super) fn alter_table(&self, node: &SyntaxNode) -> Result<Statement> {
+        let kws = self.keywords(node);
+        if node.tokens().any(|t| t.kind == SyntaxKind::Operator) {
+            return unsupported("ALTER TABLE name *");
+        }
+        let Some(name) = node.child(SyntaxKind::Name) else {
+            return unsupported("table name");
+        };
+        let operations = node
+            .nodes()
+            .filter(|n| n.kind == SyntaxKind::AlterTableAction)
+            .map(|a| self.alter_table_action(a))
+            .collect::<Result<_>>()?;
+        // sqlparser keeps the `;` after the statement, or else its last token.
+        let end = node.range.end as usize;
+        let rest = self.source[end..].trim_start_matches([' ', '\t', '\r', '\n']);
+        let end_token = if rest.starts_with(';') {
+            let at = (self.source.len() - rest.len()) as u32;
+            sqlparser::tokenizer::TokenWithSpan::new(
+                sqlparser::tokenizer::Token::SemiColon,
+                self.span(crate::TextRange::new(at, at + 1)),
+            )
+        } else {
+            let Some(last) = super::all_tokens(node).last().copied() else {
+                return unsupported("ALTER TABLE");
+            };
+            match self.sqlparser_tokens(last.range)?.pop() {
+                Some(token) => token,
+                None => return unsupported("last token"),
+            }
+        };
+        Ok(Statement::AlterTable(AlterTable {
+            name: object_name(self.name_parts(name)?),
+            if_exists: kws.get(2).is_some_and(|k| k == "if"),
+            only: kws.iter().any(|k| k == "only"),
+            operations,
+            location: None,
+            on_cluster: None,
+            table_type: None,
+            end_token: sqlparser::ast::helpers::attached_token::AttachedToken(end_token),
+        }))
+    }
+
+    fn alter_table_action(&self, node: &SyntaxNode) -> Result<AlterTableOperation> {
+        let kws = self.keywords(node);
+        let kws: Vec<&str> = kws.iter().map(String::as_str).collect();
+        let behavior = || match kws.last() {
+            Some(&"cascade") => Some(DropBehavior::Cascade),
+            Some(&"restrict") => Some(DropBehavior::Restrict),
+            _ => None,
+        };
+        let names = self.simple_names(node)?;
+        let one_name = || match &names[..] {
+            [name] => Ok(name.clone()),
+            _ => unsupported("name"),
+        };
+        if let Some(option) = node.child(SyntaxKind::TableOption) {
+            let words = self.keywords(option);
+            return Ok(
+                match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                    ["enable", "row", "level", "security"] => {
+                        AlterTableOperation::EnableRowLevelSecurity {}
+                    }
+                    ["disable", "row", "level", "security"] => {
+                        AlterTableOperation::DisableRowLevelSecurity {}
+                    }
+                    ["force", "row", "level", "security"] => {
+                        AlterTableOperation::ForceRowLevelSecurity
+                    }
+                    ["no", "force", "row", "level", "security"] => {
+                        AlterTableOperation::NoForceRowLevelSecurity
+                    }
+                    ["set", "logged"] => AlterTableOperation::SetLogged,
+                    ["set", "unlogged"] => AlterTableOperation::SetUnlogged,
+                    _ => {
+                        return unsupported(format!(
+                            "ALTER TABLE {}",
+                            words.first().map_or("", String::as_str)
+                        ))
+                    }
+                },
+            );
+        }
+        Ok(match kws[..] {
+            ["add", ..] if node.child(SyntaxKind::TableConstraint).is_some() => {
+                let Some(constraint) = node.child(SyntaxKind::TableConstraint) else {
+                    return unsupported("constraint");
+                };
+                AlterTableOperation::AddConstraint {
+                    constraint: self.table_constraint(constraint)?,
+                    not_valid: self.not_valid(constraint),
+                }
+            }
+            ["add", ..] => {
+                let Some(column) = node.child(SyntaxKind::ColumnDef) else {
+                    return unsupported("column");
+                };
+                AlterTableOperation::AddColumn {
+                    column_keyword: kws.get(1) == Some(&"column"),
+                    if_not_exists: kws.contains(&"exists"),
+                    column_def: self.column_def(column)?,
+                    column_position: None,
+                }
+            }
+            ["drop", "constraint", ..] => AlterTableOperation::DropConstraint {
+                if_exists: kws.contains(&"exists"),
+                name: one_name()?,
+                drop_behavior: behavior(),
+            },
+            ["drop", ..] => AlterTableOperation::DropColumn {
+                has_column_keyword: kws.get(1) == Some(&"column"),
+                column_names: vec![one_name()?],
+                if_exists: kws.get(1..3) == Some(&["if", "exists"][..])
+                    || kws.get(2..4) == Some(&["if", "exists"][..]),
+                drop_behavior: behavior(),
+            },
+            ["alter", ..] => {
+                let Some(column_name) = names.first().cloned() else {
+                    return unsupported("column name");
+                };
+                AlterTableOperation::AlterColumn {
+                    column_name,
+                    op: self.alter_column(node, &kws)?,
+                }
+            }
+            ["rename", "to"] if names.len() == 1 => AlterTableOperation::RenameTable {
+                table_name: RenameTableNameKind::To(object_name(vec![one_name()?])),
+            },
+            ["rename", "constraint" | "column", "to"] | ["rename", "to"] if names.len() == 2 => {
+                let (old, new) = (names[0].clone(), names[1].clone());
+                if kws[1] == "constraint" {
+                    AlterTableOperation::RenameConstraint {
+                        old_name: old,
+                        new_name: new,
+                    }
+                } else {
+                    AlterTableOperation::RenameColumn {
+                        old_column_name: old,
+                        new_column_name: new,
+                    }
+                }
+            }
+            ["owner", "to", ..] => {
+                let owner = one_name()?;
+                let new_owner = if owner.quote_style.is_some() {
+                    Owner::Ident(owner)
+                } else {
+                    match owner.value.to_ascii_lowercase().as_str() {
+                        "current_user" => Owner::CurrentUser,
+                        "current_role" => Owner::CurrentRole,
+                        "session_user" => Owner::SessionUser,
+                        _ => Owner::Ident(owner),
+                    }
+                };
+                AlterTableOperation::OwnerTo { new_owner }
+            }
+            ["validate", "constraint", ..] => {
+                AlterTableOperation::ValidateConstraint { name: one_name()? }
+            }
+            _ => return unsupported(format!("ALTER TABLE {}", kws.join(" "))),
+        })
+    }
+
+    fn alter_column(&self, node: &SyntaxNode, kws: &[&str]) -> Result<AlterColumnOperation> {
+        let column_kw = usize::from(kws.get(1) == Some(&"column"));
+        let rest = &kws[1 + column_kw..];
+        Ok(match rest {
+            ["set", "not", "null"] => AlterColumnOperation::SetNotNull,
+            ["drop", "not", "null"] => AlterColumnOperation::DropNotNull,
+            ["set", "default"] => AlterColumnOperation::SetDefault {
+                value: self.constraint_expr(node)?,
+            },
+            ["drop", "default"] => AlterColumnOperation::DropDefault,
+            ["type"] | ["set", "data", "type"] => {
+                if node.child(SyntaxKind::ColumnConstraint).is_some() {
+                    return unsupported("TYPE ... COLLATE");
+                }
+                let Some(data_type) = node.child(SyntaxKind::TypeName) else {
+                    return unsupported("type");
+                };
+                let using = match node.child(SyntaxKind::UsingClause) {
+                    Some(u) => Some(self.constraint_expr(u)?),
+                    None => None,
+                };
+                AlterColumnOperation::SetDataType {
+                    data_type: self.data_type(data_type)?,
+                    using,
+                    had_set: rest[0] == "set",
+                }
+            }
+            ["add", "generated", ..] => {
+                if node.child(SyntaxKind::SequenceOptions).is_some() {
+                    return unsupported("identity sequence options");
+                }
+                AlterColumnOperation::AddGenerated {
+                    generated_as: Some(if rest.contains(&"always") {
+                        GeneratedAs::Always
+                    } else {
+                        GeneratedAs::ByDefault
+                    }),
+                    sequence_options: None,
+                }
+            }
+            _ => return unsupported(format!("ALTER COLUMN {}", rest.join(" "))),
         })
     }
 }

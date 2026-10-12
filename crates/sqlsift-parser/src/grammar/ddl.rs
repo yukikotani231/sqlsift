@@ -1,4 +1,4 @@
-//! Schema statements: `CREATE TABLE / VIEW / TYPE / INDEX`, `DROP` (more to come).
+//! Schema statements: `CREATE TABLE / VIEW / TYPE / INDEX`, `ALTER TABLE`, `DROP`.
 
 use super::expr::b_expr;
 use super::select::{required_expr, select_stmt};
@@ -14,6 +14,7 @@ pub(crate) fn at_ddl_start(p: &mut Parser<'_>) -> bool {
             || p.nth_kw(1, "type")
             || nth_is_create_index(p)))
         || (p.at_kw("drop") && drop_object_words(p) > 0)
+        || (p.at_kw("alter") && p.nth_kw(1, "table"))
 }
 
 /// `[OR REPLACE] [TEMP | TEMPORARY] [RECURSIVE] [MATERIALIZED] VIEW`, from the n-th token.
@@ -40,9 +41,11 @@ fn drop_object_words(p: &mut Parser<'_>) -> usize {
         return 2;
     }
     usize::from(
-        ["table", "view", "index", "type", "sequence", "schema", "domain"]
-            .iter()
-            .any(|kw| p.nth_kw(1, kw)),
+        [
+            "table", "view", "index", "type", "sequence", "schema", "domain",
+        ]
+        .iter()
+        .any(|kw| p.nth_kw(1, kw)),
     )
 }
 
@@ -60,6 +63,8 @@ fn nth_is_create_table(p: &mut Parser<'_>, mut n: usize) -> bool {
 pub(crate) fn ddl_stmt(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at_kw("drop") {
         drop(p)
+    } else if p.at_kw("alter") {
+        alter_table(p)
     } else if nth_is_create_table(p, 1) {
         create_table(p)
     } else if nth_is_create_view(p, 1) {
@@ -758,4 +763,164 @@ fn table_constraint(p: &mut Parser<'_>) {
     }
     constraint_attributes(p);
     m.complete(p, SyntaxKind::TableConstraint);
+}
+
+/// `ALTER TABLE [IF EXISTS] [ONLY] name [*] action, ...`
+fn alter_table(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump();
+    p.bump();
+    if p.at_kw("if") && p.nth_kw(1, "exists") {
+        p.bump();
+        p.bump();
+    }
+    p.eat_kw("only");
+    object_name(p, "a table name");
+    if p.at_op("*") {
+        p.bump();
+    }
+    loop {
+        alter_table_action(p);
+        if !p.eat(SyntaxKind::Comma) {
+            break;
+        }
+    }
+    m.complete(p, SyntaxKind::AlterTableStmt)
+}
+
+fn at_table_constraint(p: &mut Parser<'_>) -> bool {
+    p.at_any_kw(&[
+        "constraint",
+        "check",
+        "unique",
+        "primary",
+        "exclude",
+        "foreign",
+    ])
+}
+
+/// `[RESTRICT | CASCADE]`
+fn drop_behavior(p: &mut Parser<'_>) {
+    if p.at_kw("cascade") || p.at_kw("restrict") {
+        p.bump();
+    }
+}
+
+/// One `ALTER TABLE` action. The ones without a structure here (`SET (...)`,
+/// `ATTACH PARTITION`, ...) are kept as tokens.
+fn alter_table_action(p: &mut Parser<'_>) {
+    let m = p.start();
+    if p.eat_kw("add") {
+        if at_table_constraint(p) {
+            table_constraint(p);
+        } else {
+            p.eat_kw("column");
+            if_not_exists(p);
+            if at_col_id(p) || p.at(SyntaxKind::Ident) {
+                column_def(p);
+            } else {
+                p.error("expected a column definition");
+            }
+        }
+    } else if p.eat_kw("drop") {
+        if p.eat_kw("constraint") {
+            if p.at_kw("if") && p.nth_kw(1, "exists") {
+                p.bump();
+                p.bump();
+            }
+            constraint_name(p);
+        } else {
+            p.eat_kw("column");
+            if p.at_kw("if") && p.nth_kw(1, "exists") {
+                p.bump();
+                p.bump();
+            }
+            constraint_name(p);
+        }
+        drop_behavior(p);
+    } else if p.at_kw("alter") && !p.nth_kw(1, "constraint") {
+        p.bump();
+        p.eat_kw("column");
+        constraint_name(p);
+        alter_column_action(p);
+    } else if p.eat_kw("rename") {
+        if p.eat_kw("to") {
+            constraint_name(p);
+        } else {
+            if !p.eat_kw("constraint") {
+                p.eat_kw("column");
+            }
+            constraint_name(p);
+            p.expect_kw("to");
+            constraint_name(p);
+        }
+    } else if p.at_kw("owner") && p.nth_kw(1, "to") {
+        p.bump();
+        p.bump();
+        if matches!(p.current(), SyntaxKind::Ident | SyntaxKind::QuotedIdent) {
+            constraint_name(p);
+        } else {
+            p.error("expected a role name");
+        }
+    } else if p.at_kw("validate") && p.nth_kw(1, "constraint") {
+        p.bump();
+        p.bump();
+        constraint_name(p);
+    } else if p.at_end() || p.at(SyntaxKind::Semicolon) || p.at(SyntaxKind::Comma) {
+        p.error("expected an ALTER TABLE action");
+    } else {
+        let o = p.start();
+        skip_balanced_until(p, |p| {
+            p.at(SyntaxKind::Comma) || p.at(SyntaxKind::Semicolon)
+        });
+        o.complete(p, SyntaxKind::TableOption);
+    }
+    m.complete(p, SyntaxKind::AlterTableAction);
+}
+
+/// After `ALTER [COLUMN] name`: `SET / DROP NOT NULL`, `SET DEFAULT x`, `DROP DEFAULT`,
+/// `[SET DATA] TYPE t [COLLATE c] [USING x]`, `ADD GENERATED ... AS IDENTITY`; others
+/// kept as tokens.
+fn alter_column_action(p: &mut Parser<'_>) {
+    if (p.at_kw("set") || p.at_kw("drop")) && p.nth_kw(1, "not") && p.nth_kw(2, "null") {
+        p.bump();
+        p.bump();
+        p.bump();
+    } else if p.at_kw("set") && p.nth_kw(1, "default") {
+        p.bump();
+        p.bump();
+        required_expr(p);
+    } else if p.at_kw("drop") && p.nth_kw(1, "default") {
+        p.bump();
+        p.bump();
+    } else if p.at_kw("type") || (p.at_kw("set") && p.nth_kw(1, "data")) {
+        if p.eat_kw("set") {
+            p.bump();
+        }
+        p.bump();
+        type_name(p);
+        if p.at_kw("collate") {
+            let c = p.start();
+            p.bump();
+            object_name(p, "a collation name");
+            c.complete(p, SyntaxKind::ColumnConstraint);
+        }
+        if p.at_kw("using") {
+            let u = p.start();
+            p.bump();
+            required_expr(p);
+            u.complete(p, SyntaxKind::UsingClause);
+        }
+    } else if p.at_kw("add") && p.nth_kw(1, "generated") {
+        p.bump();
+        generated(p);
+    } else if p.at_end() || p.at(SyntaxKind::Semicolon) || p.at(SyntaxKind::Comma) {
+        p.error("expected a column action");
+    } else {
+        let o = p.start();
+        skip_balanced_until(p, |p| {
+            p.at(SyntaxKind::Comma) || p.at(SyntaxKind::Semicolon)
+        });
+        o.complete(p, SyntaxKind::TableOption);
+    }
 }

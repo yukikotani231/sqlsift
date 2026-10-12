@@ -4,7 +4,7 @@ use crate::parser::Parser;
 use crate::SyntaxKind;
 
 /// A type name: `int`, `varchar(20)`, `double precision`, `timestamp with time zone`,
-/// `public.my_type`, `text[]`.
+/// `public.my_type`, `text[]`, `text ARRAY`.
 pub(crate) fn type_name(p: &mut Parser<'_>) {
     let m = p.start();
     if !matches!(p.current(), SyntaxKind::Ident | SyntaxKind::QuotedIdent) {
@@ -53,6 +53,15 @@ pub(crate) fn type_name(p: &mut Parser<'_>) {
         p.bump();
         p.bump();
         p.expect_kw("zone");
+    }
+    // `int ARRAY`, `int ARRAY[3]`: the SQL standard's spelling of `int[]`.
+    if p.at_kw("array") {
+        p.bump();
+        if p.at(SyntaxKind::LBracket) {
+            p.bump();
+            p.eat(SyntaxKind::Number);
+            p.expect(SyntaxKind::RBracket, "]");
+        }
     }
     while p.at(SyntaxKind::LBracket) {
         p.bump();

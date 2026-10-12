@@ -122,6 +122,7 @@ pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
         SyntaxKind::CreateTypeStmt => cx.create_type(node),
         SyntaxKind::CreateIndexStmt => cx.create_index(node),
         SyntaxKind::DropStmt => cx.drop(node),
+        SyntaxKind::AlterTableStmt => cx.alter_table(node),
         SyntaxKind::OpaqueStmt => unsupported("statement"),
         kind => unsupported(format!("{kind:?}")),
     }
@@ -1647,11 +1648,21 @@ impl Lowering<'_> {
     ) -> Result<T> {
         let text = &self.source[range.to_range()];
         let fail = |e: ParserError| Unsupported(format!("{text}: {e}"));
+        let tokens = self.sqlparser_tokens(range)?;
         let dialect = PostgreSqlDialect {};
-        let mut tokens = sqlparser::tokenizer::Tokenizer::new(&dialect, text)
+        let mut p = sqlparser::parser::Parser::new(&dialect).with_tokens_with_locations(tokens);
+        let value = f(&mut p).map_err(fail)?;
+        p.expect_token(&Token::EOF).map_err(fail)?;
+        Ok(value)
+    }
+
+    /// sqlparser's tokens for the text of `range`, with spans in the whole statement.
+    fn sqlparser_tokens(&self, range: TextRange) -> Result<Vec<TokenWithSpan>> {
+        let text = &self.source[range.to_range()];
+        let mut tokens = sqlparser::tokenizer::Tokenizer::new(&PostgreSqlDialect {}, text)
             .tokenize_with_location()
-            .map_err(|e| fail(e.into()))?;
-        // The leaf's tokens, moved to where the leaf is in the statement.
+            .map_err(|e| Unsupported(format!("{text}: {e}")))?;
+        // Moved to where the text is in the statement.
         let origin = self.lines.location(range.start);
         let shift = |l: &mut Location| {
             if l.line == 1 {
@@ -1663,10 +1674,7 @@ impl Lowering<'_> {
             shift(&mut token.span.start);
             shift(&mut token.span.end);
         }
-        let mut p = sqlparser::parser::Parser::new(&dialect).with_tokens_with_locations(tokens);
-        let value = f(&mut p).map_err(fail)?;
-        p.expect_token(&Token::EOF).map_err(fail)?;
-        Ok(value)
+        Ok(tokens)
     }
 
     /// `(x).a.b`, `a[1][2:3]`, `t.a[1]`: one access chain on the innermost value.

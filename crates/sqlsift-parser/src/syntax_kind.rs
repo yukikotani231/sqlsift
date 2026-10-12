@@ -153,6 +153,11 @@ pub enum SyntaxKind {
     IndexElem,
     /// `DROP TABLE / VIEW / INDEX / TYPE / ... names`
     DropStmt,
+    /// `ALTER TABLE name action, ...`
+    AlterTableStmt,
+    /// One action of `ALTER TABLE` (`ADD COLUMN ...`, `ALTER COLUMN ... TYPE ...`, ...);
+    /// actions without a structure in this grammar hold a `TableOption`
+    AlterTableAction,
     /// A dotted name (`schema.table`, `t.col`, `t.*`)
     Name,
     ColumnList,
