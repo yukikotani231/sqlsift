@@ -4104,6 +4104,62 @@ fn describe_reports_python_queries() {
 }
 
 #[test]
+fn go_queries_are_checked() {
+    check_embedded_fixture(&["tests/fixtures/embedded/queries.go"])
+        .assert_code(1)
+        .assert_stderr_contains("queries.go:18:21")
+        .assert_stderr_contains("queries.go:30:39")
+        .assert_stderr_contains("Found 2 error(s)");
+}
+
+#[test]
+fn embedded_sql_go_functions_config_selects_the_calls() {
+    let t = TempDir::new("embedded-go-functions");
+    t.write("schema.sql", USERS_SCHEMA);
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nembedded_sql_go_functions = [\"RunSQL\"]\n",
+    );
+    t.write(
+        "store/db.go",
+        "db.Query(\"SELECT nme FROM users\")\nstore.RunSQL(\"SELECT nme FROM users WHERE id = $1\", id)\n",
+    );
+    let run = t.run(&["check", "-f", "json", "store/db.go"]);
+    run.assert_code(1).assert_stderr_lacks("unknown key");
+    let json = run.json();
+    let diagnostics = json["files"][0]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["line"], 2);
+    assert_eq!(diagnostics[0]["column"], 22);
+}
+
+#[test]
+fn globs_skip_vendored_go_modules() {
+    let t = with_users_schema("embedded-vendor");
+    t.write("store/db.go", "db.Query(\"SELECT name FROM users\")\n");
+    t.write(
+        "vendor/github.com/x/y/db.go",
+        "db.Query(\"SELECT nme FROM users\")\n",
+    );
+    t.run(&["check", "-s", "schema.sql", "**/*.go"])
+        .assert_code(0);
+}
+
+#[test]
+fn describe_reports_go_queries() {
+    let t = with_users_schema("embedded-describe-go");
+    t.write(
+        "store/db.go",
+        "row := db.QueryRowContext(ctx, `SELECT id, name FROM users WHERE id = $1`, id)\n",
+    );
+    t.run(&["describe", "-s", "schema.sql", "store/db.go"])
+        .assert_code(0)
+        .assert_stdout_contains("name");
+}
+
+#[test]
 fn embedded_sql_macros_config_selects_the_macros() {
     let t = TempDir::new("embedded-macros");
     t.write("schema.sql", USERS_SCHEMA);

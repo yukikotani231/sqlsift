@@ -195,6 +195,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
     let embedded_sql_tags = config.embedded_sql_tags();
     let embedded_sql_macros = config.embedded_sql_macros();
     let embedded_sql_functions = config.embedded_sql_functions();
+    let embedded_sql_go_functions = config.embedded_sql_go_functions();
     let analyze = |catalog: &Catalog| {
         let options = QueryOptions {
             catalog,
@@ -204,6 +205,7 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
             embedded_sql_tags: &embedded_sql_tags,
             embedded_sql_macros: &embedded_sql_macros,
             embedded_sql_functions: &embedded_sql_functions,
+            embedded_sql_go_functions: &embedded_sql_go_functions,
             stdin_filename: None,
             references: options.references,
         };

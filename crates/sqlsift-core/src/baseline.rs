@@ -424,7 +424,9 @@ impl BaselineFilter {
 /// [`is_rust_file`](crate::sqlx::is_rust_file)) the SQL passed to one of
 /// `macros`, and for Python files (see
 /// [`is_python_file`](crate::python::is_python_file)) the SQL passed to one of
-/// `functions`, so that the code around a query is not part of its statement.
+/// `functions` and for Go files (see [`is_go_file`](crate::go::is_go_file)) the
+/// SQL passed to one of `go_functions`, so that the code around a query is not
+/// part of its statement.
 ///
 /// ```
 /// use std::path::Path;
@@ -432,15 +434,16 @@ impl BaselineFilter {
 /// use sqlsift_core::SqlDialect;
 ///
 /// let ts = "const rows = await sql`SELECT 1`;";
-/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], &["query"], &["execute"], SqlDialect::PostgreSQL);
+/// let sql = sql_text(Path::new("a.ts"), ts, &["sql"], &["query"], &["execute"], &["Query"], SqlDialect::PostgreSQL);
 /// assert_eq!(sql.trim(), ";SELECT 1;");
 /// ```
-pub fn sql_text<S: AsRef<str>, M: AsRef<str>, F: AsRef<str>>(
+pub fn sql_text<S: AsRef<str>, M: AsRef<str>, F: AsRef<str>, G: AsRef<str>>(
     name: &Path,
     source: &str,
     tags: &[S],
     macros: &[M],
     functions: &[F],
+    go_functions: &[G],
     dialect: SqlDialect,
 ) -> String {
     // As `Analyzer::analyze_embedded` / `analyze_rust`: the BOM is not part of the
@@ -459,6 +462,9 @@ pub fn sql_text<S: AsRef<str>, M: AsRef<str>, F: AsRef<str>>(
         format!("{}{text}", &source[..bom])
     } else if crate::python::is_python_file(name) {
         let text = crate::python::extract(script, functions, dialect).text;
+        format!("{}{text}", &source[..bom])
+    } else if crate::go::is_go_file(name) {
+        let text = crate::go::extract(script, go_functions, dialect).text;
         format!("{}{text}", &source[..bom])
     } else {
         source.to_string()
@@ -1353,6 +1359,7 @@ mod tests {
                 &["sql"],
                 &["query"],
                 &["execute"],
+                &["Query"],
                 SqlDialect::PostgreSQL,
             );
             let mut baseline = Baseline::default();

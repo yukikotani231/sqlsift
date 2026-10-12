@@ -504,3 +504,59 @@ fn python_byte_offsets_point_into_the_original_source() {
     assert_eq!((span.line, span.column), (2, 21));
     assert_eq!(&source[span.offset..span.offset + 3], "nme");
 }
+
+// ---------------------------------------------------------------------------
+// Go: string literals passed to database/sql, sqlx and pgx calls
+// ---------------------------------------------------------------------------
+
+const QUERIES_GO: &str = include_str!("../../../tests/fixtures/embedded/queries.go");
+
+fn analyze_go(source: &str, functions: &[&str]) -> Vec<Diagnostic> {
+    Analyzer::new(&catalog()).analyze_go(source, functions)
+}
+
+#[test]
+fn go_queries_are_checked_at_their_location() {
+    assert_eq!(
+        locations(&analyze_go(QUERIES_GO, sqlsift_core::go::DEFAULT_FUNCTIONS)),
+        vec![
+            (DiagnosticKind::ColumnNotFound, 18, 21),
+            (DiagnosticKind::TableNotFound, 30, 39),
+        ]
+    );
+}
+
+#[test]
+fn configured_functions_select_the_go_queries() {
+    assert_eq!(
+        locations(&analyze_go(QUERIES_GO, &["NamedQuery"])),
+        vec![(DiagnosticKind::TableNotFound, 30, 39)]
+    );
+    assert!(analyze_go(QUERIES_GO, &["execute"]).is_empty());
+}
+
+#[test]
+fn go_placeholders_are_parameters() {
+    let source = r#"
+db.ExecContext(ctx, "INSERT INTO posts (author_id, title) VALUES ($1, $2)", a, t)
+conn.Exec(ctx, "UPDATE posts SET title = @title WHERE id = @id", args)
+db.NamedExec("UPDATE posts SET title = :title WHERE id = :id", p)
+db.Select(&ids, "SELECT id FROM posts WHERE id IN (?)", ids)
+"#;
+    let diagnostics = analyze_go(source, sqlsift_core::go::DEFAULT_FUNCTIONS);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let mysql = "db.QueryRow(\"SELECT id FROM posts WHERE id = ? AND title = ?\", id, t)";
+    let diagnostics =
+        Analyzer::with_dialect(&catalog(), SqlDialect::MySQL).analyze_go(mysql, &["QueryRow"]);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}
+
+#[test]
+fn go_byte_offsets_point_into_the_original_source() {
+    let source = "s := \"Ünïcode\"\ndb.Query(\"SELECT nme FROM authors\")\n";
+    let diagnostics = analyze_go(source, &["Query"]);
+    assert_eq!(diagnostics.len(), 1);
+    let span = diagnostics[0].span.unwrap();
+    assert_eq!((span.line, span.column), (2, 18));
+    assert_eq!(&source[span.offset..span.offset + 3], "nme");
+}

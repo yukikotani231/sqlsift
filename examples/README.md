@@ -8,6 +8,7 @@ Small, realistic projects showing how to set up sqlsift for common stacks. Each 
 | [`prisma-typedsql`](prisma-typedsql) | Prisma Migrate + TypedSQL, PostgreSQL | `prisma/sql/*.sql`, `$queryRaw` / `$executeRaw` in TypeScript, quoted camelCase names |
 | [`aiosql`](aiosql) | aiosql (Python) + yoyo-migrations, PostgreSQL | `-- name: get-user^` queries without `;`, `:param` / `:obj.attr` placeholders |
 | [`psycopg`](psycopg) | psycopg + SQLAlchemy Core (Python), PostgreSQL | SQL in `cur.execute("...")` and `text("...")`, `%s` / `%(name)s` / `:name` parameters, f-strings skipped |
+| [`go-database-sql`](go-database-sql) | `database/sql`, sqlx and pgx (Go) + goose, PostgreSQL | SQL in `db.QueryContext(ctx, "...")`, `` db.SelectContext(ctx, &dest, `...`) `` and pgx `conn.Exec`, `$1` / `?` / `:name` / `@name` parameters, `fmt.Sprintf` skipped |
 | [`postgres-js`](postgres-js) | postgres.js + dbmate, PostgreSQL | `` sql`...` `` templates in TypeScript, fragments and `sql(...)` helpers |
 | [`sqlx`](sqlx) | sqlx `query_file!` + `migrate!()`, PostgreSQL | `queries/*.sql` with one statement each, `<timestamp>_name.sql` migrations, a dropped column caught without a database |
 | [`postgres-migrations`](postgres-migrations) | Plain SQL + migrations, PostgreSQL | **A migration renames a column; the query still using the old name is caught** |

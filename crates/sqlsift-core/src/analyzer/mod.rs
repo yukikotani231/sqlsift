@@ -378,6 +378,40 @@ impl<'a> Analyzer<'a> {
         diagnostics
     }
 
+    /// Analyze the SQL in a Go file: the string literals passed to calls of
+    /// `functions` (see [`crate::go`]). Diagnostics point at the query's location
+    /// in `source`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use sqlsift_core::analyzer::Analyzer;
+    /// use sqlsift_core::go::DEFAULT_FUNCTIONS;
+    /// use sqlsift_core::schema::SchemaBuilder;
+    ///
+    /// let mut builder = SchemaBuilder::new();
+    /// builder.parse("CREATE TABLE users (id INTEGER, name TEXT);").unwrap();
+    /// let (catalog, _) = builder.build();
+    ///
+    /// let source = "row := db.QueryRowContext(ctx, \"SELECT nme FROM users WHERE id = $1\", id)";
+    /// let diagnostics = Analyzer::new(&catalog).analyze_go(source, DEFAULT_FUNCTIONS);
+    /// assert_eq!(diagnostics.len(), 1);
+    /// assert_eq!(diagnostics[0].span.unwrap().column, 40);
+    /// ```
+    pub fn analyze_go<S: AsRef<str>>(&mut self, source: &str, functions: &[S]) -> Vec<Diagnostic> {
+        let (source, bom) = strip_bom(source);
+        let extracted = crate::go::extract(source, functions, self.dialect);
+        let mut diagnostics = self.analyze_text(
+            &extracted.text,
+            source,
+            &extracted.identifiers,
+            &extracted.fragments,
+        );
+        shift_offsets(&mut diagnostics, bom);
+        self.shift_references(bom);
+        diagnostics
+    }
+
     /// Describe what each statement of `sql` returns: its output columns and their
     /// types, as far as the schema tells (see [`QueryDescription`]). The file is
     /// analyzed as [`Analyzer::analyze`] does, and its diagnostics are returned too.
@@ -427,6 +461,12 @@ impl<'a> Analyzer<'a> {
     /// [`Analyzer::analyze_python`])
     pub fn describe_python<S: AsRef<str>>(&mut self, source: &str, functions: &[S]) -> Description {
         self.describing(|analyzer| analyzer.analyze_python(source, functions))
+    }
+
+    /// [`Analyzer::describe`] for the SQL in a Go file (see
+    /// [`Analyzer::analyze_go`])
+    pub fn describe_go<S: AsRef<str>>(&mut self, source: &str, functions: &[S]) -> Description {
+        self.describing(|analyzer| analyzer.analyze_go(source, functions))
     }
 
     /// Run `analyze`, collecting the statements it describes

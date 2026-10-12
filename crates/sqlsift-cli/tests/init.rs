@@ -373,6 +373,32 @@ fn python_migrations_and_cursor_queries() {
 }
 
 #[test]
+fn go_migrations_and_database_calls() {
+    let p = Project::new("go");
+    p.write(
+        "go.mod",
+        "module example.com/app\n\ngo 1.22\n\nrequire github.com/jackc/pgx/v5 v5.7.1\n",
+    )
+    .write("migrations/0001_create_users.sql", USERS)
+    .write(
+        "internal/store/users.go",
+        "package store\n\nfunc Email(ctx context.Context, id int64) *pgx.Row {\n\treturn conn.QueryRow(ctx, \"SELECT email FROM users WHERE id = $1\", id)\n}\n",
+    )
+    .write("main.go", "package main\n\nfunc main() {}\n");
+
+    let run = p.init(&[]);
+    let table = p.table();
+    assert_eq!(string(&table, "dialect").as_deref(), Some("postgresql"));
+    assert_eq!(strings(&table, "files"), ["internal/**/*.go"]);
+    assert!(run.stdout.contains("db.Query"), "{}", run.stdout);
+    assert!(
+        run.stdout.contains("All 1 file(s) passed"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn rails_structure_sql_without_queries() {
     let p = Project::new("rails");
     p.write("db/structure.sql", USERS)

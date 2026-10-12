@@ -1081,6 +1081,23 @@ fn python_document_checks_database_calls() {
 }
 
 #[test]
+fn go_document_checks_database_calls() {
+    let t = workspace("go", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("store/users.go");
+    let text = "func User(ctx context.Context, id int64) {\n\
+                \trow := db.QueryRowContext(ctx, \"SELECT nme FROM users WHERE id = $1\", id)\n}\n";
+    lsp.open_as(&uri, "go", text);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(codes(&diags), ["E0002"], "{diags:#?}");
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 1, "character": 40})
+    );
+}
+
+#[test]
 fn rust_document_checks_sqlx_queries() {
     let t = workspace("rs", "");
     let mut lsp = Lsp::spawn();

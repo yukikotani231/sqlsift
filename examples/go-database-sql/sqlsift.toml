@@ -1,0 +1,6 @@
+# goose migrations (the `-- +goose Down` sections are skipped); SQL passed to
+# database/sql, sqlx and pgx calls (`embedded_sql_go_functions`) in internal/
+# is checked. fmt.Sprintf and concatenation with variables are skipped.
+schema_dir = "migrations"
+files = ["internal/**/*.go"]
+dialect = "postgresql"

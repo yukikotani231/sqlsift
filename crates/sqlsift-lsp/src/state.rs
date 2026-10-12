@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::{self, Url};
 
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter};
 use sqlsift_core::embedded::is_embedded_sql_file;
+use sqlsift_core::go::is_go_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::python::is_python_file;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, QualifiedName, SchemaBuilder};
@@ -14,7 +15,8 @@ use sqlsift_core::stack::with_analysis_stack;
 use sqlsift_core::{Analyzer, Diagnostic, RuleConfig, SqlDialect, Templating};
 
 use crate::config::{
-    default_embedded_sql_functions, default_embedded_sql_macros, default_embedded_sql_tags, Config,
+    default_embedded_sql_functions, default_embedded_sql_go_functions, default_embedded_sql_macros,
+    default_embedded_sql_tags, Config,
 };
 
 /// Language ids of documents whose SQL is in tagged template literals
@@ -31,6 +33,9 @@ const RUST_LANGUAGE: &str = "rust";
 /// Language id of Python documents, whose SQL is passed to database calls
 const PYTHON_LANGUAGE: &str = "python";
 
+/// Language id of Go documents, whose SQL is passed to database calls
+const GO_LANGUAGE: &str = "go";
+
 /// The code a document's SQL is embedded in
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingCode {
@@ -40,6 +45,8 @@ pub enum EmbeddingCode {
     Rust,
     /// Python: string literals passed to database calls
     Python,
+    /// Go: string literals passed to database calls
+    Go,
 }
 
 /// Language ids of Jinja-templated SQL documents (`jinja-sql` is set by the
@@ -64,6 +71,9 @@ pub struct ServerState {
     /// `embedded_sql_functions` from sqlsift.toml: function names whose SQL is
     /// checked in Python documents
     pub embedded_sql_functions: Vec<String>,
+    /// `embedded_sql_go_functions` from sqlsift.toml: function names whose SQL is
+    /// checked in Go documents
+    pub embedded_sql_go_functions: Vec<String>,
     /// Rule levels from sqlsift.toml
     pub rules: RuleConfig,
     pub open_documents: HashMap<Url, String>,
@@ -94,6 +104,7 @@ impl ServerState {
             embedded_sql_tags: default_embedded_sql_tags(),
             embedded_sql_macros: default_embedded_sql_macros(),
             embedded_sql_functions: default_embedded_sql_functions(),
+            embedded_sql_go_functions: default_embedded_sql_go_functions(),
             rules: RuleConfig::default(),
             open_documents: HashMap::new(),
             document_languages: HashMap::new(),
@@ -166,6 +177,7 @@ impl ServerState {
         self.embedded_sql_tags = config.embedded_sql_tags();
         self.embedded_sql_macros = config.embedded_sql_macros();
         self.embedded_sql_functions = config.embedded_sql_functions();
+        self.embedded_sql_go_functions = config.embedded_sql_go_functions();
 
         // Rule levels (`disable`, `[rules]`, `[categories]`)
         let (rules, problems) = config.rule_config();
@@ -298,6 +310,9 @@ impl ServerState {
                 Some(EmbeddingCode::Python) => {
                     analyzer.analyze_python(text, &self.embedded_sql_functions)
                 }
+                Some(EmbeddingCode::Go) => {
+                    analyzer.analyze_go(text, &self.embedded_sql_go_functions)
+                }
                 None => analyzer.analyze(text),
             }
         })
@@ -310,7 +325,7 @@ impl ServerState {
     }
 
     /// The code the SQL of the document at `uri` is embedded in: TypeScript or
-    /// JavaScript (tagged template literals) , Rust (sqlx macros) or Python (database calls), by its
+    /// JavaScript (tagged template literals), Rust (sqlx macros), Python or Go (database calls), by its
     /// language id, or else its file extension; `None` for a SQL document
     pub fn embedding_code(&self, uri: &Url) -> Option<EmbeddingCode> {
         match self.document_languages.get(uri) {
@@ -319,6 +334,7 @@ impl ServerState {
             }
             Some(language) if language == RUST_LANGUAGE => Some(EmbeddingCode::Rust),
             Some(language) if language == PYTHON_LANGUAGE => Some(EmbeddingCode::Python),
+            Some(language) if language == GO_LANGUAGE => Some(EmbeddingCode::Go),
             Some(language) if language == "sql" || JINJA_LANGUAGES.contains(&language.as_str()) => {
                 None
             }
@@ -330,6 +346,8 @@ impl ServerState {
                     Some(EmbeddingCode::Rust)
                 } else if is_python_file(path) {
                     Some(EmbeddingCode::Python)
+                } else if is_go_file(path) {
+                    Some(EmbeddingCode::Go)
                 } else {
                     None
                 }
@@ -383,6 +401,7 @@ impl ServerState {
                         &self.embedded_sql_tags,
                         &self.embedded_sql_macros,
                         &self.embedded_sql_functions,
+                        &self.embedded_sql_go_functions,
                         self.dialect,
                     )
                 } else {

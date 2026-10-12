@@ -21,7 +21,7 @@ Also in v0.2: rules E0009-E0027, including the first `suspicious` and `restricti
 | Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
 | SQL in Rust code (sqlx `query!` / `query_as!`) (done) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
 | SQL in Python code (configurable call names) (done) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
-| SQL in Go code (`database/sql`, sqlx and pgx calls) | [#311](https://github.com/yukikotani231/sqlsift/issues/311) |
+| SQL in Go code (`database/sql`, sqlx and pgx calls) (done) | [#311](https://github.com/yukikotani231/sqlsift/issues/311) |
 | Baseline strict mode and maintenance tooling (done) | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
 | `sqlsift impact`: show which queries a migration breaks (done) | [#230](https://github.com/yukikotani231/sqlsift/issues/230) |
 | `sqlsift describe`: each query's columns and types as JSON (done) | [#231](https://github.com/yukikotani231/sqlsift/issues/231) |

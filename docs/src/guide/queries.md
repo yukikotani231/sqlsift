@@ -345,6 +345,32 @@ Guessing which strings are SQL would report on strings that aren't, so a string 
 
 Diagnostics point at the query's line and column in the Python file. A glob pattern skips Python files in virtual environments (`.venv`, `venv`, `site-packages`) and `__pycache__`. [Suppression comments](suppression.md) work as Python comments (`# sqlsift:disable E0002` on the line before a query, `# sqlsift:disable-file`). `--stdin-filename` with a `.py` extension checks stdin the same way. See the [psycopg example project](../integrations/examples.md).
 
+## SQL in Go
+
+Go files (`.go`) are checked for the SQL passed as a string literal to `database/sql`, [sqlx](https://jmoiron.github.io/sqlx/) and [pgx](https://github.com/jackc/pgx) calls:
+
+```go
+row := db.QueryRowContext(ctx, `
+    SELECT id, titel
+    FROM books
+    WHERE author_id = $1`, authorID)
+err := db.SelectContext(ctx, &books, "SELECT id, title FROM books WHERE price < ?", max)
+_, err = pool.Exec(ctx, "UPDATE books SET in_stock = @in_stock WHERE id = @id", args)
+```
+
+```toml
+schema_dir = "migrations"
+files = ["internal/**/*.go"]
+```
+
+A string is checked only when it is an argument of a call whose name (the last part of the callee: `QueryContext` matches `db.QueryContext(...)` and `r.pool.QueryContext(...)`) is in `embedded_sql_go_functions`: by default `Query`, `QueryRow`, `Exec`, `Prepare` and their `Context` variants, sqlx's `Get`, `Select`, `Queryx`, `QueryRowx`, `MustExec`, `NamedExec`, `NamedQuery`, `Preparex` (and `Context` variants) and `sqlx.In`. For these, the string must be where the query goes: after the context, the destination (`Get(&user, ...)`) and the database (`sqlx.Get(db, &user, ...)`), so `db.Exec(query, "select")` never reads the argument as SQL. For names you add, any argument is checked. The string must also start with a statement keyword and have more than one word, so `c.Query("start")` in a web framework is left alone.
+
+- Interpreted (`"..."`) and raw (`` `...` ``) strings are checked, and literals joined with `+` (`"SELECT a " +` and `"FROM t"` on the next line) are one query. Escapes are read as Go does.
+- `fmt.Sprintf`, constants, variables and SQL joined with variables are skipped: their SQL is only known at run time. sqlc's generated code passes constants, so check sqlc's `.sql` query files instead.
+- Driver placeholders are untyped parameters: `$1` (pgx, lib/pq), `?` (go-sql-driver/mysql, SQLite drivers, and sqlx queries passed through `db.Rebind`), `:name` (sqlx named queries) and `@name` (pgx named arguments). `IN (?)` after `sqlx.In` is a list. In PostgreSQL, the jsonb operators `?`, `?|` and `?&` stay operators.
+
+Diagnostics point at the query's line and column in the Go file. A glob pattern skips Go files in `vendor`. [Suppression comments](suppression.md) work as Go comments (`// sqlsift:disable E0002` on the line before a query, `// sqlsift:disable-file`). `--stdin-filename` with a `.go` extension checks stdin the same way. See the [go-database-sql example project](../integrations/examples.md).
+
 ## Exit codes
 
 | Code | Meaning |

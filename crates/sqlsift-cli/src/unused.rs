@@ -82,6 +82,7 @@ pub fn run(config: &Config, exclude: &[String], quiet: bool) -> Result<bool> {
     let embedded_sql_tags = config.embedded_sql_tags();
     let embedded_sql_macros = config.embedded_sql_macros();
     let embedded_sql_functions = config.embedded_sql_functions();
+    let embedded_sql_go_functions = config.embedded_sql_go_functions();
     let options = QueryOptions {
         catalog: &catalog,
         dialect,
@@ -90,6 +91,7 @@ pub fn run(config: &Config, exclude: &[String], quiet: bool) -> Result<bool> {
         embedded_sql_tags: &embedded_sql_tags,
         embedded_sql_macros: &embedded_sql_macros,
         embedded_sql_functions: &embedded_sql_functions,
+        embedded_sql_go_functions: &embedded_sql_go_functions,
         stdin_filename: None,
         references: true,
     };

@@ -28,6 +28,7 @@ const KNOWN_KEYS: &[&str] = &[
     "embedded_sql_tags",
     "embedded_sql_macros",
     "embedded_sql_functions",
+    "embedded_sql_go_functions",
     "unused_exclude",
 ];
 
@@ -91,6 +92,11 @@ pub struct Config {
     /// in Python files (default: `execute`, `executemany`, `fetch`, `text`, ...)
     #[serde(default)]
     pub embedded_sql_functions: Option<Vec<String>>,
+
+    /// Function names whose SQL argument (a string literal) is checked in Go
+    /// files (default: `Query`, `QueryContext`, `Exec`, `Get`, `Select`, ...)
+    #[serde(default)]
+    pub embedded_sql_go_functions: Option<Vec<String>>,
 
     /// Tables and columns `sqlsift unused` never reports, as glob patterns of
     /// `table`, `schema.table`, `table.column` or `schema.table.column` (used
@@ -305,6 +311,16 @@ impl Config {
     pub fn embedded_sql_functions(&self) -> Vec<String> {
         self.embedded_sql_functions.clone().unwrap_or_else(|| {
             sqlsift_core::python::DEFAULT_FUNCTIONS
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+    }
+
+    /// Function names whose SQL is checked in Go files
+    pub fn embedded_sql_go_functions(&self) -> Vec<String> {
+        self.embedded_sql_go_functions.clone().unwrap_or_else(|| {
+            sqlsift_core::go::DEFAULT_FUNCTIONS
                 .iter()
                 .map(ToString::to_string)
                 .collect()

@@ -35,7 +35,8 @@
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:rust",
-    "onLanguage:python"
+    "onLanguage:python",
+    "onLanguage:go"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -50,7 +51,7 @@
         "sqlsift.embeddedSql.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Check SQL in tagged template literals (sql`...`) of TypeScript and JavaScript files in sqlx queries (query!(\"...\")) of Rust files and in database calls (cursor.execute(\"...\")) of Python files. Only templates whose tag is in `embedded_sql_tags`, macros in `embedded_sql_macros` and calls in `embedded_sql_functions` (sqlsift.toml) are checked, so other files get no diagnostics. Takes effect after reloading the window."
+          "description": "Check SQL in tagged template literals (sql`...`) of TypeScript and JavaScript files in sqlx queries (query!(\"...\")) of Rust files and in database calls of Python (cursor.execute(\"...\")) and Go (db.Query(\"...\")) files. Only templates whose tag is in `embedded_sql_tags`, macros in `embedded_sql_macros` and calls in `embedded_sql_functions` / `embedded_sql_go_functions` (sqlsift.toml) are checked, so other files get no diagnostics. Takes effect after reloading the window."
         }
       }
     },

@@ -13,6 +13,7 @@ pub mod dbt;
 pub mod dialect;
 pub mod embedded;
 pub mod error;
+pub mod go;
 pub mod ignore;
 pub mod impact;
 mod mysql;

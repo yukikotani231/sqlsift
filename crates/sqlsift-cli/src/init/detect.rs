@@ -854,6 +854,25 @@ pub fn detect(root: &Path) -> Detection {
         });
     }
 
+    // SQL in Go: string literals passed to database/sql, sqlx and pgx calls
+    let go: BTreeSet<String> = tree
+        .files
+        .iter()
+        .filter(|file| sqlsift_core::go::is_go_file(Path::new(file)))
+        .filter(|file| tree.read(file).is_some_and(|text| uses_go_queries(&text)))
+        .cloned()
+        .collect();
+    if !go.is_empty() {
+        queries.push(QueryGroup {
+            label: "db.Query(\"...\") in .go".to_string(),
+            patterns: group_by_top_dir(&go, "go")
+                .into_iter()
+                .map(|(pattern, _)| pattern)
+                .collect(),
+            count: go.len(),
+        });
+    }
+
     if prisma_raw {
         detection.embedded_sql_tags = Some(
             ["sql", "$queryRaw", "$executeRaw"]
@@ -1120,6 +1139,12 @@ fn uses_sqlx_queries(text: &str) -> bool {
         }) || text.contains(&format!("sqlx::{name}("))
             || text.contains(&format!("sqlx::{name}::<"))
     })
+}
+
+/// Whether Go code passes SQL to a database call that `sqlsift check` extracts
+/// (`db.QueryContext(ctx, "SELECT ...")`)
+fn uses_go_queries(text: &str) -> bool {
+    sqlsift_core::go::has_sql(text, sqlsift_core::go::DEFAULT_FUNCTIONS)
 }
 
 /// Whether Python code passes SQL to a database call that `sqlsift check`
@@ -1670,6 +1695,17 @@ mod tests {
         assert!(!uses_sqlx_queries(
             "let q = query(\"SELECT 1\"); my_query!(x)"
         ));
+    }
+
+    #[test]
+    fn finds_go_queries() {
+        assert!(uses_go_queries(
+            "rows, err := db.QueryContext(ctx, `SELECT 1`)"
+        ));
+        assert!(!uses_go_queries(
+            "rows, err := db.QueryContext(ctx, getUser, id)"
+        ));
+        assert!(!uses_go_queries("fmt.Println(\"SELECT 1\")"));
     }
 
     #[test]

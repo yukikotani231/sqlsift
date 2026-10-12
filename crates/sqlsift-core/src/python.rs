@@ -331,7 +331,7 @@ fn copy_run(chars: &[char], out: &mut [char], run: &[Literal]) -> Vec<std::ops::
 /// for, written right after the text before them so the word they are in stays
 /// whole; the spaces this saves go at the next whitespace, so that the next word
 /// is in its place again
-fn copy_escaped(chars: &[char], out: &mut [char], range: std::ops::Range<usize>) {
+pub(crate) fn copy_escaped(chars: &[char], out: &mut [char], range: std::ops::Range<usize>) {
     let end = range.end;
     let mut at = range.start;
     let mut j = range.start;
@@ -412,7 +412,7 @@ fn unescape(escape: &[char]) -> Option<char> {
 /// Rewrite the driver placeholders in the SQL text `range` of `out` (see the
 /// module docs). Identifiers substituted for a list after `IN` are added to
 /// `identifiers` (character ranges).
-fn rewrite_placeholders(
+pub(crate) fn rewrite_placeholders(
     out: &mut [char],
     range: std::ops::Range<usize>,
     dialect: SqlDialect,

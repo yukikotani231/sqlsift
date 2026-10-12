@@ -18,6 +18,7 @@ use miette::Result;
 use sqlsift_core::analyzer::Reference;
 use sqlsift_core::baseline::{self, Baseline, BaselineFilter, DEFAULT_BASELINE_FILE};
 use sqlsift_core::embedded::{is_component_file, is_embedded_sql_file, is_in_skipped_directory};
+use sqlsift_core::go::is_go_file;
 use sqlsift_core::ignore::IgnorePatterns;
 use sqlsift_core::python::is_python_file;
 use sqlsift_core::schema::{is_rollback_migration, Catalog, SchemaBuilder};
@@ -101,6 +102,8 @@ struct QueryOptions<'a> {
     embedded_sql_macros: &'a [String],
     /// Function names whose SQL is checked in Python files
     embedded_sql_functions: &'a [String],
+    /// Function names whose SQL is checked in Go files
+    embedded_sql_go_functions: &'a [String],
     /// `--stdin-filename`, whose extension decides how stdin is analyzed
     stdin_filename: Option<&'a Path>,
     /// Record the references of the queries to catalog tables and columns
@@ -125,6 +128,8 @@ fn analyze_files(
             analyzer.analyze_rust(content, options.embedded_sql_macros)
         } else if is_python_file(name) {
             analyzer.analyze_python(content, options.embedded_sql_functions)
+        } else if is_go_file(name) {
+            analyzer.analyze_go(content, options.embedded_sql_go_functions)
         } else {
             analyzer.analyze(content)
         };
@@ -607,10 +612,13 @@ fn collect_query_files(
                 unmatched.push(format!("'{pattern}'"));
             }
             // Installed packages and build output that the pattern matches
-            // aren't checked for SQL in TypeScript / JavaScript / Rust / Python
+            // aren't checked for SQL in TypeScript / JavaScript / Rust / Python / Go
             let base = glob_base(pattern);
             matches.retain(|path| {
-                !((is_embedded_sql_file(path) || is_rust_file(path) || is_python_file(path))
+                !((is_embedded_sql_file(path)
+                    || is_rust_file(path)
+                    || is_python_file(path)
+                    || is_go_file(path))
                     && is_in_skipped_directory(path.strip_prefix(&base).unwrap_or(path)))
             });
             query_files.extend(matches);
@@ -860,6 +868,7 @@ fn run(args: Args) -> Result<bool> {
             let embedded_sql_tags = config.embedded_sql_tags();
             let embedded_sql_macros = config.embedded_sql_macros();
             let embedded_sql_functions = config.embedded_sql_functions();
+            let embedded_sql_go_functions = config.embedded_sql_go_functions();
             let options = QueryOptions {
                 catalog: &catalog,
                 dialect,
@@ -868,6 +877,7 @@ fn run(args: Args) -> Result<bool> {
                 embedded_sql_tags: &embedded_sql_tags,
                 embedded_sql_macros: &embedded_sql_macros,
                 embedded_sql_functions: &embedded_sql_functions,
+                embedded_sql_go_functions: &embedded_sql_go_functions,
                 stdin_filename: stdin_filename.as_deref(),
                 references: false,
             };
@@ -886,6 +896,7 @@ fn run(args: Args) -> Result<bool> {
                     &embedded_sql_tags,
                     &embedded_sql_macros,
                     &embedded_sql_functions,
+                    &embedded_sql_go_functions,
                     dialect,
                 )
             };
@@ -1440,6 +1451,7 @@ fn run(args: Args) -> Result<bool> {
             let embedded_sql_tags = config.embedded_sql_tags();
             let embedded_sql_macros = config.embedded_sql_macros();
             let embedded_sql_functions = config.embedded_sql_functions();
+            let embedded_sql_go_functions = config.embedded_sql_go_functions();
             let options = QueryOptions {
                 catalog: &catalog,
                 dialect,
@@ -1448,6 +1460,7 @@ fn run(args: Args) -> Result<bool> {
                 embedded_sql_tags: &embedded_sql_tags,
                 embedded_sql_macros: &embedded_sql_macros,
                 embedded_sql_functions: &embedded_sql_functions,
+                embedded_sql_go_functions: &embedded_sql_go_functions,
                 stdin_filename: None,
                 references: false,
             };
@@ -1461,6 +1474,8 @@ fn run(args: Args) -> Result<bool> {
                         analyzer.describe_rust(content, options.embedded_sql_macros)
                     } else if is_python_file(name) {
                         analyzer.describe_python(content, options.embedded_sql_functions)
+                    } else if is_go_file(name) {
+                        analyzer.describe_go(content, options.embedded_sql_go_functions)
                     } else {
                         analyzer.describe(content)
                     }

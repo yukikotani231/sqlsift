@@ -22,7 +22,8 @@ function getBundledServerPath(context: ExtensionContext): string | undefined {
 
 /**
  * Languages whose SQL is embedded in code: tagged template literals (sql`...`)
- * sqlx macros (query!("...")) and Python database calls (cursor.execute("..."))
+ * sqlx macros (query!("...")) and Python and Go database calls
+ * (cursor.execute("..."), db.Query("..."))
  */
 const EMBEDDED_SQL_LANGUAGES = [
   "typescript",
@@ -31,12 +32,13 @@ const EMBEDDED_SQL_LANGUAGES = [
   "javascriptreact",
   "rust",
   "python",
+  "go",
 ];
 
 /**
  * Documents sent to the server: SQL, dbt models (`jinja-sql` from dbt Power
  * User, or `.sql` files in the generic `jinja` language) and, when enabled,
- * TypeScript / JavaScript / Rust / Python files with embedded SQL
+ * TypeScript / JavaScript / Rust / Python / Go files with embedded SQL
  */
 function documentSelector(embeddedSql: boolean): DocumentFilter[] {
   const selector: DocumentFilter[] = [

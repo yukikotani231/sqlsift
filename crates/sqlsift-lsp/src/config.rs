@@ -65,6 +65,11 @@ pub struct Config {
     /// documents (default [`sqlsift_core::python::DEFAULT_FUNCTIONS`])
     #[serde(default)]
     pub embedded_sql_functions: Option<Vec<String>>,
+
+    /// Function names whose string literal argument is checked as SQL in Go
+    /// documents (default [`sqlsift_core::go::DEFAULT_FUNCTIONS`])
+    #[serde(default)]
+    pub embedded_sql_go_functions: Option<Vec<String>>,
 }
 
 impl Config {
@@ -88,6 +93,13 @@ impl Config {
         self.embedded_sql_functions
             .clone()
             .unwrap_or_else(default_embedded_sql_functions)
+    }
+
+    /// Function names whose SQL is checked in Go documents
+    pub fn embedded_sql_go_functions(&self) -> Vec<String> {
+        self.embedded_sql_go_functions
+            .clone()
+            .unwrap_or_else(default_embedded_sql_go_functions)
     }
 
     /// Rule levels from `[categories]`, `[rules]` and `disable`, with a message for
@@ -143,6 +155,14 @@ impl Config {
         }
         None
     }
+}
+
+/// The default `embedded_sql_go_functions`
+pub fn default_embedded_sql_go_functions() -> Vec<String> {
+    sqlsift_core::go::DEFAULT_FUNCTIONS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The default `embedded_sql_functions`
