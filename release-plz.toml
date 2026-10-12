@@ -24,3 +24,9 @@ git_tag_enable = true
 name = "sqlsift-wasm"
 release = false
 git_tag_name = "sqlsift-wasm-v{{ version }}"
+
+# Experimental parser (#257), not used by sqlsift yet and not distributed.
+[[package]]
+name = "sqlsift-parser"
+release = false
+git_tag_name = "sqlsift-parser-v{{ version }}"

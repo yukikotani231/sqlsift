@@ -156,3 +156,23 @@ fn recovers_inside_a_statement() {
     assert!(stmt.child(SyntaxKind::FromClause).is_some());
     assert!(stmt.child(SyntaxKind::WhereClause).is_some());
 }
+
+/// Unbalanced closing parentheses don't stop the parser.
+#[test]
+fn unbalanced_parentheses() {
+    for sql in [
+        ") SELECT 1",
+        "SELECT 1) FROM t; SELECT 2",
+        "CREATE x ) ] ;",
+        "SELECT (1",
+    ] {
+        let parse = parse(sql);
+        let text: String = parse
+            .root
+            .descendant_tokens()
+            .iter()
+            .map(|t| t.text(sql))
+            .collect();
+        assert_eq!(text, sql);
+    }
+}

@@ -33,6 +33,13 @@ const VALUE_KEYWORDS: &[&str] = &[
     "user",
 ];
 
+/// Whether `word` is a keyword like `CURRENT_DATE`, a value with no parentheses.
+pub(crate) fn is_value_keyword(word: &str) -> bool {
+    VALUE_KEYWORDS
+        .iter()
+        .any(|kw| word.eq_ignore_ascii_case(kw))
+}
+
 #[derive(Clone, Copy)]
 enum Infix {
     Binary,
@@ -244,10 +251,7 @@ fn atom(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 Some(cast(p))
             } else if p.at_kw("exists") && p.nth(1) == SyntaxKind::LParen {
                 Some(exists(p))
-            } else if VALUE_KEYWORDS
-                .iter()
-                .any(|kw| p.nth_text(0).eq_ignore_ascii_case(kw))
-            {
+            } else if is_value_keyword(p.nth_text(0)) {
                 let m = p.start();
                 name(p, false);
                 Some(m.complete(p, SyntaxKind::ColumnRef))

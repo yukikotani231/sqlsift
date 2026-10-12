@@ -9,7 +9,7 @@ mod types;
 use crate::parser::Parser;
 use crate::SyntaxKind;
 
-pub(crate) use expr::expr;
+pub(crate) use expr::{expr, is_value_keyword};
 pub(crate) use select::select_stmt;
 
 /// PostgreSQL's reserved keywords: never a column or table name without quotes.
@@ -165,7 +165,7 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
         if !p.at_end() && !p.at(SyntaxKind::Semicolon) {
             p.error("expected ;");
             let e = p.start();
-            skip_balanced_until(p, |p| p.at(SyntaxKind::Semicolon));
+            skip_to_semicolon(p);
             e.complete(p, SyntaxKind::Error);
         }
     }
@@ -177,8 +177,20 @@ fn statement(p: &mut Parser<'_>) {
         select_stmt(p);
     } else {
         let m = p.start();
-        skip_balanced_until(p, |p| p.at(SyntaxKind::Semicolon));
+        skip_to_semicolon(p);
         m.complete(p, SyntaxKind::OpaqueStmt);
+    }
+}
+
+/// Consumes tokens up to the next `;` outside parentheses (unbalanced closing parentheses
+/// included), or the end of input.
+fn skip_to_semicolon(p: &mut Parser<'_>) {
+    while !p.at_end() && !p.at(SyntaxKind::Semicolon) {
+        if p.at(SyntaxKind::RParen) || p.at(SyntaxKind::RBracket) {
+            p.bump();
+        } else {
+            skip_balanced_until(p, |p| p.at(SyntaxKind::Semicolon));
+        }
     }
 }
 
