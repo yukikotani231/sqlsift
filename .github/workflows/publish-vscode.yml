@@ -24,6 +24,8 @@ jobs:
     if: >
       (github.event_name == 'workflow_dispatch' && !inputs.identity) ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch != null &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
     strategy:
@@ -57,16 +59,22 @@ jobs:
         with:
           node-version: "20.x"
 
+      # The tag comes in through env, not an expression in the script: a branch name is
+      # attacker-controlled text (Release also runs on pull requests from forks).
       - name: Determine release tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$INPUT_TAG"
           else
-            TAG="${{ github.event.workflow_run.head_branch }}"
+            TAG="$RUN_BRANCH"
           fi
-          if [[ -z "$TAG" ]]; then
-            echo "::error::A release tag is required unless identity mode is on"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Not a release tag: $TAG"
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
