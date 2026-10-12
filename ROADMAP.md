@@ -1,6 +1,6 @@
 # Roadmap
 
-sqlsift v0.2 is out. v0.3 widens where sqlsift can be used, v0.4 replaces the PostgreSQL parser, and v1.0 promises stable output. Progress is tracked in the [v0.3](https://github.com/yukikotani231/sqlsift/milestone/2) and [v0.4](https://github.com/yukikotani231/sqlsift/milestone/3) milestones.
+sqlsift v0.2 is out. v0.3 widens where sqlsift can be used, v0.4 replaces the PostgreSQL parser, and v1.0 promises stable output. Progress is tracked in the [v0.3](https://github.com/yukikotani231/sqlsift/milestone/2), [v0.4](https://github.com/yukikotani231/sqlsift/milestone/3) and [v1.0](https://github.com/yukikotani231/sqlsift/milestone/4) milestones.
 
 Three principles guide what goes in:
 
@@ -19,10 +19,9 @@ Also in v0.2: rules E0009-E0027, including the first `suspicious` and `restricti
 | Item | Issue |
 | --- | --- |
 | Fully resolve schema-qualified names (done) | [#160](https://github.com/yukikotani231/sqlsift/issues/160) |
-| Data warehouse dialects in alpha: Snowflake, BigQuery, Redshift, Databricks (alpha released; next: feedback from real projects) | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
-| dbt stage 2: resolve `ref()` / `source()` columns from `target/catalog.json` (alpha released; next: feedback from real projects) | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
 | SQL in Rust code (sqlx `query!` / `query_as!`) (done) | [#161](https://github.com/yukikotani231/sqlsift/issues/161) |
 | SQL in Python code (configurable call names) (done) | [#162](https://github.com/yukikotani231/sqlsift/issues/162) |
+| SQL in Go code (`database/sql`, sqlx and pgx calls) | [#311](https://github.com/yukikotani231/sqlsift/issues/311) |
 | Baseline strict mode and maintenance tooling (done) | [#137](https://github.com/yukikotani231/sqlsift/issues/137) |
 | `sqlsift impact`: show which queries a migration breaks (done) | [#230](https://github.com/yukikotani231/sqlsift/issues/230) |
 | `sqlsift describe`: each query's columns and types as JSON (done) | [#231](https://github.com/yukikotani231/sqlsift/issues/231) |
@@ -41,9 +40,15 @@ Replacing the parser changes diagnostic positions and which statements fail to p
 
 ## v1.0 and later
 
-v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SARIF output (including `sqlsift describe`) stay compatible. It comes once sqlsift is used by real teams. Ideas beyond that, started when there is demand:
+v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SARIF output (including `sqlsift describe`) stay compatible. It comes once sqlsift is used by real teams, and nothing in it is alpha any more:
 
-- Data warehouse dialects out of alpha (most dbt projects run on them)
+| Item | Issue |
+| --- | --- |
+| Data warehouse dialects out of alpha: Snowflake, BigQuery, Redshift, Databricks (alpha released; next: feedback from real projects) | [#187](https://github.com/yukikotani231/sqlsift/issues/187) |
+| dbt stage 2 out of alpha: `ref()` / `source()` columns from `target/catalog.json` (alpha released; next: feedback from real projects) | [#95](https://github.com/yukikotani231/sqlsift/issues/95) |
+
+Ideas beyond that, started when there is demand:
+
 - Analysing function bodies (PL/pgSQL, `LANGUAGE sql`), e.g. Supabase RPC functions
 - `pedantic` and `style` rules (none yet)
 - Editor features in the LSP: completion, hover with column types, go to definition (built on the v0.4 parser's error recovery)
