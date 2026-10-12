@@ -19,3 +19,13 @@ accepted = [
 ignore-dev-dependencies = true
 ignore-build-dependencies = false
 private = { ignore = true }
+
+# miniz_oxide has both LICENSE and LICENSE-MIT.md (MIT); without this the file
+# picked depends on the directory order, so the output differs between machines.
+[miniz_oxide.clarify]
+license = "MIT"
+
+[[miniz_oxide.clarify.files]]
+path = "LICENSE-MIT.md"
+license = "MIT"
+checksum = "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
