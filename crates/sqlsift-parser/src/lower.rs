@@ -106,6 +106,7 @@ pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
     }
     match node.kind {
         SyntaxKind::SelectStmt => Ok(Statement::Query(Box::new(cx.query(node)?))),
+        SyntaxKind::InsertStmt | SyntaxKind::UpdateStmt | SyntaxKind::DeleteStmt => cx.dml(node),
         SyntaxKind::OpaqueStmt => unsupported("statement"),
         kind => unsupported(format!("{kind:?}")),
     }
@@ -216,6 +217,9 @@ impl Lowering<'_> {
                         | SyntaxKind::SetOperation
                         | SyntaxKind::ParenSelect
                         | SyntaxKind::ValuesClause
+                        | SyntaxKind::InsertStmt
+                        | SyntaxKind::UpdateStmt
+                        | SyntaxKind::DeleteStmt
                 )
             })
             .ok_or_else(|| Unsupported("query body".into()))?;
@@ -264,6 +268,9 @@ impl Lowering<'_> {
                     right: Box::new(self.set_expr(right)?),
                 })
             }
+            SyntaxKind::InsertStmt => Ok(SetExpr::Insert(self.dml(node)?)),
+            SyntaxKind::UpdateStmt => Ok(SetExpr::Update(self.dml(node)?)),
+            SyntaxKind::DeleteStmt => Ok(SetExpr::Delete(self.dml(node)?)),
             SyntaxKind::ValuesClause => {
                 let mut rows = vec![];
                 for row in node.nodes() {
@@ -328,7 +335,7 @@ impl Lowering<'_> {
                     columns,
                     at: None,
                 },
-                query: Box::new(self.query(child_query(cte)?)?),
+                query: Box::new(self.cte_query(cte)?),
                 from: None,
                 materialized,
                 closing_paren_token: ast::helpers::attached_token::AttachedToken(
@@ -341,6 +348,257 @@ impl Lowering<'_> {
             recursive: tokens.get(1).is_some_and(|t| self.is_kw(t, "recursive")),
             cte_tables,
         })
+    }
+
+    /// A CTE's query: a `SelectStmt`, or a data-modifying statement wrapped in a query.
+    fn cte_query(&self, cte: &SyntaxNode) -> Result<Query> {
+        if let Some(query) = cte.child(SyntaxKind::SelectStmt) {
+            return self.query(query);
+        }
+        let dml = cte
+            .nodes()
+            .find(|n| {
+                matches!(
+                    n.kind,
+                    SyntaxKind::InsertStmt | SyntaxKind::UpdateStmt | SyntaxKind::DeleteStmt
+                )
+            })
+            .ok_or_else(|| Unsupported("CTE".into()))?;
+        Ok(Query {
+            with: None,
+            body: Box::new(self.set_expr(dml)?),
+            order_by: None,
+            limit_clause: None,
+            fetch: None,
+            locks: vec![],
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+        })
+    }
+
+    // --- INSERT / UPDATE / DELETE ---
+
+    fn dml(&self, node: &SyntaxNode) -> Result<Statement> {
+        let tokens: Vec<_> = node.tokens().collect();
+        if tokens.iter().any(|t| self.is_kw(t, "only")) {
+            return unsupported("ONLY");
+        }
+        let name = node
+            .child(SyntaxKind::Name)
+            .ok_or_else(|| Unsupported("table name".into()))?;
+        let table_name = object_name(self.name_parts(name)?);
+        let alias = node
+            .child(SyntaxKind::Alias)
+            .map(|a| self.table_alias(a))
+            .transpose()?;
+        let selection = node
+            .child(SyntaxKind::WhereClause)
+            .map(|w| {
+                if self.has_kw(w, "current") && self.has_kw(w, "of") {
+                    unsupported("WHERE CURRENT OF")
+                } else {
+                    self.expr(expr_child(w)?)
+                }
+            })
+            .transpose()?;
+        let returning = node
+            .child(SyntaxKind::ReturningClause)
+            .map(|r| {
+                r.child(SyntaxKind::TargetList)
+                    .ok_or_else(|| Unsupported("RETURNING".into()))?
+                    .nodes()
+                    .map(|item| self.select_item(item))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        match node.kind {
+            SyntaxKind::InsertStmt => {
+                if node.child(SyntaxKind::OverridingClause).is_some() {
+                    return unsupported("OVERRIDING");
+                }
+                let columns = match node.child(SyntaxKind::ColumnList) {
+                    Some(list) => self
+                        .column_list(list)?
+                        .into_iter()
+                        .map(|i| object_name(vec![i]))
+                        .collect(),
+                    None => vec![],
+                };
+                let source = node
+                    .child(SyntaxKind::SelectStmt)
+                    .map(|q| self.query(q).map(Box::new))
+                    .transpose()?;
+                let on = node
+                    .child(SyntaxKind::OnConflictClause)
+                    .map(|c| self.on_conflict(c))
+                    .transpose()?;
+                Ok(Statement::Insert(ast::Insert {
+                    insert_token: self.attached(tokens[0]),
+                    optimizer_hints: vec![],
+                    or: None,
+                    ignore: false,
+                    into: true,
+                    table: ast::TableObject::TableName(table_name),
+                    table_alias: alias.map(|a| ast::TableAliasWithoutColumns {
+                        explicit: a.explicit,
+                        alias: a.name,
+                    }),
+                    columns,
+                    overwrite: false,
+                    source,
+                    assignments: vec![],
+                    partitioned: None,
+                    after_columns: vec![],
+                    has_table_keyword: false,
+                    on,
+                    returning,
+                    output: None,
+                    replace_into: false,
+                    priority: None,
+                    insert_alias: None,
+                    settings: None,
+                    format_clause: None,
+                    multi_table_insert_type: None,
+                    multi_table_into_clauses: vec![],
+                    multi_table_when_clauses: vec![],
+                    multi_table_else_clause: None,
+                }))
+            }
+            SyntaxKind::UpdateStmt => {
+                let from = node
+                    .child(SyntaxKind::FromClause)
+                    .map(|f| {
+                        f.nodes()
+                            .map(|item| self.table_with_joins(item))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()?
+                    .map(ast::UpdateTableFromKind::AfterSet);
+                Ok(Statement::Update(ast::Update {
+                    update_token: self.attached(tokens[0]),
+                    optimizer_hints: vec![],
+                    table: TableWithJoins {
+                        relation: plain_table(table_name, alias),
+                        joins: vec![],
+                    },
+                    assignments: self.assignments(
+                        node.child(SyntaxKind::SetClause)
+                            .ok_or_else(|| Unsupported("SET".into()))?,
+                    )?,
+                    from,
+                    selection,
+                    returning,
+                    output: None,
+                    or: None,
+                    order_by: vec![],
+                    limit: None,
+                }))
+            }
+            _ => {
+                let using = node
+                    .child(SyntaxKind::UsingClause)
+                    .map(|u| {
+                        u.nodes()
+                            .map(|item| self.table_with_joins(item))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .transpose()?;
+                Ok(Statement::Delete(ast::Delete {
+                    delete_token: self.attached(tokens[0]),
+                    optimizer_hints: vec![],
+                    tables: vec![],
+                    from: ast::FromTable::WithFromKeyword(vec![TableWithJoins {
+                        relation: plain_table(table_name, alias),
+                        joins: vec![],
+                    }]),
+                    using,
+                    selection,
+                    returning,
+                    output: None,
+                    order_by: vec![],
+                    limit: None,
+                }))
+            }
+        }
+    }
+
+    fn assignments(&self, set: &SyntaxNode) -> Result<Vec<ast::Assignment>> {
+        set.nodes()
+            .map(|a| {
+                let mut parts = a.nodes();
+                let target = parts
+                    .next()
+                    .ok_or_else(|| Unsupported("SET target".into()))?;
+                let value = parts
+                    .next()
+                    .ok_or_else(|| Unsupported("SET value".into()))?;
+                let target = if target.kind == SyntaxKind::ColumnList {
+                    ast::AssignmentTarget::Tuple(
+                        self.column_list(target)?
+                            .into_iter()
+                            .map(|i| object_name(vec![i]))
+                            .collect(),
+                    )
+                } else {
+                    ast::AssignmentTarget::ColumnName(object_name(self.name_parts(target)?))
+                };
+                Ok(ast::Assignment {
+                    target,
+                    value: self.expr(value)?,
+                })
+            })
+            .collect()
+    }
+
+    fn on_conflict(&self, node: &SyntaxNode) -> Result<ast::OnInsert> {
+        let conflict_target = match node.child(SyntaxKind::ConflictTarget) {
+            None => None,
+            Some(t) if self.has_kw(t, "constraint") => {
+                Some(ast::ConflictTarget::OnConstraint(object_name(
+                    self.name_parts(
+                        t.child(SyntaxKind::Name)
+                            .ok_or_else(|| Unsupported("constraint".into()))?,
+                    )?,
+                )))
+            }
+            Some(t) => {
+                if t.child(SyntaxKind::WhereClause).is_some() {
+                    return unsupported("ON CONFLICT (...) WHERE");
+                }
+                let mut columns = vec![];
+                for e in t.nodes() {
+                    let Expr::Identifier(ident) = self.expr(e)? else {
+                        return unsupported("ON CONFLICT on an expression");
+                    };
+                    columns.push(ident);
+                }
+                Some(ast::ConflictTarget::Columns(columns))
+            }
+        };
+        let action_node = node
+            .child(SyntaxKind::ConflictAction)
+            .ok_or_else(|| Unsupported("ON CONFLICT".into()))?;
+        let action = if self.has_kw(action_node, "nothing") {
+            ast::OnConflictAction::DoNothing
+        } else {
+            ast::OnConflictAction::DoUpdate(ast::DoUpdate {
+                assignments: self.assignments(
+                    action_node
+                        .child(SyntaxKind::SetClause)
+                        .ok_or_else(|| Unsupported("SET".into()))?,
+                )?,
+                selection: action_node
+                    .child(SyntaxKind::WhereClause)
+                    .map(|w| self.expr(expr_child(w)?))
+                    .transpose()?,
+            })
+        };
+        Ok(ast::OnInsert::OnConflict(ast::OnConflict {
+            conflict_target,
+            action,
+        }))
     }
 
     fn select(&self, node: &SyntaxNode) -> Result<Select> {
@@ -966,6 +1224,8 @@ impl Lowering<'_> {
                 }
             }
             SyntaxKind::CaseExpr => self.case(node, &tokens, &children)?,
+            // sqlparser reads `DEFAULT` in VALUES and SET as an identifier.
+            SyntaxKind::DefaultExpr => Expr::Identifier(self.ident(tokens[0])?),
             SyntaxKind::ArrayExpr => Expr::Array(ast::Array {
                 elem: self.expr_list(node)?,
                 named: tokens.first().is_some_and(|t| self.is_kw(t, "array")),
@@ -1440,6 +1700,21 @@ fn unquote(text: &str, prefix: usize) -> String {
         .and_then(|s| s.strip_suffix('\''))
         .unwrap_or(inner);
     inner.replace("''", "'")
+}
+
+fn plain_table(name: ObjectName, alias: Option<TableAlias>) -> TableFactor {
+    TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        with_hints: vec![],
+        version: None,
+        with_ordinality: false,
+        partitions: vec![],
+        json_path: None,
+        sample: None,
+        index_hints: vec![],
+    }
 }
 
 fn object_name(parts: Vec<Ident>) -> ObjectName {

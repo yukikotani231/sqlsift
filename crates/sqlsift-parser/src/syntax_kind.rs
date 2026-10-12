@@ -64,6 +64,27 @@ pub enum SyntaxKind {
     SetOperation,
     /// A parenthesized query as an operand of a set operation
     ParenSelect,
+    /// `INSERT INTO t [AS a] [(cols)] {VALUES ... | query | DEFAULT VALUES} [ON CONFLICT]
+    /// [RETURNING]`
+    InsertStmt,
+    /// `UPDATE t [AS a] SET ... [FROM] [WHERE] [RETURNING]`
+    UpdateStmt,
+    /// `DELETE FROM t [AS a] [USING] [WHERE] [RETURNING]`
+    DeleteStmt,
+    /// `OVERRIDING SYSTEM VALUE` / `OVERRIDING USER VALUE`
+    OverridingClause,
+    /// `ON CONFLICT [target] DO NOTHING | DO UPDATE SET ... [WHERE]`
+    OnConflictClause,
+    /// `(cols) [WHERE]` or `ON CONSTRAINT name`
+    ConflictTarget,
+    /// `DO NOTHING` or `DO UPDATE SET ... [WHERE]`
+    ConflictAction,
+    /// `SET a = 1, (b, c) = (2, 3)`
+    SetClause,
+    Assignment,
+    /// `USING` in DELETE
+    UsingClause,
+    ReturningClause,
     /// `VALUES (...), (...)`
     ValuesClause,
     ValuesRow,
@@ -152,6 +173,8 @@ pub enum SyntaxKind {
     AtTimeZoneExpr,
     /// `(x).field`, `(x).*`
     FieldAccessExpr,
+    /// `DEFAULT` as a value in `VALUES` or `SET`
+    DefaultExpr,
     /// `x[i]`, `x[a:b]`
     SubscriptExpr,
     ExprList,

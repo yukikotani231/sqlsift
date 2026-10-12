@@ -296,6 +296,8 @@ fn atom(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         SyntaxKind::Ident => {
             if p.at_any_kw(&["true", "false", "null"]) {
                 Some(single(p, SyntaxKind::Literal))
+            } else if p.at_kw("default") {
+                Some(single(p, SyntaxKind::DefaultExpr))
             } else if p.at_kw("case") {
                 Some(case(p))
             } else if p.at_kw("cast") && p.nth(1) == SyntaxKind::LParen {

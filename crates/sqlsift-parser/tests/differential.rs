@@ -73,6 +73,16 @@ fn select_subset_matches_sqlparser() {
          CURRENT_USER, EXTRACT(YEAR FROM d), x COLLATE \"C\", t AT TIME ZONE 'UTC', \
          E'a\\nb', B'101', X'1f', U&'d' FROM t LIMIT ALL",
         "SELECT a FROM t WHERE b LIKE 'x!%' ESCAPE '!' AND c @@ d",
+        "INSERT INTO s.t AS x (a, b) VALUES (1, DEFAULT), ($1, 2) \
+         ON CONFLICT (a) DO UPDATE SET b = EXCLUDED.b WHERE x.b IS NULL RETURNING *",
+        "INSERT INTO t (a) SELECT a FROM u ON CONFLICT ON CONSTRAINT c DO NOTHING",
+        "INSERT INTO t DEFAULT VALUES RETURNING id AS new_id",
+        "UPDATE t AS x SET a = 1, (b, c) = (2, 3), d = DEFAULT FROM u, v \
+         WHERE x.id = u.id RETURNING a",
+        "UPDATE t SET (a, b) = (SELECT 1, 2)",
+        "DELETE FROM t x USING u WHERE x.id = u.id RETURNING x.a AS y",
+        "WITH d AS (DELETE FROM t RETURNING id) INSERT INTO u SELECT id FROM d",
+        "WITH n AS (INSERT INTO t (a) VALUES (1) RETURNING a) UPDATE u SET a = n.a FROM n",
     ] {
         assert_same(sql);
     }

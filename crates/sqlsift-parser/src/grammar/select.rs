@@ -12,6 +12,11 @@ pub(crate) fn select_stmt(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     if p.at_kw("with") {
         with_clause(p);
+        // `WITH ... INSERT / UPDATE / DELETE`
+        if super::dml::at_dml_start(p) {
+            super::dml::dml_stmt(p);
+            return m.complete(p, SyntaxKind::SelectStmt);
+        }
     }
     set_expr(p, 0);
     if p.at_kw("order") {
@@ -134,8 +139,9 @@ fn with_clause(p: &mut Parser<'_>) {
             p.bump();
             if at_query_start(p) {
                 select_stmt(p);
+            } else if super::dml::at_dml_start(p) {
+                super::dml::dml_stmt(p);
             } else {
-                // Data-modifying statements come with INSERT / UPDATE / DELETE.
                 p.error("expected a query");
             }
             close_paren(p);
@@ -202,7 +208,7 @@ fn simple_select(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, SyntaxKind::SimpleSelect)
 }
 
-fn required_expr(p: &mut Parser<'_>) {
+pub(crate) fn required_expr(p: &mut Parser<'_>) {
     if expr(p).is_none() {
         p.error("expected an expression");
     }
@@ -264,7 +270,7 @@ fn at_target_list_end(p: &mut Parser<'_>) -> bool {
         ])
 }
 
-fn target_list(p: &mut Parser<'_>) {
+pub(crate) fn target_list(p: &mut Parser<'_>) {
     let m = p.start();
     // PostgreSQL allows an empty target list (`SELECT FROM t`).
     if !at_target_list_end(p) {
@@ -331,7 +337,7 @@ fn from_clause(p: &mut Parser<'_>) {
 }
 
 /// A FROM item with its joins.
-fn from_item(p: &mut Parser<'_>) {
+pub(crate) fn from_item(p: &mut Parser<'_>) {
     let Some(mut lhs) = from_primary(p) else {
         return;
     };
@@ -431,7 +437,7 @@ fn from_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 }
 
 /// `[AS] alias [(col, ...)]`
-fn table_alias(p: &mut Parser<'_>) {
+pub(crate) fn table_alias(p: &mut Parser<'_>) {
     let has_as = p.at_kw("as");
     let n = usize::from(has_as);
     if !(nth_is_col_id(p, n) || (has_as && p.nth(n) == SyntaxKind::Ident)) {
