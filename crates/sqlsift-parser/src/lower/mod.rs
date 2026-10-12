@@ -25,6 +25,8 @@ use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan};
 
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
+mod ddl;
+
 /// Function names sqlparser parses as special forms (`TRIM(x FROM y)`, `CEIL(x TO DAY)`,
 /// geometric literals, ...) rather than as function calls.
 const SPECIAL_FUNCTIONS: &[&str] = &[
@@ -107,6 +109,7 @@ pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
     match node.kind {
         SyntaxKind::SelectStmt => Ok(Statement::Query(Box::new(cx.query(node)?))),
         SyntaxKind::InsertStmt | SyntaxKind::UpdateStmt | SyntaxKind::DeleteStmt => cx.dml(node),
+        SyntaxKind::CreateTableStmt => cx.create_table(node),
         SyntaxKind::OpaqueStmt => unsupported("statement"),
         kind => unsupported(format!("{kind:?}")),
     }
@@ -1630,21 +1633,28 @@ impl Lowering<'_> {
         range: TextRange,
         f: impl FnOnce(&mut sqlparser::parser::Parser<'_>) -> std::result::Result<T, ParserError>,
     ) -> Result<T> {
-        let start = range.start as usize;
-        let mut text: String = self.source[..start]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect();
-        text.push_str(&self.source[range.to_range()]);
+        let text = &self.source[range.to_range()];
+        let fail = |e: ParserError| Unsupported(format!("{text}: {e}"));
         let dialect = PostgreSqlDialect {};
-        sqlparser::parser::Parser::new(&dialect)
-            .try_with_sql(&text)
-            .and_then(|mut p| {
-                let value = f(&mut p)?;
-                p.expect_token(&Token::EOF)?;
-                Ok(value)
-            })
-            .map_err(|e| Unsupported(format!("{}: {e}", &self.source[range.to_range()])))
+        let mut tokens = sqlparser::tokenizer::Tokenizer::new(&dialect, text)
+            .tokenize_with_location()
+            .map_err(|e| fail(e.into()))?;
+        // The leaf's tokens, moved to where the leaf is in the statement.
+        let origin = self.lines.location(range.start);
+        let shift = |l: &mut Location| {
+            if l.line == 1 {
+                l.column += origin.column - 1;
+            }
+            l.line += origin.line - 1;
+        };
+        for token in &mut tokens {
+            shift(&mut token.span.start);
+            shift(&mut token.span.end);
+        }
+        let mut p = sqlparser::parser::Parser::new(&dialect).with_tokens_with_locations(tokens);
+        let value = f(&mut p).map_err(fail)?;
+        p.expect_token(&Token::EOF).map_err(fail)?;
+        Ok(value)
     }
 
     /// `(x).a.b`, `a[1][2:3]`, `t.a[1]`: one access chain on the innermost value.

@@ -84,6 +84,11 @@ impl<'t> Parser<'t> {
         self.pos >= self.tokens.len()
     }
 
+    /// Whether the input ends before the n-th token ahead.
+    pub(crate) fn nth_at_end(&self, n: usize) -> bool {
+        self.pos + n >= self.tokens.len()
+    }
+
     pub(crate) fn at(&mut self, kind: SyntaxKind) -> bool {
         !self.at_end() && self.current() == kind
     }
@@ -204,6 +209,18 @@ impl Marker {
         CompletedMarker {
             pos: self.pos,
             kind,
+        }
+    }
+}
+
+impl Marker {
+    /// Drops the node (not its tokens, which go to the parent).
+    pub(crate) fn abandon(mut self, p: &mut Parser<'_>) {
+        self.done = true;
+        if self.pos + 1 == p.events.len() {
+            p.events.pop();
+        } else {
+            p.events[self.pos] = Event::Tombstone;
         }
     }
 }

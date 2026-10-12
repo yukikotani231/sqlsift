@@ -2,6 +2,7 @@
 //! constructs it covers. Anything else is an `OpaqueStmt` (a statement it doesn't know) or
 //! an `Error` node (a statement it knows that went wrong).
 
+mod ddl;
 mod dml;
 mod expr;
 mod select;
@@ -190,6 +191,8 @@ fn statement(p: &mut Parser<'_>) {
         select_stmt(p);
     } else if dml::at_dml_start(p) {
         dml::dml_stmt(p);
+    } else if ddl::at_ddl_start(p) {
+        ddl::ddl_stmt(p);
     } else {
         let m = p.start();
         skip_to_semicolon(p);

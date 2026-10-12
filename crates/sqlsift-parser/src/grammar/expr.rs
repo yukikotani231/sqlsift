@@ -65,6 +65,12 @@ pub(crate) fn expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     expr_bp(p, 0)
 }
 
+/// `b_expr` in `gram.y` (for `DEFAULT x`), loosely: an expression without `IS`, `AND`,
+/// `OR` and `NOT`, so `DEFAULT 0 NOT NULL` ends before `NOT`.
+pub(crate) fn b_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    expr_bp(p, IS)
+}
+
 fn expr_bp(p: &mut Parser<'_>, min: u8) -> Option<CompletedMarker> {
     let mut lhs = prefix(p)?;
     while let Some((prec, infix)) = infix_op(p) {

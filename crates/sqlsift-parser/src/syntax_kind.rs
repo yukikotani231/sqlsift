@@ -113,6 +113,33 @@ pub enum SyntaxKind {
     /// `FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE [OF t, ...] [NOWAIT | SKIP LOCKED]`
     LockingClause,
     OffsetClause,
+    /// `CREATE [TEMP] TABLE ...`, including `CREATE TABLE ... AS`
+    CreateTableStmt,
+    /// The parenthesized column definitions and constraints of `CREATE TABLE`
+    TableElements,
+    ColumnDef,
+    /// A constraint in a column definition (`NOT NULL`, `DEFAULT x`, `REFERENCES t`, ...),
+    /// or its `COLLATE`
+    ColumnConstraint,
+    TableConstraint,
+    /// `LIKE other [INCLUDING ...]` among the table elements
+    TableLikeClause,
+    /// A table option after the elements (`INHERITS (...)`, `PARTITION BY ...`,
+    /// `WITH (...)`, `ON COMMIT ...`, ...), or `WITH [NO] DATA` after `AS query`
+    TableOption,
+    /// `(START WITH 1 ...)` after `AS IDENTITY`, kept as tokens
+    SequenceOptions,
+    /// `INCLUDE (...)`, `WITH (...)`, `USING INDEX TABLESPACE x` of a unique or primary key
+    IndexParams,
+    ReferencesClause,
+    /// `MATCH FULL / PARTIAL / SIMPLE`
+    MatchClause,
+    /// `ON DELETE / UPDATE action`
+    ReferentialAction,
+    /// `[NOT] DEFERRABLE`, `INITIALLY ...`, `NOT VALID`, `NO INHERIT`
+    ConstraintAttribute,
+    /// The rest of an `EXCLUDE` constraint, kept as tokens
+    ExcludeBody,
     /// A dotted name (`schema.table`, `t.col`, `t.*`)
     Name,
     ColumnList,
