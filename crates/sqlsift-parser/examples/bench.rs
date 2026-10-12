@@ -38,6 +38,15 @@ fn main() {
         }
     }
     let theirs = t.elapsed().as_secs_f64() / f64::from(reps);
+    // sqlparser's AST converted to the analyzer's, as sqlsift reads it without this parser
+    let t = Instant::now();
+    for _ in 0..reps {
+        for s in &stmts {
+            let parsed = sqlparser::parser::Parser::parse_sql(&PostgreSqlDialect {}, s).unwrap();
+            std::hint::black_box(sqlsift_ast::from_sqlparser::statement(&parsed[0]));
+        }
+    }
+    let converted = t.elapsed().as_secs_f64() / f64::from(reps);
     // One arena, reset before each statement, as the analyzer does per file.
     let mut arena = Arena::new();
     let t = Instant::now();
@@ -63,6 +72,11 @@ fn main() {
         "sqlparser       {:7.1} ms  {:6.1} MB/s",
         theirs * 1e3,
         mb / theirs
+    );
+    println!(
+        "sqlparser + conversion {:7.1} ms  {:6.1} MB/s",
+        converted * 1e3,
+        mb / converted
     );
     println!(
         "ours (tree)     {:7.1} ms  {:6.1} MB/s",
