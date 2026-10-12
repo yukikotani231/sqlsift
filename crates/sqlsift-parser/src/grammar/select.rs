@@ -54,9 +54,7 @@ fn locking_clause(p: &mut Parser<'_>) {
     if p.eat_kw("no") {
         p.expect_kw("key");
         p.expect_kw("update");
-    } else if p.eat_kw("key") {
-        p.expect_kw("share");
-    } else if !p.eat_kw("update") {
+    } else if p.eat_kw("key") || !p.eat_kw("update") {
         p.expect_kw("share");
     }
     if p.eat_kw("of") {
