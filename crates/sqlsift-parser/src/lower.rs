@@ -6,6 +6,10 @@
 //! [`Unsupported`], never a guess, so a statement either lowers to exactly what sqlparser
 //! would produce or not at all. The differential test checks that.
 
+// `|p| p.parse_value()` can't be a method path here: the path would fix the parser's
+// lifetime, and `with_sqlparser` creates the parser itself.
+#![allow(clippy::redundant_closure_for_method_calls)]
+
 use sqlparser::ast::{
     self, BinaryOperator, CaseWhen, CastKind, Cte, CteAsMaterialized, Distinct, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
@@ -16,6 +20,7 @@ use sqlparser::ast::{
     ValueWithSpan, WildcardAdditionalOptions, With,
 };
 use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan};
 
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
@@ -171,10 +176,10 @@ impl Lowering<'_> {
             match child.kind {
                 SyntaxKind::OrderByClause => order_by = Some(self.order_by(child)?),
                 SyntaxKind::LimitClause => {
-                    if child.tokens().any(|t| self.is_kw(t, "all")) {
-                        return unsupported("LIMIT ALL");
+                    // `LIMIT ALL` is no limit.
+                    if !child.tokens().any(|t| self.is_kw(t, "all")) {
+                        limit = Some(self.expr(expr_child(child)?)?);
                     }
-                    limit = Some(self.expr(expr_child(child)?)?);
                 }
                 SyntaxKind::OffsetClause => {
                     let rows = if self.has_kw(child, "rows") {
@@ -762,7 +767,19 @@ impl Lowering<'_> {
                     && name.tokens().all(|t| t.kind == SyntaxKind::Ident)
                     && crate::grammar::is_value_keyword(first)
                 {
-                    return unsupported(first.to_ascii_uppercase());
+                    if first.eq_ignore_ascii_case("system_user") {
+                        return unsupported("SYSTEM_USER");
+                    }
+                    return Ok(Expr::Function(Function {
+                        name: object_name(self.name_parts(name)?),
+                        uses_odbc_syntax: false,
+                        parameters: FunctionArguments::None,
+                        args: FunctionArguments::None,
+                        filter: None,
+                        null_treatment: None,
+                        over: None,
+                        within_group: vec![],
+                    }));
                 }
                 let mut parts = self.name_parts(name)?;
                 if parts.len() == 1 {
@@ -895,17 +912,18 @@ impl Lowering<'_> {
                 }
             }
             SyntaxKind::LikeExpr => {
-                if children.len() > 2 {
-                    return unsupported("ESCAPE");
-                }
                 let expr = Box::new(self.expr(child(0)?)?);
                 let pattern = Box::new(self.expr(child(1)?)?);
+                let escape_char = children
+                    .get(2)
+                    .map(|e| self.expr(e).map(Box::new))
+                    .transpose()?;
                 if tokens.iter().any(|t| self.is_kw(t, "similar")) {
                     Expr::SimilarTo {
                         negated,
                         expr,
                         pattern,
-                        escape_char: None,
+                        escape_char: escape_char.clone(),
                     }
                 } else if tokens.iter().any(|t| self.is_kw(t, "ilike")) {
                     Expr::ILike {
@@ -913,7 +931,7 @@ impl Lowering<'_> {
                         any: false,
                         expr,
                         pattern,
-                        escape_char: None,
+                        escape_char: escape_char.clone(),
                     }
                 } else {
                     Expr::Like {
@@ -921,7 +939,7 @@ impl Lowering<'_> {
                         any: false,
                         expr,
                         pattern,
-                        escape_char: None,
+                        escape_char: escape_char.clone(),
                     }
                 }
             }
@@ -948,6 +966,70 @@ impl Lowering<'_> {
                 }
             }
             SyntaxKind::CaseExpr => self.case(node, &tokens, &children)?,
+            SyntaxKind::ArrayExpr => Expr::Array(ast::Array {
+                elem: self.expr_list(node)?,
+                named: tokens.first().is_some_and(|t| self.is_kw(t, "array")),
+            }),
+            SyntaxKind::ArraySubquery => Expr::Function(Function {
+                name: object_name(vec![self.ident(tokens[0])?]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::Subquery(Box::new(self.query(child_query(node)?)?)),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
+            SyntaxKind::TypedLiteral => {
+                let type_node = child(0)?;
+                let literal = child(1)?;
+                if children.len() > 2 || !tokens.is_empty() {
+                    return unsupported("interval fields");
+                }
+                let value = self.literal(
+                    literal
+                        .tokens()
+                        .next()
+                        .ok_or_else(|| Unsupported("literal".into()))?,
+                )?;
+                if type_node.text(self.source).starts_with('_') {
+                    // `_int4 '{1}'` (an array type in PostgreSQL); sqlparser reads a MySQL
+                    // charset introducer.
+                    return unsupported("typed literal of a type starting with _");
+                }
+                if type_node.text(self.source).eq_ignore_ascii_case("interval") {
+                    Expr::Interval(ast::Interval {
+                        value: Box::new(Expr::Value(value)),
+                        leading_field: None,
+                        leading_precision: None,
+                        last_field: None,
+                        fractional_seconds_precision: None,
+                    })
+                } else {
+                    Expr::TypedString(ast::TypedString {
+                        data_type: self.data_type(type_node)?,
+                        value,
+                        uses_odbc_syntax: false,
+                    })
+                }
+            }
+            SyntaxKind::ExtractExpr => {
+                let field = tokens.get(2).ok_or_else(|| Unsupported("EXTRACT".into()))?;
+                Expr::Extract {
+                    field: self.with_sqlparser(field.range, |p| p.parse_date_time_field())?,
+                    syntax: ast::ExtractSyntax::From,
+                    expr: Box::new(self.expr(child(0)?)?),
+                }
+            }
+            SyntaxKind::CollateExpr => Expr::Collate {
+                expr: Box::new(self.expr(child(0)?)?),
+                collation: object_name(self.name_parts(child(1)?)?),
+            },
+            SyntaxKind::AtTimeZoneExpr => Expr::AtTimeZone {
+                timestamp: Box::new(self.expr(child(0)?)?),
+                time_zone: Box::new(self.expr(child(1)?)?),
+            },
+            SyntaxKind::FieldAccessExpr | SyntaxKind::SubscriptExpr => self.field_access(node)?,
             SyntaxKind::FuncCall => self.function(node)?,
             kind => return unsupported(format!("{kind:?}")),
         })
@@ -1203,6 +1285,7 @@ impl Lowering<'_> {
             "<<" => BinaryOperator::PGBitwiseShiftLeft,
             ">>" => BinaryOperator::PGBitwiseShiftRight,
             "&&" => BinaryOperator::PGOverlap,
+            "@@" => BinaryOperator::AtAt,
             other => return unsupported(format!("operator {other}")),
         })
     }
@@ -1213,9 +1296,6 @@ impl Lowering<'_> {
             SyntaxKind::Number => Value::Number(text.to_string(), false),
             SyntaxKind::String => Value::SingleQuotedString(unquote(text, 0)),
             SyntaxKind::NationalString => Value::NationalStringLiteral(unquote(text, 1)),
-            SyntaxKind::EscapeString if !text.contains('\\') => {
-                Value::EscapedStringLiteral(unquote(text, 1))
-            }
             SyntaxKind::DollarString => {
                 let tag_end = text[1..].find('$').map_or(1, |i| i + 2);
                 let tag = &text[1..tag_end - 1];
@@ -1227,6 +1307,12 @@ impl Lowering<'_> {
             SyntaxKind::Ident if text.eq_ignore_ascii_case("true") => Value::Boolean(true),
             SyntaxKind::Ident if text.eq_ignore_ascii_case("false") => Value::Boolean(false),
             SyntaxKind::Ident if text.eq_ignore_ascii_case("null") => Value::Null,
+            SyntaxKind::EscapeString
+            | SyntaxKind::BitString
+            | SyntaxKind::HexString
+            | SyntaxKind::UnicodeString => {
+                return self.with_sqlparser(token.range, |p| p.parse_value());
+            }
             kind => return unsupported(format!("{kind:?} literal")),
         };
         Ok(ValueWithSpan {
@@ -1235,24 +1321,113 @@ impl Lowering<'_> {
         })
     }
 
-    /// Type names are leaves for the analyzer: sqlparser parses the text of the node. The
-    /// text before it is blanked out (same lines and character counts), so the spans in the
-    /// result are the same as in the whole statement.
+    /// Type names are leaves for the analyzer: sqlparser parses the text of the node.
     fn data_type(&self, node: &SyntaxNode) -> Result<ast::DataType> {
-        let start = node.range.start as usize;
+        self.with_sqlparser(node.range, |p| p.parse_data_type())
+    }
+
+    /// Runs a sqlparser parse function on the text of `range` (a leaf such as a type name or
+    /// an `EXTRACT` field), which must consume it all. The text before it is blanked out
+    /// (same lines and character counts), so the spans in the result are the same as in
+    /// the whole statement.
+    fn with_sqlparser<T>(
+        &self,
+        range: TextRange,
+        f: impl FnOnce(&mut sqlparser::parser::Parser<'_>) -> std::result::Result<T, ParserError>,
+    ) -> Result<T> {
+        let start = range.start as usize;
         let mut text: String = self.source[..start]
             .chars()
             .map(|c| if c == '\n' { '\n' } else { ' ' })
             .collect();
-        text.push_str(node.text(self.source));
-        sqlparser::parser::Parser::new(&PostgreSqlDialect {})
+        text.push_str(&self.source[range.to_range()]);
+        let dialect = PostgreSqlDialect {};
+        sqlparser::parser::Parser::new(&dialect)
             .try_with_sql(&text)
             .and_then(|mut p| {
-                let data_type = p.parse_data_type()?;
+                let value = f(&mut p)?;
                 p.expect_token(&Token::EOF)?;
-                Ok(data_type)
+                Ok(value)
             })
-            .map_err(|e| Unsupported(format!("type: {e}")))
+            .map_err(|e| Unsupported(format!("{}: {e}", &self.source[range.to_range()])))
+    }
+
+    /// `(x).a.b`, `a[1][2:3]`, `t.a[1]`: one access chain on the innermost value.
+    fn field_access(&self, node: &SyntaxNode) -> Result<Expr> {
+        let mut chain = vec![];
+        let mut current = node;
+        loop {
+            match current.kind {
+                SyntaxKind::FieldAccessExpr => {
+                    let field = current
+                        .tokens()
+                        .last()
+                        .ok_or_else(|| Unsupported("field".into()))?;
+                    if field.kind == SyntaxKind::Operator {
+                        return unsupported("(x).*");
+                    }
+                    chain.push(ast::AccessExpr::Dot(Expr::Identifier(self.ident(field)?)));
+                }
+                SyntaxKind::SubscriptExpr => {
+                    chain.push(ast::AccessExpr::Subscript(self.subscript(current)?));
+                }
+                _ => break,
+            }
+            current = current
+                .nodes()
+                .next()
+                .ok_or_else(|| Unsupported("access".into()))?;
+        }
+        chain.reverse();
+        // `t.a[1]`: sqlparser keeps the first name as the root and the rest as fields.
+        if current.kind == SyntaxKind::ColumnRef {
+            if let Some(name) = current.child(SyntaxKind::Name) {
+                let mut parts = self.name_parts(name)?;
+                if parts.len() > 1 {
+                    let rest: Vec<_> = parts
+                        .drain(1..)
+                        .map(|i| ast::AccessExpr::Dot(Expr::Identifier(i)))
+                        .collect();
+                    chain.splice(0..0, rest);
+                    return Ok(Expr::CompoundFieldAccess {
+                        root: Box::new(Expr::Identifier(parts.remove(0))),
+                        access_chain: chain,
+                    });
+                }
+            }
+        }
+        Ok(Expr::CompoundFieldAccess {
+            root: Box::new(self.expr(current)?),
+            access_chain: chain,
+        })
+    }
+
+    fn subscript(&self, node: &SyntaxNode) -> Result<ast::Subscript> {
+        let colon = node.tokens().find(|t| t.kind == SyntaxKind::Colon);
+        let mut bounds = node.nodes().skip(1);
+        let Some(colon) = colon else {
+            let index = bounds
+                .next()
+                .ok_or_else(|| Unsupported("subscript".into()))?;
+            return Ok(ast::Subscript::Index {
+                index: self.expr(index)?,
+            });
+        };
+        let mut lower_bound = None;
+        let mut upper_bound = None;
+        for bound in bounds {
+            let expr = self.expr(bound)?;
+            if bound.range.start < colon.range.start {
+                lower_bound = Some(expr);
+            } else {
+                upper_bound = Some(expr);
+            }
+        }
+        Ok(ast::Subscript::Slice {
+            lower_bound,
+            upper_bound,
+            stride: None,
+        })
     }
 }
 

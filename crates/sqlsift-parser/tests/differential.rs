@@ -67,6 +67,12 @@ fn select_subset_matches_sqlparser() {
         "SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g (n, i), \
          LATERAL f(g.n) AS y, LATERAL (SELECT 1) AS z",
         "SELECT a FROM t WHERE a = ANY($1) AND b <> ALL (SELECT 1) AND c = SOME($2)",
+        "SELECT (x).y, (x).y.z, a[1], a[1][2], a[1:2], a[:2], t.a[1], ARRAY[1, 2], \
+         ARRAY[[1], [2]], ARRAY(SELECT 1), DATE '2024-01-01', INTERVAL '1 day', \
+         timestamp with time zone '2024-01-01 00:00', CURRENT_DATE, current_timestamp(3), \
+         CURRENT_USER, EXTRACT(YEAR FROM d), x COLLATE \"C\", t AT TIME ZONE 'UTC', \
+         E'a\\nb', B'101', X'1f', U&'d' FROM t LIMIT ALL",
+        "SELECT a FROM t WHERE b LIKE 'x!%' ESCAPE '!' AND c @@ d",
     ] {
         assert_same(sql);
     }
@@ -79,6 +85,18 @@ fn postgres_wins_over_sqlparser() {
     // PostgreSQL: `a ISNULL` is `a IS NULL`. sqlparser reads ISNULL as a column alias.
     let sql = "SELECT a ISNULL FROM t";
     assert!(matches!(compare_statement(sql), Outcome::Different { .. }));
+    // PostgreSQL rejects these; sqlparser accepts some of them.
+    for sql in [
+        "SELECT CURRENT_DATE()",
+        "SELECT USER()",
+        "SELECT f(x).y FROM t",
+    ] {
+        let outcome = compare_statement(sql);
+        assert!(
+            matches!(outcome, Outcome::Unsupported(_) | Outcome::Neither),
+            "{sql}: {outcome:?}"
+        );
+    }
 }
 
 /// On the repository's own SQL files, no statement may lower to a different AST.

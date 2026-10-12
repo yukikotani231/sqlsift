@@ -138,6 +138,20 @@ pub enum SyntaxKind {
     WindowDef,
     /// A function in FROM: `generate_series(1, 3) [WITH ORDINALITY] [alias]`
     FuncTableRef,
+    /// `ARRAY[...]`, or `[...]` nested in one
+    ArrayExpr,
+    /// `ARRAY(SELECT ...)`
+    ArraySubquery,
+    /// `DATE '2024-01-01'`, `INTERVAL '1 day'`: a type name and a string
+    TypedLiteral,
+    /// `EXTRACT(field FROM x)`
+    ExtractExpr,
+    /// `x COLLATE name`
+    CollateExpr,
+    /// `x AT TIME ZONE y`
+    AtTimeZoneExpr,
+    /// `(x).field`, `(x).*`
+    FieldAccessExpr,
     /// `x[i]`, `x[a:b]`
     SubscriptExpr,
     ExprList,

@@ -66,6 +66,13 @@ fn main() {
                         first_difference(ours, theirs)
                     );
                 }
+                Outcome::OnlyOurs if verbose => {
+                    println!(
+                        "ONLY OURS {}:{line}\n{}\n",
+                        file.display(),
+                        stmt.text.trim()
+                    );
+                }
                 Outcome::SpansDiffer { ours, theirs } if verbose => {
                     println!(
                         "SPANS {}:{line}\n{}\n{}",

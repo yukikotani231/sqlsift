@@ -201,7 +201,10 @@ impl Marker {
             _ => unreachable!("marker does not point at a Start event"),
         }
         p.events.push(Event::Finish);
-        CompletedMarker { pos: self.pos }
+        CompletedMarker {
+            pos: self.pos,
+            kind,
+        }
     }
 }
 
@@ -217,6 +220,7 @@ impl Drop for Marker {
 #[derive(Clone, Copy)]
 pub(crate) struct CompletedMarker {
     pos: usize,
+    pub(crate) kind: SyntaxKind,
 }
 
 impl CompletedMarker {

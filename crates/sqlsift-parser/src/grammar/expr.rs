@@ -18,7 +18,10 @@ const OTHER_OP: u8 = 70;
 const PLUS: u8 = 80;
 const MUL: u8 = 90;
 const CARET: u8 = 100;
+const AT_TIME_ZONE: u8 = 110;
+const COLLATE: u8 = 120;
 const SUBSCRIPT: u8 = 130;
+const FIELD: u8 = 200;
 const CAST: u8 = 140;
 
 /// Reserved keywords that are values or expression forms rather than names.
@@ -52,6 +55,9 @@ enum Infix {
     Predicate,
     Cast,
     Subscript,
+    Collate,
+    AtTimeZone,
+    Field,
 }
 
 /// An expression. Returns `None`, consuming nothing, if there is none: the caller reports it.
@@ -63,6 +69,16 @@ fn expr_bp(p: &mut Parser<'_>, min: u8) -> Option<CompletedMarker> {
     let mut lhs = prefix(p)?;
     while let Some((prec, infix)) = infix_op(p) {
         if prec <= min {
+            break;
+        }
+        // Field selection only follows parentheses or another subscript / field
+        // (`(f(x)).a`, `a[1].b`); `f(x).a` is a syntax error in PostgreSQL.
+        if matches!(infix, Infix::Field)
+            && !matches!(
+                lhs.kind,
+                SyntaxKind::ParenExpr | SyntaxKind::SubscriptExpr | SyntaxKind::FieldAccessExpr
+            )
+        {
             break;
         }
         let m = lhs.precede(p);
@@ -83,6 +99,33 @@ fn expr_bp(p: &mut Parser<'_>, min: u8) -> Option<CompletedMarker> {
                 subscript_tail(p);
                 SyntaxKind::SubscriptExpr
             }
+            Infix::Collate => {
+                p.bump();
+                if matches!(p.current(), SyntaxKind::Ident | SyntaxKind::QuotedIdent) {
+                    name(p, false);
+                } else {
+                    p.error("expected a collation name");
+                }
+                SyntaxKind::CollateExpr
+            }
+            Infix::AtTimeZone => {
+                p.bump();
+                p.bump();
+                p.bump();
+                operand(p, AT_TIME_ZONE);
+                SyntaxKind::AtTimeZoneExpr
+            }
+            Infix::Field => {
+                p.bump();
+                if matches!(p.current(), SyntaxKind::Ident | SyntaxKind::QuotedIdent)
+                    || p.at_op("*")
+                {
+                    p.bump();
+                } else {
+                    p.error("expected a field name");
+                }
+                SyntaxKind::FieldAccessExpr
+            }
         };
         lhs = m.complete(p, kind);
     }
@@ -100,6 +143,7 @@ fn infix_op(p: &mut Parser<'_>) -> Option<(u8, Infix)> {
     match p.current() {
         SyntaxKind::DoubleColon => return Some((CAST, Infix::Cast)),
         SyntaxKind::LBracket => return Some((SUBSCRIPT, Infix::Subscript)),
+        SyntaxKind::Dot => return Some((FIELD, Infix::Field)),
         SyntaxKind::Operator => {
             let prec = match p.nth_text(0) {
                 "=" | "<" | ">" | "<=" | ">=" | "<>" | "!=" => CMP,
@@ -114,7 +158,11 @@ fn infix_op(p: &mut Parser<'_>) -> Option<(u8, Infix)> {
         SyntaxKind::Ident => {}
         _ => return None,
     }
-    if p.at_kw("or") {
+    if p.at_kw("collate") {
+        Some((COLLATE, Infix::Collate))
+    } else if p.at_kw("at") && p.nth_kw(1, "time") && p.nth_kw(2, "zone") {
+        Some((AT_TIME_ZONE, Infix::AtTimeZone))
+    } else if p.at_kw("or") {
         Some((OR, Infix::Binary))
     } else if p.at_kw("and") {
         Some((AND, Infix::Binary))
@@ -256,10 +304,46 @@ fn atom(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 Some(exists(p))
             } else if p.at_any_kw(&["any", "all", "some"]) && p.nth(1) == SyntaxKind::LParen {
                 Some(quantified(p))
-            } else if is_value_keyword(p.nth_text(0)) {
+            } else if p.at_kw("array") && p.nth(1) == SyntaxKind::LBracket {
+                Some(array(p))
+            } else if p.at_kw("array") && p.nth(1) == SyntaxKind::LParen {
                 let m = p.start();
-                name(p, false);
-                Some(m.complete(p, SyntaxKind::ColumnRef))
+                p.bump();
+                p.bump();
+                if at_query_start(p) {
+                    select_stmt(p);
+                } else {
+                    p.error("expected a query");
+                }
+                close_paren(p);
+                Some(m.complete(p, SyntaxKind::ArraySubquery))
+            } else if p.at_kw("extract") && p.nth(1) == SyntaxKind::LParen {
+                Some(extract(p))
+            } else if typed_literal_len(p).is_some() {
+                let m = p.start();
+                let interval = p.at_kw("interval");
+                type_name(p);
+                single(p, SyntaxKind::Literal);
+                if interval {
+                    interval_fields(p);
+                }
+                Some(m.complete(p, SyntaxKind::TypedLiteral))
+            } else if is_value_keyword(p.nth_text(0)) {
+                // Only the time functions take a precision: `current_timestamp(3)`.
+                if p.nth(1) == SyntaxKind::LParen
+                    && p.at_any_kw(&[
+                        "current_time",
+                        "current_timestamp",
+                        "localtime",
+                        "localtimestamp",
+                    ])
+                {
+                    Some(name_or_call(p))
+                } else {
+                    let m = p.start();
+                    name(p, false);
+                    Some(m.complete(p, SyntaxKind::ColumnRef))
+                }
             } else if is_reserved(p.nth_text(0)) {
                 None
             } else {
@@ -268,6 +352,88 @@ fn atom(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         }
         _ => None,
     }
+}
+
+/// Whether a typed literal starts here (`DATE '...'`, `timestamp with time zone '...'`),
+/// and if so how many tokens its type name has.
+fn typed_literal_len(p: &mut Parser<'_>) -> Option<usize> {
+    if p.current() != SyntaxKind::Ident || is_reserved(p.nth_text(0)) {
+        return None;
+    }
+    let mut n = 1;
+    if p.at_kw("double") && p.nth_kw(1, "precision") {
+        n = 2;
+    } else if (p.at_kw("timestamp") || p.at_kw("time"))
+        && (p.nth_kw(1, "with") || p.nth_kw(1, "without"))
+        && p.nth_kw(2, "time")
+        && p.nth_kw(3, "zone")
+    {
+        n = 4;
+    }
+    matches!(
+        p.nth(n),
+        SyntaxKind::String
+            | SyntaxKind::EscapeString
+            | SyntaxKind::UnicodeString
+            | SyntaxKind::DollarString
+    )
+    .then_some(n)
+}
+
+/// The fields after an interval literal: `'1' DAY`, `'1-2' YEAR TO MONTH`,
+/// `'1' SECOND(3)`.
+fn interval_fields(p: &mut Parser<'_>) {
+    const FIELDS: &[&str] = &["year", "month", "day", "hour", "minute", "second"];
+    if !p.at_any_kw(FIELDS) {
+        return;
+    }
+    p.bump();
+    if p.at_kw("to") && FIELDS.iter().any(|f| p.nth_kw(1, f)) {
+        p.bump();
+        p.bump();
+    }
+    if p.at(SyntaxKind::LParen) && p.nth(1) == SyntaxKind::Number {
+        p.bump();
+        p.bump();
+        p.expect(SyntaxKind::RParen, ")");
+    }
+}
+
+/// `ARRAY[a, b]`, `ARRAY[[1, 2], [3, 4]]`
+fn array(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.eat_kw("array");
+    p.bump(); // [
+    if !p.at(SyntaxKind::RBracket) {
+        loop {
+            if p.at(SyntaxKind::LBracket) {
+                array(p);
+            } else {
+                operand(p, 0);
+            }
+            if !p.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+    }
+    p.expect(SyntaxKind::RBracket, "]");
+    m.complete(p, SyntaxKind::ArrayExpr)
+}
+
+/// `EXTRACT(field FROM x)`
+fn extract(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump();
+    p.bump();
+    if matches!(p.current(), SyntaxKind::Ident | SyntaxKind::String) {
+        p.bump();
+    } else {
+        p.error("expected a field");
+    }
+    p.expect_kw("from");
+    operand(p, 0);
+    close_paren(p);
+    m.complete(p, SyntaxKind::ExtractExpr)
 }
 
 fn single(p: &mut Parser<'_>, kind: SyntaxKind) -> CompletedMarker {
