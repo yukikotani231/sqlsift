@@ -7,7 +7,7 @@
 //! value instead of truncating it (PostgreSQL, Redshift, MySQL in its default
 //! strict mode). Comparisons such as `WHERE age = 99999` are valid and not checked.
 
-use sqlparser::ast::{Expr, UnaryOperator, Value, ValueWithSpan};
+use sqlsift_ast::{Expr, UnaryOperator, Value, ValueWithSpan};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};

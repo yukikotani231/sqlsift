@@ -13,7 +13,7 @@
 //!   are reported in [`ranges`](super::ranges) (E0017)
 //! - CASE branch consistency, set operation column counts and types
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     AssignmentTarget, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
     Insert, Parens, SetExpr, Spanned, Value, ValueWithSpan,
 };
@@ -532,7 +532,7 @@ impl Resolver<'_> {
     pub(super) fn check_assignments(
         &mut self,
         table_def: &TableDef,
-        assignments: &[sqlparser::ast::Assignment],
+        assignments: &[sqlsift_ast::Assignment],
     ) {
         for assignment in assignments {
             let AssignmentTarget::ColumnName(name) = &assignment.target else {
@@ -680,9 +680,9 @@ impl Resolver<'_> {
 
     pub(super) fn infer_qualified_column(
         &self,
-        schema: Option<&sqlparser::ast::Ident>,
-        table: &sqlparser::ast::Ident,
-        column: &sqlparser::ast::Ident,
+        schema: Option<&sqlsift_ast::Ident>,
+        table: &sqlsift_ast::Ident,
+        column: &sqlsift_ast::Ident,
     ) -> ExpressionType {
         match self
             .scope
@@ -716,7 +716,7 @@ impl Resolver<'_> {
     }
 
     /// Infer the return type of a SQL function
-    fn infer_function_return_type(&self, func: &sqlparser::ast::Function) -> ExpressionType {
+    fn infer_function_return_type(&self, func: &sqlsift_ast::Function) -> ExpressionType {
         let func_name = func.name.to_string().to_uppercase();
         // Strip schema prefix (e.g., "PG_CATALOG.COUNT" → "COUNT")
         let name = func_name.rsplit('.').next().unwrap_or(&func_name);
@@ -813,7 +813,7 @@ impl Resolver<'_> {
     fn snowflake_function_type(
         &self,
         name: &str,
-        func: &sqlparser::ast::Function,
+        func: &sqlsift_ast::Function,
     ) -> Option<ExpressionType> {
         let args = unnamed_args(func);
         let known = |t: SqlType| Some(ExpressionType::Known(t));
@@ -922,7 +922,7 @@ impl Resolver<'_> {
     }
 
     /// Infer the type of the first argument to a function
-    fn infer_first_arg_type(&self, func: &sqlparser::ast::Function) -> ExpressionType {
+    fn infer_first_arg_type(&self, func: &sqlsift_ast::Function) -> ExpressionType {
         if let FunctionArguments::List(arg_list) = &func.args {
             if let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))) = arg_list.args.first() {
                 return self.infer_expr_type(expr);
@@ -950,7 +950,7 @@ impl Resolver<'_> {
 }
 
 /// A function's positional (unnamed) argument expressions
-fn unnamed_args(func: &sqlparser::ast::Function) -> Vec<&Expr> {
+fn unnamed_args(func: &sqlsift_ast::Function) -> Vec<&Expr> {
     let FunctionArguments::List(list) = &func.args else {
         return Vec::new();
     };
@@ -1106,6 +1106,7 @@ mod tests {
 
     /// Resolve and type check one statement
     fn check(catalog: &Catalog, stmt: &sqlparser::ast::Statement) -> Vec<Diagnostic> {
+        let stmt = &crate::convert::statement(stmt);
         let mut resolver = Resolver::new(catalog, SqlDialect::PostgreSQL);
         resolver.statement(stmt);
         resolver.into_diagnostics()

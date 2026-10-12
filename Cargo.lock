@@ -980,6 +980,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlsift-ast"
+version = "0.2.0"
+
+[[package]]
 name = "sqlsift-cli"
 version = "0.2.0"
 dependencies = [
@@ -1007,6 +1011,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlparser",
+ "sqlsift-ast",
  "sqlsift-parser",
  "thiserror",
  "tracing",

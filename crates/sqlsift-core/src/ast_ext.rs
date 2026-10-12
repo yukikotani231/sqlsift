@@ -5,7 +5,7 @@
 //! functions). The analyzer only needs the plain shapes; these helpers give them
 //! back in one place.
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     Expr, Ident, Insert, LimitClause, ObjectName, ObjectNamePart, OrderBy, OrderByExpr,
     OrderByKind, Query, TableObject,
 };

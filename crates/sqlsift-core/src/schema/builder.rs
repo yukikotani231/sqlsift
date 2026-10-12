@@ -1,14 +1,14 @@
 //! Schema builder - converts SQL AST to Catalog
 
-use sqlparser::ast::{
+use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
+use sqlsift_ast::{
     AlterColumnOperation, AlterTableOperation, AlterType, AlterTypeAddValuePosition,
     AlterTypeOperation, ColumnOption, ColumnOptionDef, CreateTableLikeKind, DataType, Expr, Ident,
     IndexColumn, ObjectName, ObjectType, Query, RenameTableNameKind, Set, SetExpr, Statement,
     TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
     ValueWithSpan,
 };
-use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
 use crate::ast_ext::{name_last, ObjectNamePartExt};
@@ -238,7 +238,7 @@ impl SchemaBuilder {
         match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
                 for stmt in statements {
-                    self.process_statement(&stmt);
+                    self.process_statement(&crate::convert::statement(&stmt));
                 }
             }
             Err(_) => {
@@ -289,7 +289,7 @@ impl SchemaBuilder {
                 self.line_offset = line - 1;
                 self.column_offset = column;
                 for stmt in stmts {
-                    self.process_statement(&stmt);
+                    self.process_statement(&crate::convert::statement(&stmt));
                 }
                 self.line_offset = 0;
                 self.column_offset = 1;
@@ -313,7 +313,9 @@ impl SchemaBuilder {
             let raw_stmt = &sql[range.clone()];
             match item.outcome {
                 // Locations are relative to `sql`
-                Outcome::Lowered(statement) => self.process_statement(&statement),
+                Outcome::Lowered(statement) => {
+                    self.process_statement(&crate::convert::statement(&statement));
+                }
                 Outcome::Unsupported(_) => self.parse_one(sql, raw_stmt),
                 Outcome::SyntaxError(error) => {
                     let message = error.message;
@@ -610,6 +612,7 @@ impl SchemaBuilder {
             return false;
         };
         for stmt in stmts {
+            let stmt = crate::convert::statement(&stmt);
             self.process_statement(&stmt);
             if let Statement::CreateTable(create) = &stmt {
                 if !parents.is_empty() {
@@ -893,7 +896,7 @@ impl SchemaBuilder {
 
     /// Record `CREATE UNIQUE INDEX` as a unique key of its table. A partial or
     /// expression index makes the table's unique keys unknown.
-    fn process_unique_index(&mut self, index: &sqlparser::ast::CreateIndex) {
+    fn process_unique_index(&mut self, index: &sqlsift_ast::CreateIndex) {
         let name = self.catalog.qualified_name(&index.table_name);
         let columns: Option<Vec<String>> = index
             .columns
@@ -934,7 +937,7 @@ impl SchemaBuilder {
     /// Where the node at `span` (of the statement being applied) is, for hints
     /// on what it renamed or dropped: `None` when neither the schema file nor
     /// the line is known
-    fn location(&self, span: sqlparser::tokenizer::Span) -> Option<SourceLocation> {
+    fn location(&self, span: sqlsift_ast::Span) -> Option<SourceLocation> {
         if !self.query_file && self.source_file.is_none() {
             return None;
         }
@@ -953,9 +956,7 @@ impl SchemaBuilder {
         self.location(
             name.0
                 .first()
-                .map_or(sqlparser::tokenizer::Span::empty(), |ident| {
-                    ident.ident().span
-                }),
+                .map_or(sqlsift_ast::Span::empty(), |ident| ident.ident().span),
         )
     }
 
@@ -981,7 +982,7 @@ impl SchemaBuilder {
     }
 
     /// Process CREATE TABLE statement
-    fn process_create_table(&mut self, create: &sqlparser::ast::CreateTable) {
+    fn process_create_table(&mut self, create: &sqlsift_ast::CreateTable) {
         self.catalog.note_database(&create.name);
         let name = self.catalog.qualified_name(&create.name);
         self.catalog.restore_relation(&name);
@@ -1015,8 +1016,8 @@ impl SchemaBuilder {
 
         // Process columns (Hive-format `PARTITIONED BY (c TYPE)` adds partition columns)
         let partition_columns = match &create.hive_distribution {
-            sqlparser::ast::HiveDistributionStyle::PARTITIONED { columns } => columns.as_slice(),
-            _ => &[],
+            sqlsift_ast::HiveDistributionStyle::PARTITIONED { columns } => columns.as_slice(),
+            sqlsift_ast::HiveDistributionStyle::NONE => &[],
         };
         for column in create.columns.iter().chain(partition_columns) {
             // `CREATE TABLE c (LIKE p)` parses as a column named LIKE of type `p`
@@ -1220,7 +1221,7 @@ impl SchemaBuilder {
     fn process_create_view(
         &mut self,
         qualified: QualifiedName,
-        columns: &[sqlparser::ast::ViewColumnDef],
+        columns: &[sqlsift_ast::ViewColumnDef],
         query: &Query,
         materialized: bool,
     ) {
@@ -1596,7 +1597,7 @@ fn build_column(
                 ..
             } => {
                 // IDENTITY columns (no generation expression = IDENTITY, not computed)
-                use sqlparser::ast::GeneratedAs;
+                use sqlsift_ast::GeneratedAs;
                 let kind = match generated_as {
                     GeneratedAs::Always => IdentityKind::Always,
                     GeneratedAs::ByDefault => IdentityKind::ByDefault,
@@ -1616,7 +1617,8 @@ fn build_column(
             // MySQL AUTO_INCREMENT / SQLite AUTOINCREMENT
             ColumnOption::DialectSpecific(tokens)
                 if tokens.iter().any(|t| {
-                    matches!(t, Token::Word(w) if w.value.eq_ignore_ascii_case("AUTO_INCREMENT") || w.value.eq_ignore_ascii_case("AUTOINCREMENT"))
+                    t.eq_ignore_ascii_case("AUTO_INCREMENT")
+                        || t.eq_ignore_ascii_case("AUTOINCREMENT")
                 }) =>
             {
                 col.nullable = false; // AUTO_INCREMENT/AUTOINCREMENT implies NOT NULL
@@ -1723,7 +1725,7 @@ fn apply_alter_column(col: &mut ColumnDef, op: &AlterColumnOperation, dialect: S
             col.data_type = SqlType::from_ast_in(data_type, dialect);
         }
         AlterColumnOperation::AddGenerated { generated_as, .. } => {
-            use sqlparser::ast::GeneratedAs;
+            use sqlsift_ast::GeneratedAs;
             col.identity = Some(match generated_as {
                 Some(GeneratedAs::Always) => IdentityKind::Always,
                 _ => IdentityKind::ByDefault,
@@ -1778,7 +1780,7 @@ const LIKE_COLUMN: &str = "_lk_";
 
 /// If `column` is the pseudo-column for `LIKE p` inside a CREATE TABLE column list
 /// (see [`LIKE_COLUMN`]), return the source table name
-fn like_pseudo_column(column: &sqlparser::ast::ColumnDef) -> Option<&ObjectName> {
+fn like_pseudo_column(column: &sqlsift_ast::ColumnDef) -> Option<&ObjectName> {
     if column.name.quote_style.is_some()
         || !(column.name.value.eq_ignore_ascii_case("LIKE") || column.name.value == LIKE_COLUMN)
         || !column.options.is_empty()
@@ -2286,13 +2288,13 @@ fn relocate_parser_message(message: &str, base: (usize, usize)) -> String {
 }
 
 /// Convert expression to DefaultValue
-fn expr_to_default(expr: &sqlparser::ast::Expr) -> DefaultValue {
+fn expr_to_default(expr: &sqlsift_ast::Expr) -> DefaultValue {
     match expr {
-        sqlparser::ast::Expr::Value(v) => match &v.value {
-            sqlparser::ast::Value::Null => DefaultValue::Null,
+        sqlsift_ast::Expr::Value(v) => match &v.value {
+            sqlsift_ast::Value::Null => DefaultValue::Null,
             _ => DefaultValue::Literal(v.to_string()),
         },
-        sqlparser::ast::Expr::Function(f) => {
+        sqlsift_ast::Expr::Function(f) => {
             let func_name = f.name.to_string().to_lowercase();
             if func_name.contains("now") || func_name.contains("current_timestamp") {
                 DefaultValue::CurrentTimestamp

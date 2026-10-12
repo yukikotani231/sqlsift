@@ -10,7 +10,7 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     Delete, Expr, FromTable, ObjectName, Query, SelectItem, SetExpr, Spanned, Statement,
     TableFactor, TableWithJoins, Visit, Visitor,
 };

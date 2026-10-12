@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident};
+use sqlsift_ast::{Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident};
 
 use crate::dialect::SqlDialect;
 use crate::error::Span;

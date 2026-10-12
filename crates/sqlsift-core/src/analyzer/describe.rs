@@ -3,7 +3,7 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, SetExpr, Statement, Visit, Visitor};
+use sqlsift_ast::{Expr, SetExpr, Statement, Visit, Visitor};
 
 use super::parameters::{placeholder_location, ParameterType};
 use super::scope::{Column, ExpressionType, UNNAMED_COLUMN};

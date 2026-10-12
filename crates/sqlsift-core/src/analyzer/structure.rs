@@ -16,7 +16,7 @@
 
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     Assignment, AssignmentTarget, Expr, Function, FunctionArguments, GroupByExpr, Ident, Insert,
     Parens, Query, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Value, ValueWithSpan,
     Visit, Visitor,
@@ -811,7 +811,7 @@ impl Resolver<'_> {
             return;
         };
         match &select.distinct {
-            Some(sqlparser::ast::Distinct::Distinct)
+            Some(sqlsift_ast::Distinct::Distinct)
                 if matches!(
                     self.dialect,
                     SqlDialect::PostgreSQL | SqlDialect::Redshift | SqlDialect::MySQL
@@ -854,7 +854,7 @@ impl Resolver<'_> {
                     self.diagnostics.push(diag);
                 }
             }
-            Some(sqlparser::ast::Distinct::On(on)) if self.dialect == SqlDialect::PostgreSQL => {
+            Some(sqlsift_ast::Distinct::On(on)) if self.dialect == SqlDialect::PostgreSQL => {
                 let Some(on_names) = on.iter().map(column_ref_name).collect::<Option<Vec<_>>>()
                 else {
                     return;

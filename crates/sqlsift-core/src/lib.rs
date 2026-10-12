@@ -9,6 +9,8 @@
 pub mod analyzer;
 mod ast_ext;
 pub mod baseline;
+#[allow(dead_code)]
+mod convert;
 pub mod dbt;
 pub mod dialect;
 pub mod embedded;

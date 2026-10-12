@@ -30,3 +30,9 @@ git_tag_name = "sqlsift-wasm-v{{ version }}"
 name = "sqlsift-parser"
 release = false
 git_tag_name = "sqlsift-parser-v{{ version }}"
+
+# The syntax tree both parsers produce for the analyzer (#257), not distributed.
+[[package]]
+name = "sqlsift-ast"
+release = false
+git_tag_name = "sqlsift-ast-v{{ version }}"

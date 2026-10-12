@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     BinaryOperator, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
     FunctionArguments, Select, SelectItem, Spanned, TableFactor, TableWithJoins, Visit, Visitor,
 };

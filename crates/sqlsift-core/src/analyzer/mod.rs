@@ -20,10 +20,10 @@ mod type_check;
 
 use std::ops::Range;
 
-use sqlparser::ast::{Spanned, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlsift_ast::{Spanned, Statement};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -543,11 +543,15 @@ impl<'a> Analyzer<'a> {
         // Parse the SQL
         let lines = LineIndex::new(text);
         let arena = syntax::Arena::new();
-        let (mut statements, mut skipped) = self.parse_statements(text, &lines, &arena);
-        // MySQL's INSERT ... SET, checked as INSERT ... VALUES
-        for (statement, _, _) in &mut statements {
-            mysql::insert_set_as_values(statement);
-        }
+        let (parsed, mut skipped) = self.parse_statements(text, &lines, &arena);
+        // MySQL's INSERT ... SET, checked as INSERT ... VALUES, then the analyzer's AST
+        let statements: Vec<(Statement, Origin, syntax::Syntax<'_>)> = parsed
+            .into_iter()
+            .map(|(mut statement, origin, syntax)| {
+                mysql::insert_set_as_values(&mut statement);
+                (crate::convert::statement(&statement), origin, syntax)
+            })
+            .collect();
         // Applied in source order, before the statements that follow them
         skipped.reverse();
 
@@ -896,7 +900,7 @@ impl<'a> Analyzer<'a> {
         sql: &str,
         range: Range<usize>,
         lines: &LineIndex,
-        statements: &mut Vec<(Statement, Origin, syntax::Syntax<'_>)>,
+        statements: &mut Vec<(sqlparser::ast::Statement, Origin, syntax::Syntax<'_>)>,
         skipped: &mut Vec<(Origin, SkippedDefinition)>,
         report_error: bool,
     ) {
@@ -1129,7 +1133,7 @@ fn explain_template_parse_error(d: &mut Diagnostic, template: &Template, not_mas
 /// each with the position where its text starts (and the tree of a statement the
 /// in-house parser read)
 type ParsedStatements<'t> = (
-    Vec<(Statement, Origin, syntax::Syntax<'t>)>,
+    Vec<(sqlparser::ast::Statement, Origin, syntax::Syntax<'t>)>,
     Vec<(Origin, SkippedDefinition)>,
 );
 
@@ -1293,7 +1297,7 @@ fn parse_error_diagnostic(
 pub(crate) fn query_output_columns(
     catalog: &Catalog,
     dialect: SqlDialect,
-    query: &sqlparser::ast::Query,
+    query: &sqlsift_ast::Query,
 ) -> Option<Vec<(String, crate::types::SqlType)>> {
     let mut resolver = Resolver::new(catalog, dialect);
     let columns = resolver.query(query, false)?;
