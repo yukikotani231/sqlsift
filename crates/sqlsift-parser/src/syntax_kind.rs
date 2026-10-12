@@ -64,6 +64,9 @@ pub enum SyntaxKind {
     SetOperation,
     /// A parenthesized query as an operand of a set operation
     ParenSelect,
+    /// `VALUES (...), (...)`
+    ValuesClause,
+    ValuesRow,
     WithClause,
     /// `name [(cols)] AS [[NOT] MATERIALIZED] (query)`
     Cte,
@@ -116,6 +119,25 @@ pub enum SyntaxKind {
     ElseClause,
     FuncCall,
     ArgList,
+    /// `ANY (...)`, `ALL (...)`, `SOME (...)` on the right of a comparison
+    QuantifiedExpr,
+    /// `WITHIN GROUP (ORDER BY ...)`
+    WithinGroupClause,
+    /// `FILTER (WHERE ...)`
+    FilterClause,
+    /// `OVER name` or `OVER (...)`
+    OverClause,
+    /// `([name] [PARTITION BY ...] [ORDER BY ...] [frame])`
+    WindowSpec,
+    PartitionByClause,
+    /// `ROWS / RANGE / GROUPS [BETWEEN] bound [AND bound] [EXCLUDE ...]`
+    FrameClause,
+    FrameBound,
+    /// `WINDOW name AS (...), ...`
+    WindowClause,
+    WindowDef,
+    /// A function in FROM: `generate_series(1, 3) [WITH ORDINALITY] [alias]`
+    FuncTableRef,
     /// `x[i]`, `x[a:b]`
     SubscriptExpr,
     ExprList,

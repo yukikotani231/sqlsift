@@ -55,6 +55,18 @@ fn select_subset_matches_sqlparser() {
         "(SELECT a FROM t ORDER BY a LIMIT 1) UNION DISTINCT (SELECT b FROM u)",
         "SELECT * FROM (WITH c AS (SELECT 1) SELECT * FROM c) s \
          WHERE x IN (SELECT 1 UNION SELECT 2)",
+        "VALUES (1, 'a'), (2, 'b')",
+        "SELECT * FROM (VALUES (1, 2)) AS v (a, b)",
+        "SELECT row_number() OVER (PARTITION BY a ORDER BY b DESC), \
+         sum(x) OVER (ORDER BY y ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), \
+         avg(x) OVER (RANGE 2 PRECEDING), lag(x) OVER w, \
+         count(*) FILTER (WHERE x > 1), \
+         percentile_cont(0.5) WITHIN GROUP (ORDER BY x), \
+         string_agg(DISTINCT x, ',' ORDER BY x) \
+         FROM t WINDOW w AS (PARTITION BY a)",
+        "SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g (n, i), \
+         LATERAL f(g.n) AS y, LATERAL (SELECT 1) AS z",
+        "SELECT a FROM t WHERE a = ANY($1) AND b <> ALL (SELECT 1) AND c = SOME($2)",
     ] {
         assert_same(sql);
     }

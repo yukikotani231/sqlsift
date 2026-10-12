@@ -1,7 +1,10 @@
 //! Expressions: a Pratt parser with PostgreSQL's operator precedence (the table in the
 //! "Operator Precedence" section of the manual, as sqlparser's PostgreSQL dialect has it).
 
-use super::{at_query_start, close_paren, is_reserved, name, select_stmt, types::type_name};
+use super::select::{expr_list, order_by_clause};
+use super::{
+    at_col_id, at_query_start, close_paren, is_reserved, name, select_stmt, types::type_name,
+};
 use crate::parser::{CompletedMarker, Parser};
 use crate::SyntaxKind;
 
@@ -251,6 +254,8 @@ fn atom(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 Some(cast(p))
             } else if p.at_kw("exists") && p.nth(1) == SyntaxKind::LParen {
                 Some(exists(p))
+            } else if p.at_any_kw(&["any", "all", "some"]) && p.nth(1) == SyntaxKind::LParen {
+                Some(quantified(p))
             } else if is_value_keyword(p.nth_text(0)) {
                 let m = p.start();
                 name(p, false);
@@ -277,7 +282,7 @@ fn paren(p: &mut Parser<'_>) -> CompletedMarker {
     p.bump();
     // `((SELECT 1) + 1)` is an expression: only a query right after the parenthesis makes
     // this a subquery.
-    if p.at_kw("select") || p.at_kw("with") {
+    if super::nth_starts_query(p, 0) {
         select_stmt(p);
         close_paren(p);
         return m.complete(p, SyntaxKind::SubqueryExpr);
@@ -302,6 +307,49 @@ fn name_or_call(p: &mut Parser<'_>) -> CompletedMarker {
     if !p.at(SyntaxKind::LParen) {
         return m.complete(p, SyntaxKind::ColumnRef);
     }
+    arg_list(p);
+    if p.at_kw("within") && p.nth_kw(1, "group") {
+        let c = p.start();
+        p.bump();
+        p.bump();
+        if p.eat(SyntaxKind::LParen) {
+            if p.at_kw("order") {
+                order_by_clause(p);
+            } else {
+                p.error("expected ORDER BY");
+            }
+            close_paren(p);
+        } else {
+            p.error("expected (");
+        }
+        c.complete(p, SyntaxKind::WithinGroupClause);
+    }
+    if p.at_kw("filter") && p.nth(1) == SyntaxKind::LParen {
+        let c = p.start();
+        p.bump();
+        p.bump();
+        p.expect_kw("where");
+        operand(p, 0);
+        close_paren(p);
+        c.complete(p, SyntaxKind::FilterClause);
+    }
+    if p.at_kw("over") {
+        let c = p.start();
+        p.bump();
+        if p.at(SyntaxKind::LParen) {
+            window_spec(p);
+        } else if at_col_id(p) {
+            p.bump();
+        } else {
+            p.error("expected a window name or (");
+        }
+        c.complete(p, SyntaxKind::OverClause);
+    }
+    m.complete(p, SyntaxKind::FuncCall)
+}
+
+/// `(args [ORDER BY ...])`, `(*)`, `(DISTINCT args)`
+pub(crate) fn arg_list(p: &mut Parser<'_>) {
     let args = p.start();
     p.bump();
     if p.at_op("*") {
@@ -313,10 +361,84 @@ fn name_or_call(p: &mut Parser<'_>) -> CompletedMarker {
             p.bump();
         }
         list_items(p);
+        if p.at_kw("order") {
+            order_by_clause(p);
+        }
     }
     close_paren(p);
     args.complete(p, SyntaxKind::ArgList);
-    m.complete(p, SyntaxKind::FuncCall)
+}
+
+/// `([existing_name] [PARTITION BY ...] [ORDER BY ...] [frame])`
+pub(crate) fn window_spec(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump();
+    if at_col_id(p) && !p.at_any_kw(&["partition", "order", "rows", "range", "groups"]) {
+        p.bump();
+    }
+    if p.at_kw("partition") {
+        let c = p.start();
+        p.bump();
+        p.expect_kw("by");
+        expr_list(p);
+        c.complete(p, SyntaxKind::PartitionByClause);
+    }
+    if p.at_kw("order") {
+        order_by_clause(p);
+    }
+    if p.at_any_kw(&["rows", "range", "groups"]) {
+        let c = p.start();
+        p.bump();
+        if p.eat_kw("between") {
+            frame_bound(p);
+            p.expect_kw("and");
+        }
+        frame_bound(p);
+        if p.eat_kw("exclude") {
+            if p.at_kw("current") || p.at_kw("no") {
+                p.bump();
+                if !p.eat_kw("row") {
+                    p.expect_kw("others");
+                }
+            } else if !p.eat_kw("group") {
+                p.expect_kw("ties");
+            }
+        }
+        c.complete(p, SyntaxKind::FrameClause);
+    }
+    close_paren(p);
+    m.complete(p, SyntaxKind::WindowSpec);
+}
+
+/// `UNBOUNDED PRECEDING`, `x FOLLOWING`, `CURRENT ROW`
+fn frame_bound(p: &mut Parser<'_>) {
+    let m = p.start();
+    if p.at_kw("current") {
+        p.bump();
+        p.expect_kw("row");
+    } else {
+        if !p.eat_kw("unbounded") {
+            operand(p, 0);
+        }
+        if !p.eat_kw("preceding") {
+            p.expect_kw("following");
+        }
+    }
+    m.complete(p, SyntaxKind::FrameBound);
+}
+
+/// `ANY (SELECT ...)`, `ALL (array)`, `SOME (...)`
+fn quantified(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump();
+    p.bump();
+    if at_query_start(p) {
+        select_stmt(p);
+    } else {
+        operand(p, 0);
+    }
+    close_paren(p);
+    m.complete(p, SyntaxKind::QuantifiedExpr)
 }
 
 /// `CASE [x] WHEN a THEN b ... [ELSE c] END`

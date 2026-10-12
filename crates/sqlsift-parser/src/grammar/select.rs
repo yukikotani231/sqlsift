@@ -69,6 +69,9 @@ fn set_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at_kw("select") {
         return Some(simple_select(p));
     }
+    if p.at_kw("values") && p.nth(1) == SyntaxKind::LParen {
+        return Some(values_clause(p));
+    }
     if p.at(SyntaxKind::LParen) && at_query_start(p) {
         let m = p.start();
         p.bump();
@@ -78,6 +81,31 @@ fn set_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     }
     p.error("expected SELECT");
     None
+}
+
+/// `VALUES (a, b), (c, d)`
+fn values_clause(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump();
+    loop {
+        let row = p.start();
+        if p.eat(SyntaxKind::LParen) {
+            loop {
+                required_expr(p);
+                if !p.eat(SyntaxKind::Comma) {
+                    break;
+                }
+            }
+            close_paren(p);
+        } else {
+            p.error("expected (");
+        }
+        row.complete(p, SyntaxKind::ValuesRow);
+        if !p.eat(SyntaxKind::Comma) {
+            break;
+        }
+    }
+    m.complete(p, SyntaxKind::ValuesClause)
 }
 
 /// `WITH [RECURSIVE] cte, ...`
@@ -148,6 +176,29 @@ fn simple_select(p: &mut Parser<'_>) -> CompletedMarker {
         required_expr(p);
         c.complete(p, SyntaxKind::HavingClause);
     }
+    if p.at_kw("window") {
+        let c = p.start();
+        p.bump();
+        loop {
+            let d = p.start();
+            if at_col_id(p) {
+                p.bump();
+            } else {
+                p.error("expected a window name");
+            }
+            p.expect_kw("as");
+            if p.at(SyntaxKind::LParen) {
+                super::expr::window_spec(p);
+            } else {
+                p.error("expected (");
+            }
+            d.complete(p, SyntaxKind::WindowDef);
+            if !p.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        c.complete(p, SyntaxKind::WindowClause);
+    }
     m.complete(p, SyntaxKind::SimpleSelect)
 }
 
@@ -158,7 +209,7 @@ fn required_expr(p: &mut Parser<'_>) {
 }
 
 /// `a, b, c` (at least one)
-fn expr_list(p: &mut Parser<'_>) {
+pub(crate) fn expr_list(p: &mut Parser<'_>) {
     let m = p.start();
     loop {
         required_expr(p);
@@ -338,13 +389,17 @@ fn join_condition(p: &mut Parser<'_>) {
 }
 
 fn from_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    let m = p.start();
+    let lateral = p.eat_kw("lateral");
     if p.at(SyntaxKind::LParen) {
-        let m = p.start();
         p.bump();
         let kind = if at_query_start(p) {
             select_stmt(p);
             SyntaxKind::SubqueryRef
         } else {
+            if lateral {
+                p.error("expected a query");
+            }
             from_item(p);
             SyntaxKind::ParenFromItem
         };
@@ -353,16 +408,25 @@ fn from_primary(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         return Some(m.complete(p, kind));
     }
     if at_col_id(p) {
-        let m = p.start();
         name(p, false);
-        if p.at(SyntaxKind::LParen) {
-            // Table functions come later.
-            p.error("table functions are not supported yet");
-        }
+        let kind = if p.at(SyntaxKind::LParen) {
+            super::expr::arg_list(p);
+            if p.at_kw("with") && p.nth_kw(1, "ordinality") {
+                p.bump();
+                p.bump();
+            }
+            SyntaxKind::FuncTableRef
+        } else {
+            if lateral {
+                p.error("expected a function or a query after LATERAL");
+            }
+            SyntaxKind::TableRef
+        };
         table_alias(p);
-        return Some(m.complete(p, SyntaxKind::TableRef));
+        return Some(m.complete(p, kind));
     }
     p.error("expected a table name or (");
+    m.complete(p, SyntaxKind::Error);
     None
 }
 
@@ -386,7 +450,7 @@ fn table_alias(p: &mut Parser<'_>) {
     m.complete(p, SyntaxKind::Alias);
 }
 
-fn order_by_clause(p: &mut Parser<'_>) {
+pub(crate) fn order_by_clause(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(); // ORDER
     p.expect_kw("by");

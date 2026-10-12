@@ -207,7 +207,10 @@ impl Lowering<'_> {
             .find(|n| {
                 matches!(
                     n.kind,
-                    SyntaxKind::SimpleSelect | SyntaxKind::SetOperation | SyntaxKind::ParenSelect
+                    SyntaxKind::SimpleSelect
+                        | SyntaxKind::SetOperation
+                        | SyntaxKind::ParenSelect
+                        | SyntaxKind::ValuesClause
                 )
             })
             .ok_or_else(|| Unsupported("query body".into()))?;
@@ -255,6 +258,29 @@ impl Lowering<'_> {
                     set_quantifier,
                     right: Box::new(self.set_expr(right)?),
                 })
+            }
+            SyntaxKind::ValuesClause => {
+                let mut rows = vec![];
+                for row in node.nodes() {
+                    let tokens: Vec<_> = row.tokens().collect();
+                    let (Some(open), Some(close)) = (tokens.first(), tokens.last()) else {
+                        return unsupported("VALUES");
+                    };
+                    rows.push(ast::Parens {
+                        opening_token: ast::helpers::attached_token::AttachedToken(
+                            TokenWithSpan::new(Token::LParen, self.span(open.range)),
+                        ),
+                        content: self.expr_list(row)?,
+                        closing_token: ast::helpers::attached_token::AttachedToken(
+                            TokenWithSpan::new(Token::RParen, self.span(close.range)),
+                        ),
+                    });
+                }
+                Ok(SetExpr::Values(ast::Values {
+                    explicit_row: false,
+                    value_keyword: false,
+                    rows,
+                }))
             }
             kind => unsupported(format!("{kind:?} as a query body")),
         }
@@ -340,6 +366,7 @@ impl Lowering<'_> {
         let mut selection = None;
         let mut group_by = GroupByExpr::Expressions(vec![], vec![]);
         let mut having = None;
+        let mut named_window = vec![];
         for child in node.nodes() {
             match child.kind {
                 SyntaxKind::FromClause => {
@@ -358,6 +385,21 @@ impl Lowering<'_> {
                     group_by = GroupByExpr::Expressions(self.expr_list(list)?, vec![]);
                 }
                 SyntaxKind::HavingClause => having = Some(self.expr(expr_child(child)?)?),
+                SyntaxKind::WindowClause => {
+                    for def in child.nodes() {
+                        let name = def
+                            .tokens()
+                            .next()
+                            .ok_or_else(|| Unsupported("WINDOW".into()))?;
+                        let spec = def
+                            .child(SyntaxKind::WindowSpec)
+                            .ok_or_else(|| Unsupported("WINDOW".into()))?;
+                        named_window.push(ast::NamedWindowDefinition(
+                            self.ident(name)?,
+                            ast::NamedWindowExpr::WindowSpec(self.window_spec(spec)?),
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -381,9 +423,9 @@ impl Lowering<'_> {
             distribute_by: vec![],
             sort_by: vec![],
             having,
-            named_window: vec![],
+            window_before_qualify: !named_window.is_empty(),
+            named_window,
             qualify: None,
-            window_before_qualify: false,
             value_table_mode: None,
             flavor: SelectFlavor::Standard,
         })
@@ -539,6 +581,10 @@ impl Lowering<'_> {
     }
 
     fn table_factor(&self, node: &SyntaxNode) -> Result<TableFactor> {
+        let lateral = node
+            .tokens()
+            .next()
+            .is_some_and(|t| self.is_kw(t, "lateral"));
         let alias = node
             .child(SyntaxKind::Alias)
             .map(|a| self.table_alias(a))
@@ -561,12 +607,65 @@ impl Lowering<'_> {
                     index_hints: vec![],
                 })
             }
+            SyntaxKind::FuncTableRef => {
+                let name_node = node
+                    .child(SyntaxKind::Name)
+                    .ok_or_else(|| Unsupported("function name".into()))?;
+                if name_node.tokens().count() == 1
+                    && name_node.tokens().any(|t| {
+                        ["unnest", "json_table", "xmltable", "openjson"]
+                            .iter()
+                            .any(|n| self.is_kw(t, n))
+                    })
+                {
+                    return unsupported(format!("{} in FROM", name_node.text(self.source)));
+                }
+                let name = object_name(
+                    self.name_parts(
+                        node.child(SyntaxKind::Name)
+                            .ok_or_else(|| Unsupported("function name".into()))?,
+                    )?,
+                );
+                let args_node = node
+                    .child(SyntaxKind::ArgList)
+                    .ok_or_else(|| Unsupported("arguments".into()))?;
+                let (args, duplicate_treatment, clauses) = self.function_args(args_node)?;
+                if duplicate_treatment.is_some() || !clauses.is_empty() {
+                    return unsupported("aggregate arguments in FROM");
+                }
+                let with_ordinality = self.has_kw(node, "ordinality");
+                if lateral {
+                    Ok(TableFactor::Function {
+                        lateral,
+                        name,
+                        args,
+                        with_ordinality,
+                        alias,
+                    })
+                } else {
+                    Ok(TableFactor::Table {
+                        name,
+                        alias,
+                        args: Some(ast::TableFunctionArgs {
+                            args,
+                            settings: None,
+                        }),
+                        with_hints: vec![],
+                        version: None,
+                        with_ordinality,
+                        partitions: vec![],
+                        json_path: None,
+                        sample: None,
+                        index_hints: vec![],
+                    })
+                }
+            }
             SyntaxKind::SubqueryRef => {
                 let query = node
                     .child(SyntaxKind::SelectStmt)
                     .ok_or_else(|| Unsupported("subquery".into()))?;
                 Ok(TableFactor::Derived {
-                    lateral: false,
+                    lateral,
                     subquery: Box::new(self.query(query)?),
                     alias,
                     sample: None,
@@ -587,6 +686,13 @@ impl Lowering<'_> {
     }
 
     fn order_by(&self, node: &SyntaxNode) -> Result<OrderBy> {
+        Ok(OrderBy {
+            kind: OrderByKind::Expressions(self.order_by_exprs(node)?),
+            interpolate: None,
+        })
+    }
+
+    fn order_by_exprs(&self, node: &SyntaxNode) -> Result<Vec<OrderByExpr>> {
         let mut exprs = vec![];
         for item in node.nodes() {
             let tokens: Vec<_> = item.tokens().collect();
@@ -613,10 +719,7 @@ impl Lowering<'_> {
                 with_fill: None,
             });
         }
-        Ok(OrderBy {
-            kind: OrderByKind::Expressions(exprs),
-            interpolate: None,
-        })
+        Ok(exprs)
     }
 
     // --- expressions ---
@@ -666,6 +769,41 @@ impl Lowering<'_> {
                     Expr::Identifier(parts.remove(0))
                 } else {
                     Expr::CompoundIdentifier(parts)
+                }
+            }
+            SyntaxKind::BinaryExpr if child(1)?.kind == SyntaxKind::QuantifiedExpr => {
+                let quantified = child(1)?;
+                let op = tokens
+                    .first()
+                    .ok_or_else(|| Unsupported("operator".into()))?;
+                let left = Box::new(self.expr(child(0)?)?);
+                let compare_op = self.binary_operator(op)?;
+                let inner = quantified
+                    .nodes()
+                    .next()
+                    .ok_or_else(|| Unsupported("ANY / ALL".into()))?;
+                let right = Box::new(if inner.kind == SyntaxKind::SelectStmt {
+                    Expr::Subquery(Box::new(self.query(inner)?))
+                } else {
+                    self.expr(inner)?
+                });
+                let keyword = quantified
+                    .tokens()
+                    .next()
+                    .map(|t| self.text(t).to_ascii_lowercase());
+                if keyword.as_deref() == Some("all") {
+                    Expr::AllOp {
+                        left,
+                        compare_op,
+                        right,
+                    }
+                } else {
+                    Expr::AnyOp {
+                        left,
+                        compare_op,
+                        right,
+                        is_some: keyword.as_deref() == Some("some"),
+                    }
                 }
             }
             SyntaxKind::BinaryExpr => {
@@ -878,12 +1016,59 @@ impl Lowering<'_> {
         let args_node = node
             .child(SyntaxKind::ArgList)
             .ok_or_else(|| Unsupported("arguments".into()))?;
+        let (args, duplicate_treatment, clauses) = self.function_args(args_node)?;
+        let within_group = match node.child(SyntaxKind::WithinGroupClause) {
+            Some(c) => self.order_by_exprs(
+                c.child(SyntaxKind::OrderByClause)
+                    .ok_or_else(|| Unsupported("WITHIN GROUP".into()))?,
+            )?,
+            None => vec![],
+        };
+        let filter = node
+            .child(SyntaxKind::FilterClause)
+            .map(|c| expr_child(c).and_then(|e| self.expr(e)).map(Box::new))
+            .transpose()?;
+        let over = node
+            .child(SyntaxKind::OverClause)
+            .map(|c| self.over(c))
+            .transpose()?;
+        Ok(Expr::Function(Function {
+            name: object_name(self.name_parts(name)?),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment,
+                args,
+                clauses,
+            }),
+            filter,
+            null_treatment: None,
+            over,
+            within_group,
+        }))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn function_args(
+        &self,
+        args_node: &SyntaxNode,
+    ) -> Result<(
+        Vec<FunctionArg>,
+        Option<ast::DuplicateTreatment>,
+        Vec<ast::FunctionArgumentClause>,
+    )> {
         let mut args = vec![];
-        if args_node.child(SyntaxKind::Star).is_some() {
-            args.push(FunctionArg::Unnamed(FunctionArgExpr::Wildcard));
-        }
-        for arg in args_node.nodes().filter(|n| n.kind != SyntaxKind::Star) {
-            args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(self.expr(arg)?)));
+        let mut clauses = vec![];
+        for arg in args_node.nodes() {
+            match arg.kind {
+                SyntaxKind::Star => args.push(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)),
+                SyntaxKind::OrderByClause => {
+                    clauses.push(ast::FunctionArgumentClause::OrderBy(
+                        self.order_by_exprs(arg)?,
+                    ));
+                }
+                _ => args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(self.expr(arg)?))),
+            }
         }
         let duplicate_treatment = if self.has_kw(args_node, "distinct") {
             Some(ast::DuplicateTreatment::Distinct)
@@ -892,20 +1077,90 @@ impl Lowering<'_> {
         } else {
             None
         };
-        Ok(Expr::Function(Function {
-            name: object_name(self.name_parts(name)?),
-            uses_odbc_syntax: false,
-            parameters: FunctionArguments::None,
-            args: FunctionArguments::List(FunctionArgumentList {
-                duplicate_treatment,
-                args,
-                clauses: vec![],
-            }),
-            filter: None,
-            null_treatment: None,
-            over: None,
-            within_group: vec![],
-        }))
+        Ok((args, duplicate_treatment, clauses))
+    }
+
+    fn over(&self, node: &SyntaxNode) -> Result<ast::WindowType> {
+        if let Some(spec) = node.child(SyntaxKind::WindowSpec) {
+            return Ok(ast::WindowType::WindowSpec(self.window_spec(spec)?));
+        }
+        let name = node
+            .tokens()
+            .nth(1)
+            .ok_or_else(|| Unsupported("OVER".into()))?;
+        Ok(ast::WindowType::NamedWindow(self.ident(name)?))
+    }
+
+    fn window_spec(&self, node: &SyntaxNode) -> Result<ast::WindowSpec> {
+        let window_name = node
+            .tokens()
+            .nth(1)
+            .filter(|t| matches!(t.kind, SyntaxKind::Ident | SyntaxKind::QuotedIdent))
+            .map(|t| self.ident(t))
+            .transpose()?;
+        let partition_by = match node.child(SyntaxKind::PartitionByClause) {
+            Some(c) => self.expr_list(
+                c.child(SyntaxKind::ExprList)
+                    .ok_or_else(|| Unsupported("PARTITION BY".into()))?,
+            )?,
+            None => vec![],
+        };
+        let order_by = match node.child(SyntaxKind::OrderByClause) {
+            Some(c) => self.order_by_exprs(c)?,
+            None => vec![],
+        };
+        let window_frame = node
+            .child(SyntaxKind::FrameClause)
+            .map(|c| self.window_frame(c))
+            .transpose()?;
+        Ok(ast::WindowSpec {
+            window_name,
+            partition_by,
+            order_by,
+            window_frame,
+        })
+    }
+
+    fn window_frame(&self, node: &SyntaxNode) -> Result<ast::WindowFrame> {
+        if self.has_kw(node, "exclude") {
+            return unsupported("EXCLUDE");
+        }
+        let units = node
+            .tokens()
+            .next()
+            .map(|t| self.text(t).to_ascii_lowercase());
+        let units = match units.as_deref() {
+            Some("rows") => ast::WindowFrameUnits::Rows,
+            Some("range") => ast::WindowFrameUnits::Range,
+            _ => ast::WindowFrameUnits::Groups,
+        };
+        let bounds: Vec<_> = node
+            .nodes()
+            .map(|b| self.frame_bound(b))
+            .collect::<Result<_>>()?;
+        let mut bounds = bounds.into_iter();
+        let start_bound = bounds.next().ok_or_else(|| Unsupported("frame".into()))?;
+        Ok(ast::WindowFrame {
+            units,
+            start_bound,
+            end_bound: bounds.next(),
+        })
+    }
+
+    fn frame_bound(&self, node: &SyntaxNode) -> Result<ast::WindowFrameBound> {
+        if self.has_kw(node, "current") {
+            return Ok(ast::WindowFrameBound::CurrentRow);
+        }
+        let value = node
+            .nodes()
+            .next()
+            .map(|e| self.expr(e).map(Box::new))
+            .transpose()?;
+        if self.has_kw(node, "preceding") {
+            Ok(ast::WindowFrameBound::Preceding(value))
+        } else {
+            Ok(ast::WindowFrameBound::Following(value))
+        }
     }
 
     fn binary_operator(&self, op: &SyntaxToken) -> Result<BinaryOperator> {
