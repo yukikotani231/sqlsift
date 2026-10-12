@@ -152,6 +152,8 @@ cargo run -- check --format sarif --schema schema.sql query.sql
 - **glob** (0.3): File pattern matching
 - **indexmap** (2.7): Ordered maps for deterministic output
 
+Dependencies must have a license allowed by `deny.toml` (CI job "Licenses"). After adding, removing or updating a dependency (Cargo or the VS Code extension's npm packages), run `scripts/third-party-licenses.sh` and commit `THIRD-PARTY-LICENSES.md` / `editors/vscode/THIRD-PARTY-NOTICES.md`; they ship in the release archives, the npm package, the VSIX and the playground.
+
 ## Testing Strategy
 
 - Unit tests are colocated with modules (`#[cfg(test)] mod tests`)

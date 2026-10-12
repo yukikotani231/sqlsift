@@ -82,6 +82,24 @@ jobs:
         with:
           command: check licenses
 
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.8.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      # The notices shipped with the binaries and the VS Code extension must match
+      # the dependencies; run scripts/third-party-licenses.sh after changing them.
+      - name: Check third-party notices are up to date
+        run: |
+          cargo fetch --locked
+          (cd editors/vscode && npm ci --ignore-scripts)
+          scripts/third-party-licenses.sh
+          git diff --exit-code -- THIRD-PARTY-LICENSES.md editors/vscode/THIRD-PARTY-NOTICES.md
+
   examples:
     name: Example projects
     runs-on: ubuntu-latest

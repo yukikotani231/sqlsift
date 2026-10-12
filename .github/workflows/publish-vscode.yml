@@ -110,7 +110,7 @@ jobs:
           chmod +x "editors/vscode/bin/${{ matrix.binary_name }}"
 
       - name: Copy LICENSE
-        run: cp LICENSE editors/vscode/LICENSE
+        run: cp LICENSE THIRD-PARTY-LICENSES.md editors/vscode/
 
       - name: Bundle extension
         working-directory: editors/vscode

@@ -65,6 +65,10 @@ jobs:
       - name: Build user guide
         run: mdbook build docs --dest-dir "$GITHUB_WORKSPACE/site/docs"
 
+      # The playground's wasm includes the crates listed there
+      - name: Copy third-party licenses
+        run: cp THIRD-PARTY-LICENSES.md LICENSE site/
+
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
