@@ -1028,6 +1028,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlsift-parser"
+version = "0.2.0"
+dependencies = [
+ "sqlparser",
+]
+
+[[package]]
 name = "sqlsift-wasm"
 version = "0.2.0"
 dependencies = [
