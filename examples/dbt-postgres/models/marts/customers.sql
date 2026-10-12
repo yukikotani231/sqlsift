@@ -1,3 +1,6 @@
+-- Adapted from models/customers.sql of dbt-labs/jaffle_shop (Apache-2.0, see
+-- LICENSE-jaffle_shop): the final CTE inlined and number_of_orders defaulted to 0.
+
 with customers as (
     select * from {{ ref('stg_customers') }}
 ),

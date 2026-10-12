@@ -54,3 +54,7 @@ Found 2 error(s), 0 warning(s) in 1 file(s)
 Both would otherwise surface only in `dbt run`, against the warehouse.
 
 CI checks both commands on every change to sqlsift (`scripts/check-examples.sh`, against `expected-diagnostics.txt`).
+
+## License
+
+`models/marts/customers.sql` is adapted from [dbt-labs/jaffle_shop](https://github.com/dbt-labs/jaffle_shop), licensed under the Apache License 2.0 ([`LICENSE-jaffle_shop`](LICENSE-jaffle_shop)). The rest of this example is part of sqlsift (MIT).
