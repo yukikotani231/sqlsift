@@ -49,10 +49,10 @@ v1.0 is a promise of stability: configuration keys, rule codes and the JSON / SA
 
 Ideas beyond that, started when there is demand:
 
-- Analysing function bodies (PL/pgSQL, `LANGUAGE sql`), e.g. Supabase RPC functions
-- `pedantic` and `style` rules (none yet)
-- Editor features in the LSP: completion, hover with column types, go to definition (built on the v0.4 parser's error recovery)
-- Custom rule plugins
+- Analysing function bodies (PL/pgSQL, `LANGUAGE sql`), e.g. Supabase RPC functions ([#335](https://github.com/yukikotani231/sqlsift/issues/335))
+- `pedantic` and `style` rules (none yet) ([#336](https://github.com/yukikotani231/sqlsift/issues/336))
+- Editor features in the LSP: completion, hover with column types, go to definition (built on the v0.4 parser's error recovery) ([#267](https://github.com/yukikotani231/sqlsift/issues/267))
+- Custom rules defined by users ([#337](https://github.com/yukikotani231/sqlsift/issues/337))
 
 ## Contributing
 
