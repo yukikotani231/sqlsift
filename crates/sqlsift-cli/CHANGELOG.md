@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/yukikotani231/sqlsift/compare/v0.2.0...v0.2.1) - 2026-10-12
+
+### Added
+
+- check SQL in Go code (database/sql, sqlx and pgx calls) ([#315](https://github.com/yukikotani231/sqlsift/pull/315))
+- E0031 join-fan-out warns on aggregates multiplied by another one-to-many join ([#310](https://github.com/yukikotani231/sqlsift/pull/310))
+- E0030 foreign-key-join-mismatch warns on joins that don't follow the foreign key ([#308](https://github.com/yukikotani231/sqlsift/pull/308))
+- sqlsift unused lists tables and columns no query uses ([#306](https://github.com/yukikotani231/sqlsift/pull/306))
+- check SQL in Python database calls ([#301](https://github.com/yukikotani231/sqlsift/pull/301))
+- *(baseline)* strict mode, pruning, per-rule rewrite, stats and SARIF suppressions ([#285](https://github.com/yukikotani231/sqlsift/pull/285))
+- check SQL in Rust sqlx query macros and functions ([#278](https://github.com/yukikotani231/sqlsift/pull/278))
+- *(action)* `mode: impact` reports what the changed migrations break ([#277](https://github.com/yukikotani231/sqlsift/pull/277))
+- *(describe)* infer parameter types and output column NULL-ability ([#273](https://github.com/yukikotani231/sqlsift/pull/273))
+- add sqlsift describe (output columns and types of each query) ([#269](https://github.com/yukikotani231/sqlsift/pull/269))
+- record the uses of catalog tables and columns; `sqlsift impact --references` ([#272](https://github.com/yukikotani231/sqlsift/pull/272))
+- *(cli)* `sqlsift impact --base <rev>` picks the schema files changed on the branch ([#270](https://github.com/yukikotani231/sqlsift/pull/270))
+- *(cli)* add `sqlsift impact` to show the queries a schema change breaks or fixes ([#268](https://github.com/yukikotani231/sqlsift/pull/268))
+- *(analyzer)* limit-without-order-by restriction rule (E0028)
+
+### Fixed
+
+- report type mismatches MySQL and SQLite convert at run time as E0029 warnings ([#305](https://github.com/yukikotani231/sqlsift/pull/305))
+- *(init)* pick the schema source with the most tables and the project's database ([#304](https://github.com/yukikotani231/sqlsift/pull/304))
+- read UTF-16 files and skip undecodable query files with a warning ([#303](https://github.com/yukikotani231/sqlsift/pull/303))
+
+### Other
+
+- mention SQL in Go code and the Go example in README ([#317](https://github.com/yukikotani231/sqlsift/pull/317))
+- use mimalloc as global allocator in CLI and LSP ([#243](https://github.com/yukikotani231/sqlsift/pull/243))
+- Merge pull request #259 from cesartalen/feat/limit-without-order-by
+- Merge remote-tracking branch 'origin/main' into feat/limit-without-order-by
+- link the action's Marketplace listing and add the social preview asset ([#262](https://github.com/yukikotani231/sqlsift/pull/262))
+- move the playground and user guide links to sqlsift.dev ([#261](https://github.com/yukikotani231/sqlsift/pull/261))
+- lead the README with the schema-aware punchline and a demo GIF ([#260](https://github.com/yukikotani231/sqlsift/pull/260))
+- update roadmap after v0.2 and plan the in-house PostgreSQL parser for v0.4 ([#258](https://github.com/yukikotani231/sqlsift/pull/258))
+- release v0.2.0 ([#189](https://github.com/yukikotani231/sqlsift/pull/189))
+
 ## [0.2.0](https://github.com/yukikotani231/sqlsift/compare/v0.1.5...v0.2.0) - 2026-10-11
 
 ### Added
