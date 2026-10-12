@@ -15,6 +15,10 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 cargo about generate --workspace --locked --offline --fail about.hbs -o THIRD-PARTY-LICENSES.md
+# sqlsift's own crates are not third-party, and their version would make the file
+# stale on every release (the release PR bumps it)
+sed -i.bak -E '/^- \[sqlsift-[a-z]+ [^]]*\]\(https:\/\/github\.com\/yukikotani231\/sqlsift\)$/d' THIRD-PARTY-LICENSES.md
+rm THIRD-PARTY-LICENSES.md.bak
 
 node - <<'JS'
 const fs = require("fs");

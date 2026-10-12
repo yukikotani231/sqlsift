@@ -2655,9 +2655,6 @@ SOFTWARE.
 
 Used by:
 
-- [sqlsift-cli 0.2.0](https://github.com/yukikotani231/sqlsift)
-- [sqlsift-core 0.2.0](https://github.com/yukikotani231/sqlsift)
-- [sqlsift-lsp 0.2.0](https://github.com/yukikotani231/sqlsift)
 - [backtrace-ext 0.2.1](https://github.com/gankra/backtrace-ext)
 - [tower-lsp-macros 0.9.0](https://github.com/ebkalderon/tower-lsp)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
