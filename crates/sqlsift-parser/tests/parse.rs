@@ -1,9 +1,10 @@
 use std::fmt::Write;
 
-use sqlsift_parser::{parse, SyntaxKind};
+use sqlsift_parser::{parse, Arena, SyntaxKind};
 
 fn dump(sql: &str) -> String {
-    let parse = parse(sql);
+    let arena = Arena::new();
+    let parse = parse(&arena, sql);
     let mut out = parse.root.debug_dump(sql);
     for e in &parse.errors {
         let _ = writeln!(
@@ -28,7 +29,8 @@ fn tree_is_lossless() {
         "",
         ";",
     ] {
-        let parse = parse(sql);
+        let arena = Arena::new();
+        let parse = parse(&arena, sql);
         let text: String = parse
             .root
             .descendant_tokens()
@@ -130,7 +132,8 @@ fn insta_like(sql: &str, expected: &str) {
 #[test]
 fn recovers_at_the_next_statement() {
     let sql = "SELECT a FROM t WHERE a = = 1; SELECT b FROM u";
-    let parse = parse(sql);
+    let arena = Arena::new();
+    let parse = parse(&arena, sql);
     assert!(!parse.errors.is_empty());
     let stmts: Vec<_> = parse.statements().collect();
     assert_eq!(stmts.len(), 2);
@@ -141,7 +144,8 @@ fn recovers_at_the_next_statement() {
 #[test]
 fn unknown_statements_are_opaque() {
     let sql = "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT 1";
-    let parse = parse(sql);
+    let arena = Arena::new();
+    let parse = parse(&arena, sql);
     assert!(parse.errors.is_empty(), "{:?}", parse.errors);
     let kinds: Vec<_> = parse.statements().map(|s| s.kind).collect();
     assert_eq!(kinds, [SyntaxKind::OpaqueStmt, SyntaxKind::SelectStmt]);
@@ -151,7 +155,8 @@ fn unknown_statements_are_opaque() {
 #[test]
 fn recovers_inside_a_statement() {
     let sql = "SELECT a, FROM t WHERE b";
-    let parse = parse(sql);
+    let arena = Arena::new();
+    let parse = parse(&arena, sql);
     assert_eq!(parse.errors.len(), 1, "{:?}", parse.errors);
     let select = parse
         .statements()
@@ -171,7 +176,8 @@ fn unbalanced_parentheses() {
         "CREATE x ) ] ;",
         "SELECT (1",
     ] {
-        let parse = parse(sql);
+        let arena = Arena::new();
+        let parse = parse(&arena, sql);
         let text: String = parse
             .root
             .descendant_tokens()

@@ -8,7 +8,7 @@
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlsift_parser::diff::{compare_source, Outcome};
 use sqlsift_parser::lower::lower_statement;
-use sqlsift_parser::parse;
+use sqlsift_parser::{parse, Arena};
 use std::time::Instant;
 
 fn main() {
@@ -38,17 +38,21 @@ fn main() {
         }
     }
     let theirs = t.elapsed().as_secs_f64() / f64::from(reps);
+    // One arena, reset before each statement, as the analyzer does per file.
+    let mut arena = Arena::new();
     let t = Instant::now();
     for _ in 0..reps {
         for s in &stmts {
-            std::hint::black_box(parse(s));
+            arena.reset();
+            std::hint::black_box(parse(&arena, s));
         }
     }
     let ours = t.elapsed().as_secs_f64() / f64::from(reps);
     let t = Instant::now();
     for _ in 0..reps {
         for s in &stmts {
-            let p = parse(s);
+            arena.reset();
+            let p = parse(&arena, s);
             let stmt = p.statements().next().unwrap();
             std::hint::black_box(lower_statement(s, stmt).unwrap());
         }
@@ -74,7 +78,8 @@ fn main() {
     let t = Instant::now();
     for _ in 0..reps {
         for f in &files {
-            std::hint::black_box(parse(f));
+            arena.reset();
+            std::hint::black_box(parse(&arena, f));
         }
     }
     let whole = t.elapsed().as_secs_f64() / f64::from(reps);

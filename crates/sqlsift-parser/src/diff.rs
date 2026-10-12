@@ -5,7 +5,7 @@
 use sqlparser::dialect::PostgreSqlDialect;
 
 use crate::lower::lower_statement;
-use crate::{parse, SyntaxKind};
+use crate::{parse, Arena, SyntaxKind};
 
 /// How one statement compared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,8 @@ pub struct StatementDiff {
 /// Splits `source` into statements at the top-level `;` of this parser's tree (so text the
 /// parser couldn't place stays with its statement) and compares each one.
 pub fn compare_source(source: &str) -> Vec<StatementDiff> {
-    let parsed = parse(source);
+    let arena = Arena::new();
+    let parsed = parse(&arena, source);
     let mut out = vec![];
     let mut start: Option<u32> = None;
     let mut end = 0;
@@ -64,7 +65,7 @@ pub fn compare_source(source: &str) -> Vec<StatementDiff> {
             });
         }
     };
-    for child in &parsed.root.children {
+    for child in parsed.root.children {
         let kind = child.kind();
         if kind == SyntaxKind::Semicolon {
             flush(&mut start, end);
@@ -83,7 +84,8 @@ pub fn compare_statement(text: &str) -> Outcome {
         .ok()
         .filter(|stmts| stmts.len() == 1)
         .map(|mut stmts| stmts.remove(0));
-    let parsed = parse(text);
+    let arena = Arena::new();
+    let parsed = parse(&arena, text);
     let mut stmts = parsed.statements();
     let ours = match (stmts.next(), stmts.next()) {
         (Some(stmt), None) if parsed.errors.is_empty() => {

@@ -4,7 +4,8 @@
 use sqlparser::ast::Statement;
 
 use crate::lower::lower_statement;
-use crate::{parse, SyntaxError, SyntaxKind, SyntaxNode, TextRange};
+use crate::{parse, Arena, SyntaxError, SyntaxKind, SyntaxNode, TextRange};
+use std::cell::RefCell;
 
 /// What became of one statement.
 #[derive(Debug)]
@@ -26,8 +27,22 @@ pub struct AnalyzedStatement {
 
 /// Parses `source` once and splits it at the top-level `;`s (so text the parser couldn't
 /// place stays with its statement).
+///
+/// The tree goes in a per-thread arena that is reset on each call, so parsing file after file
+/// reuses the same memory.
 pub fn statements(source: &str) -> Vec<AnalyzedStatement> {
-    let parsed = parse(source);
+    thread_local! {
+        static ARENA: RefCell<Arena> = RefCell::new(Arena::new());
+    }
+    ARENA.with(|arena| {
+        let mut arena = arena.borrow_mut();
+        arena.reset();
+        statements_in(&arena, source)
+    })
+}
+
+fn statements_in(arena: &Arena, source: &str) -> Vec<AnalyzedStatement> {
+    let parsed = parse(arena, source);
     let mut out = vec![];
     let mut nodes: Vec<&SyntaxNode> = vec![];
     let mut range: Option<TextRange> = None;
@@ -50,7 +65,7 @@ pub fn statements(source: &str) -> Vec<AnalyzedStatement> {
         out.push(AnalyzedStatement { range: r, outcome });
         nodes.clear();
     };
-    for child in &parsed.root.children {
+    for child in parsed.root.children {
         let kind = child.kind();
         if kind == SyntaxKind::Semicolon {
             flush(&mut range, &mut nodes);

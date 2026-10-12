@@ -5,13 +5,16 @@ Not used by sqlsift yet, and not published.
 
 - **Lossless tree.** Every token is kept, comments and whitespace included, with exact
   byte ranges. The tree's text is always the input.
+- **Arena.** The tree lives in an `Arena` passed to `parse`: each node's children are one
+  slice there, and `Arena::reset` frees a file's tree at once and keeps the memory for the
+  next file.
 - **Error recovery.** The tree is always built. A syntax error becomes an `Error` node and
   the parser continues at the next clause or statement; a statement the grammar doesn't
   cover yet is an `OpaqueStmt`.
 - **Lowering.** `lower::lower_statement` turns a statement into sqlparser's AST, so the
   analyzer can run on this parser unchanged. A construct the lowering doesn't handle is
   `Unsupported`, never a guess. This is a bridge: the analyzer should read the new tree
-  directly later (that is also where an arena per statement pays off).
+  directly later.
 
 ## Differential testing
 
@@ -55,5 +58,4 @@ Statements: `SELECT` (`WITH [RECURSIVE]`, set operations, `VALUES`, joins, subqu
 typed literals, `COLLATE`, `AT TIME ZONE`, all literal kinds. Everything else is an
 `OpaqueStmt`.
 
-Next: the analyzer reading the tree directly, one check at a time, then an arena per
-statement.
+Next: the analyzer reading the tree directly, one check at a time.

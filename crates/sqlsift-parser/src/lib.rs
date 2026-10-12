@@ -19,28 +19,28 @@ pub mod tree;
 
 pub use parser::SyntaxError;
 pub use syntax_kind::SyntaxKind;
-pub use tree::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
+pub use tree::{Arena, SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
 
 /// The result of parsing a source file: the tree (always) and the syntax errors.
 #[derive(Debug, Clone)]
-pub struct Parse {
-    pub root: SyntaxNode,
+pub struct Parse<'a> {
+    pub root: SyntaxNode<'a>,
     pub errors: Vec<SyntaxError>,
 }
 
-impl Parse {
+impl<'a> Parse<'a> {
     /// The statements of the file, in order.
-    pub fn statements(&self) -> impl Iterator<Item = &SyntaxNode> {
+    pub fn statements(&self) -> impl Iterator<Item = &'a SyntaxNode<'a>> {
         self.root.nodes().filter(|n| n.kind != SyntaxKind::Error)
     }
 }
 
-/// Parses PostgreSQL source text.
-pub fn parse(text: &str) -> Parse {
+/// Parses PostgreSQL source text into a tree in `arena`.
+pub fn parse<'a>(arena: &'a Arena, text: &str) -> Parse<'a> {
     let (tokens, lex_errors) = lexer::tokenize(text);
     let mut p = parser::Parser::new(text, &tokens);
     grammar::source_file(&mut p);
-    let (root, mut errors) = parser::build_tree(&tokens, p.finish());
+    let (root, mut errors) = parser::build_tree(arena, &tokens, p.finish());
     errors.extend(lex_errors.into_iter().map(|e| {
         let at = u32::try_from(e.offset).unwrap_or(u32::MAX);
         SyntaxError {

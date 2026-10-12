@@ -6,7 +6,7 @@
 //! expressions and joins) and the tree representation is independent of the grammar.
 
 use crate::lexer::Token;
-use crate::tree::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
+use crate::tree::{Arena, SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
 use crate::SyntaxKind;
 
 /// A syntax error: where, and what was expected.
@@ -252,30 +252,38 @@ impl CompletedMarker {
     }
 }
 
-/// Builds the tree from the events and all tokens (trivia included). Trivia before a node
-/// is placed in the enclosing node, so nodes start and end with a real token.
-pub(crate) fn build_tree(raw: &[Token], mut events: Vec<Event>) -> (SyntaxNode, Vec<SyntaxError>) {
-    let mut stack: Vec<SyntaxNode> = vec![];
+/// Builds the tree in `arena` from the events and all tokens (trivia included). Trivia before
+/// a node is placed in the enclosing node, so nodes start and end with a real token.
+///
+/// Children wait on one scratch stack until their node finishes, then move to the arena as
+/// one slice.
+pub(crate) fn build_tree<'a>(
+    arena: &'a Arena,
+    raw: &[Token],
+    mut events: Vec<Event>,
+) -> (SyntaxNode<'a>, Vec<SyntaxError>) {
+    // Open nodes: kind and where their children start on `scratch`.
+    let mut stack: Vec<(SyntaxKind, usize)> = vec![];
+    let mut scratch: Vec<SyntaxElement<'a>> = Vec::with_capacity(64);
     let mut errors = Vec::new();
     let mut raw_pos = 0usize;
     let mut offset = 0u32;
 
-    let push_trivia = |stack: &mut Vec<SyntaxNode>, raw_pos: &mut usize, offset: &mut u32| {
-        while let Some(t) = raw.get(*raw_pos) {
-            if !t.kind.is_trivia() {
-                break;
-            }
-            let range = TextRange::new(*offset, *offset + t.len);
-            *offset += t.len;
-            *raw_pos += 1;
-            if let Some(top) = stack.last_mut() {
-                top.children.push(SyntaxElement::Token(SyntaxToken {
+    let push_trivia =
+        |scratch: &mut Vec<SyntaxElement<'a>>, raw_pos: &mut usize, offset: &mut u32| {
+            while let Some(t) = raw.get(*raw_pos) {
+                if !t.kind.is_trivia() {
+                    break;
+                }
+                let range = TextRange::new(*offset, *offset + t.len);
+                *offset += t.len;
+                *raw_pos += 1;
+                scratch.push(SyntaxElement::Token(SyntaxToken {
                     kind: t.kind,
                     range,
                 }));
             }
-        }
-    };
+        };
 
     let mut i = 0;
     while i < events.len() {
@@ -300,53 +308,47 @@ pub(crate) fn build_tree(raw: &[Token], mut events: Vec<Event>) -> (SyntaxNode, 
                     }
                 }
                 if !stack.is_empty() {
-                    push_trivia(&mut stack, &mut raw_pos, &mut offset);
+                    push_trivia(&mut scratch, &mut raw_pos, &mut offset);
                 }
                 for kind in kinds.into_iter().rev() {
-                    stack.push(SyntaxNode {
-                        kind,
-                        range: TextRange::new(offset, offset),
-                        children: vec![],
-                    });
+                    stack.push((kind, scratch.len()));
                 }
             }
             Event::Finish => {
-                let mut node = stack.pop().expect("unbalanced Finish event");
+                let (kind, first) = stack.pop().expect("unbalanced Finish event");
                 if stack.is_empty() {
                     // The root takes the trailing trivia.
-                    stack.push(node);
-                    push_trivia(&mut stack, &mut raw_pos, &mut offset);
-                    node = stack.pop().expect("root");
-                    node.range = TextRange::new(0, offset);
-                    return (node, errors);
+                    push_trivia(&mut scratch, &mut raw_pos, &mut offset);
+                    let root = SyntaxNode {
+                        kind,
+                        range: TextRange::new(0, offset),
+                        children: arena.alloc_children(scratch.drain(first..)),
+                    };
+                    return (root, errors);
                 }
-                node.range.end = node
-                    .children
-                    .last()
-                    .map_or(node.range.start, |c| c.range().end);
-                if let Some(first) = node.children.first() {
-                    node.range.start = first.range().start;
-                }
-                stack
-                    .last_mut()
-                    .expect("parent")
-                    .children
-                    .push(SyntaxElement::Node(node));
+                let range = match &scratch[first..] {
+                    [] => TextRange::new(offset, offset),
+                    [a, .., b] => TextRange::new(a.range().start, b.range().end),
+                    [a] => a.range(),
+                };
+                let children = arena.alloc_children(scratch.drain(first..));
+                scratch.push(SyntaxElement::Node(SyntaxNode {
+                    kind,
+                    range,
+                    children,
+                }));
             }
             Event::Token => {
-                push_trivia(&mut stack, &mut raw_pos, &mut offset);
+                push_trivia(&mut scratch, &mut raw_pos, &mut offset);
                 let t = raw[raw_pos];
                 let range = TextRange::new(offset, offset + t.len);
                 offset += t.len;
                 raw_pos += 1;
-                stack
-                    .last_mut()
-                    .expect("token outside a node")
-                    .children
-                    .push(SyntaxElement::Token(SyntaxToken {
-                        kind: t.kind,
-                        range,
-                    }));
+                debug_assert!(!stack.is_empty(), "token outside a node");
+                scratch.push(SyntaxElement::Token(SyntaxToken {
+                    kind: t.kind,
+                    range,
+                }));
             }
             Event::Error(message) => {
                 // Point the error at the next non-trivia token (or the end of input).

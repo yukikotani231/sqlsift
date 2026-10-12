@@ -1,10 +1,46 @@
 //! The concrete syntax tree: every token of the input, trivia included, under nodes.
 //!
-//! This is a plain owned tree to start with. The parser only emits events
-//! (start node, token, finish node), so the representation can change (an arena per statement,
-//! see #257) without touching the grammar.
+//! Nodes live in an [`Arena`]: a node's children are one slice allocated there, so building
+//! a tree is a few bump allocations instead of one `Vec` per node, and dropping it is free.
+//! Reusing the arena (`Arena::reset`) between files reuses its memory. See #257.
 
 use crate::SyntaxKind;
+
+/// The memory a tree lives in. One arena can hold many trees; [`Arena::reset`] frees them all
+/// at once and keeps the memory for the next ones.
+#[derive(Default)]
+pub struct Arena(bumpalo::Bump);
+
+impl Arena {
+    pub fn new() -> Self {
+        Arena::default()
+    }
+
+    /// Frees every tree in the arena, keeping its memory for reuse.
+    pub fn reset(&mut self) {
+        self.0.reset();
+    }
+
+    /// Bytes allocated for trees so far.
+    pub fn allocated_bytes(&self) -> usize {
+        self.0.allocated_bytes()
+    }
+
+    pub(crate) fn alloc_children<'a>(
+        &'a self,
+        children: std::vec::Drain<'_, SyntaxElement<'a>>,
+    ) -> &'a [SyntaxElement<'a>] {
+        self.0.alloc_slice_fill_iter(children)
+    }
+}
+
+impl std::fmt::Debug for Arena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Arena")
+            .field("allocated_bytes", &self.allocated_bytes())
+            .finish()
+    }
+}
 
 /// A byte range in the source text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -32,7 +68,7 @@ impl TextRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxToken {
     pub kind: SyntaxKind,
     pub range: TextRange,
@@ -44,13 +80,13 @@ impl SyntaxToken {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyntaxElement {
-    Node(SyntaxNode),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxElement<'a> {
+    Node(SyntaxNode<'a>),
     Token(SyntaxToken),
 }
 
-impl SyntaxElement {
+impl SyntaxElement<'_> {
     pub fn kind(&self) -> SyntaxKind {
         match self {
             SyntaxElement::Node(n) => n.kind,
@@ -66,20 +102,20 @@ impl SyntaxElement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyntaxNode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyntaxNode<'a> {
     pub kind: SyntaxKind,
     pub range: TextRange,
-    pub children: Vec<SyntaxElement>,
+    pub children: &'a [SyntaxElement<'a>],
 }
 
-impl SyntaxNode {
-    pub fn text<'a>(&self, source: &'a str) -> &'a str {
+impl<'a> SyntaxNode<'a> {
+    pub fn text<'s>(&self, source: &'s str) -> &'s str {
         &source[self.range.to_range()]
     }
 
     /// Child nodes, in order.
-    pub fn nodes(&self) -> impl Iterator<Item = &SyntaxNode> {
+    pub fn nodes(&self) -> impl Iterator<Item = &'a SyntaxNode<'a>> {
         self.children.iter().filter_map(|c| match c {
             SyntaxElement::Node(n) => Some(n),
             SyntaxElement::Token(_) => None,
@@ -87,7 +123,7 @@ impl SyntaxNode {
     }
 
     /// Child tokens other than trivia, in order.
-    pub fn tokens(&self) -> impl Iterator<Item = &SyntaxToken> {
+    pub fn tokens(&self) -> impl Iterator<Item = &'a SyntaxToken> {
         self.children.iter().filter_map(|c| match c {
             SyntaxElement::Token(t) if !t.kind.is_trivia() => Some(t),
             _ => None,
@@ -95,7 +131,7 @@ impl SyntaxNode {
     }
 
     /// The first child node of `kind`.
-    pub fn child(&self, kind: SyntaxKind) -> Option<&SyntaxNode> {
+    pub fn child(&self, kind: SyntaxKind) -> Option<&'a SyntaxNode<'a>> {
         self.nodes().find(|n| n.kind == kind)
     }
 
@@ -105,14 +141,14 @@ impl SyntaxNode {
     }
 
     /// All tokens below this node, trivia included, in order.
-    pub fn descendant_tokens(&self) -> Vec<&SyntaxToken> {
+    pub fn descendant_tokens(&self) -> Vec<&'a SyntaxToken> {
         let mut out = Vec::new();
         self.collect_tokens(&mut out);
         out
     }
 
-    fn collect_tokens<'a>(&'a self, out: &mut Vec<&'a SyntaxToken>) {
-        for child in &self.children {
+    fn collect_tokens(&self, out: &mut Vec<&'a SyntaxToken>) {
+        for child in self.children {
             match child {
                 SyntaxElement::Node(n) => n.collect_tokens(out),
                 SyntaxElement::Token(t) => out.push(t),
@@ -130,7 +166,7 @@ impl SyntaxNode {
     fn dump(&self, source: &str, depth: usize, out: &mut String) {
         use std::fmt::Write;
         let _ = writeln!(out, "{:indent$}{:?}", "", self.kind, indent = depth * 2);
-        for child in &self.children {
+        for child in self.children {
             match child {
                 SyntaxElement::Node(n) => n.dump(source, depth + 1, out),
                 SyntaxElement::Token(t) if t.kind.is_trivia() => {}

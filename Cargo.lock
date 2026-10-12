@@ -1032,6 +1032,7 @@ dependencies = [
 name = "sqlsift-parser"
 version = "0.2.0"
 dependencies = [
+ "bumpalo",
  "sqlparser",
 ]
 

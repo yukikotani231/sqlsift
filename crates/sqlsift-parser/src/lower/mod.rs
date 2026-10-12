@@ -134,7 +134,7 @@ struct Lowering<'a> {
 }
 
 /// The non-trivia tokens of a node, children's included.
-fn all_tokens(node: &SyntaxNode) -> Vec<&SyntaxToken> {
+fn all_tokens<'a>(node: &'a SyntaxNode<'a>) -> Vec<&'a SyntaxToken> {
     node.descendant_tokens()
         .into_iter()
         .filter(|t| !t.kind.is_trivia())
@@ -1801,13 +1801,13 @@ fn object_name(parts: Vec<Ident>) -> ObjectName {
 }
 
 /// The single expression node of a clause.
-fn expr_child(node: &SyntaxNode) -> Result<&SyntaxNode> {
+fn expr_child<'a>(node: &'a SyntaxNode<'a>) -> Result<&'a SyntaxNode<'a>> {
     node.nodes()
         .find(|n| n.kind != SyntaxKind::Alias)
         .ok_or_else(|| Unsupported(format!("{:?} without an expression", node.kind)))
 }
 
-fn child_query(node: &SyntaxNode) -> Result<&SyntaxNode> {
+fn child_query<'a>(node: &'a SyntaxNode<'a>) -> Result<&'a SyntaxNode<'a>> {
     node.child(SyntaxKind::SelectStmt)
         .ok_or_else(|| Unsupported("subquery".into()))
 }

@@ -155,7 +155,8 @@ fn ddl_matches_sqlparser() {
 fn alter_table_end_token_is_the_semicolon() {
     let sql = "ALTER TABLE t DROP a  ;\nSELECT 1";
     let theirs = sqlparser::parser::Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
-    let parsed = sqlsift_parser::parse(sql);
+    let arena = sqlsift_parser::Arena::new();
+    let parsed = sqlsift_parser::parse(&arena, sql);
     let ours = lower_statement(sql, parsed.statements().next().unwrap()).unwrap();
     assert_eq!(format!("{ours:?}"), format!("{:?}", theirs[0]));
 }
