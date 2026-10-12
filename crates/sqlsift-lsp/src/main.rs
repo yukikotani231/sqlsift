@@ -8,6 +8,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::server::Backend;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()

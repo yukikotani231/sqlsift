@@ -33,6 +33,9 @@ use crate::output::describe::FileDescription;
 use crate::output::schema::SchemaReport;
 use crate::output::{BaselineSummary, FileDiagnostics, OutputFormatter};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(args.verbose, args.quiet);

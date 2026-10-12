@@ -30,6 +30,7 @@ indexmap = { version = "2.7", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 glob = "0.3"
+mimalloc = { version = "0.1", default-features = false }
 
 # Async / LSP
 tower-lsp = "0.20"
