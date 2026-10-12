@@ -31,11 +31,17 @@ It prints a count per outcome (`same`, `spans differ`, `different`, `unsupported
 
 ## Running sqlsift on it
 
-`analysis::statements` splits a file into statements and lowers each one. The CLI built
-with the `inhouse-parser` feature reads PostgreSQL files (queries and schema) with it when
-`SQLSIFT_PARSER=inhouse` is set (`sqlsift_core::parser_hook`): lowered statements are
-analyzed as they are, the others are parsed by sqlparser as before, and a statement this
-parser reads but sqlparser can't is skipped without a parse error.
+`analysis::statements` splits a file into statements and lowers each one. sqlsift built
+with the `inhouse-parser` feature (`sqlsift-core` and `sqlsift-cli`) reads PostgreSQL files
+(queries and schema) with it when `SQLSIFT_PARSER=inhouse` is set
+(`sqlsift_core::parser_hook`): lowered statements are analyzed as they are, the others are
+parsed by sqlparser as before, and a statement this parser reads but sqlparser can't is
+skipped without a parse error.
+
+A lowered statement also comes with its tree, and the checks moved to the tree
+(`sqlsift-core/src/analyzer/syntax.rs`) read it instead of the AST. So far: the restriction
+rules (E0024-E0026, E0028). `crates/sqlsift-core/tests/inhouse_parser_tests.rs` checks that
+they report what their AST versions report.
 
 ```bash
 cargo build --release -p sqlsift-cli --features inhouse-parser
@@ -58,4 +64,4 @@ Statements: `SELECT` (`WITH [RECURSIVE]`, set operations, `VALUES`, joins, subqu
 typed literals, `COLLATE`, `AT TIME ZONE`, all literal kinds. Everything else is an
 `OpaqueStmt`.
 
-Next: the analyzer reading the tree directly, one check at a time.
+Next: more checks reading the tree directly, one at a time.

@@ -25,20 +25,11 @@ impl Resolver<'_> {
         match stmt {
             Statement::Update(update) if update.selection.is_none() => {
                 let span = table_span(std::slice::from_ref(&update.table));
-                self.push_restriction(
-                    DiagnosticKind::UnfilteredWrite,
-                    "UPDATE without WHERE changes every row of the table",
-                    "Add a WHERE clause (WHERE true if every row is meant)",
-                    span,
-                );
+                self.diagnostics.push(unfiltered_update(span));
             }
             Statement::Delete(delete) if delete.selection.is_none() && delete.limit.is_none() => {
-                self.push_restriction(
-                    DiagnosticKind::UnfilteredWrite,
-                    "DELETE without WHERE deletes every row of the table",
-                    "Add a WHERE clause (WHERE true if every row is meant), or use TRUNCATE",
-                    delete_span(delete),
-                );
+                self.diagnostics
+                    .push(unfiltered_delete(delete_span(delete)));
             }
             Statement::Insert(insert) => {
                 if let (true, Some(source)) = (insert.columns.is_empty(), &insert.source) {
@@ -46,12 +37,7 @@ impl Resolver<'_> {
                     let span = insert_table(insert)
                         .and_then(name_last)
                         .map(|i| Span::from_sqlparser(&i.span));
-                    self.push_restriction(
-                        DiagnosticKind::InsertWithoutColumns,
-                        "INSERT without a column list depends on the order of the table's columns",
-                        "List the target columns: INSERT INTO t (a, b) ...",
-                        span,
-                    );
+                    self.diagnostics.push(insert_without_columns(span));
                     self.check_select_star(source);
                 } else if let Some(source) = &insert.source {
                     self.check_select_star(source);
@@ -60,20 +46,19 @@ impl Resolver<'_> {
             Statement::Query(query) => self.check_select_star(query),
             _ => {}
         }
-        self.check_unordered_limits(stmt);
     }
 
-    /// E0028 for the queries of a statement, subqueries and CTEs too
-    fn check_unordered_limits(&mut self, stmt: &Statement) {
+    /// E0028 for the queries of a statement, subqueries and CTEs too. Run once, for
+    /// the whole statement ([`Self::check_restrictions`] runs again for the INSERT /
+    /// UPDATE / DELETE statements in it: `WITH ... INSERT`, data-modifying CTEs)
+    pub(super) fn check_unordered_limits(&mut self, stmt: &Statement) {
         let mut unordered = UnorderedLimits::default();
         let _ = stmt.visit(&mut unordered);
         for (keyword, span) in unordered.found {
-            self.push_restriction(
-                DiagnosticKind::LimitWithoutOrderBy,
-                &format!("{keyword} without ORDER BY returns an arbitrary set of rows"),
-                "Add an ORDER BY clause that puts the rows in a fixed order",
+            self.diagnostics.push(limit_without_order_by(
+                keyword,
                 (span.line > 0).then_some(span),
-            );
+            ));
         }
     }
 
@@ -90,12 +75,8 @@ impl Resolver<'_> {
                             continue;
                         };
                         let span = Span::from_sqlparser(&options.wildcard_token.0.span);
-                        self.push_restriction(
-                            DiagnosticKind::SelectStar,
-                            "SELECT * returns whatever columns the tables have",
-                            "List the columns the query needs",
-                            (span.line > 0).then_some(span),
-                        );
+                        self.diagnostics
+                            .push(select_star((span.line > 0).then_some(span)));
                     }
                 }
                 SetExpr::SetOperation { left, right, .. } => {
@@ -107,18 +88,62 @@ impl Resolver<'_> {
             }
         }
     }
+}
 
-    fn push_restriction(
-        &mut self,
-        kind: DiagnosticKind,
-        message: &str,
-        help: &str,
-        span: Option<Span>,
-    ) {
-        let mut diag = Diagnostic::warning(kind, message).with_help(help);
-        diag.span = span;
-        self.diagnostics.push(diag);
-    }
+fn restriction(kind: DiagnosticKind, message: &str, help: &str, span: Option<Span>) -> Diagnostic {
+    let mut diag = Diagnostic::warning(kind, message).with_help(help);
+    diag.span = span;
+    diag
+}
+
+/// E0024 for an `UPDATE` (`span`: the table name)
+pub(super) fn unfiltered_update(span: Option<Span>) -> Diagnostic {
+    restriction(
+        DiagnosticKind::UnfilteredWrite,
+        "UPDATE without WHERE changes every row of the table",
+        "Add a WHERE clause (WHERE true if every row is meant)",
+        span,
+    )
+}
+
+/// E0024 for a `DELETE` (`span`: the table name)
+pub(super) fn unfiltered_delete(span: Option<Span>) -> Diagnostic {
+    restriction(
+        DiagnosticKind::UnfilteredWrite,
+        "DELETE without WHERE deletes every row of the table",
+        "Add a WHERE clause (WHERE true if every row is meant), or use TRUNCATE",
+        span,
+    )
+}
+
+/// E0025 (`span`: the table name)
+pub(super) fn insert_without_columns(span: Option<Span>) -> Diagnostic {
+    restriction(
+        DiagnosticKind::InsertWithoutColumns,
+        "INSERT without a column list depends on the order of the table's columns",
+        "List the target columns: INSERT INTO t (a, b) ...",
+        span,
+    )
+}
+
+/// E0026 (`span`: the `*`)
+pub(super) fn select_star(span: Option<Span>) -> Diagnostic {
+    restriction(
+        DiagnosticKind::SelectStar,
+        "SELECT * returns whatever columns the tables have",
+        "List the columns the query needs",
+        span,
+    )
+}
+
+/// E0028 (`span`: the value of the limiting clause)
+pub(super) fn limit_without_order_by(keyword: &str, span: Option<Span>) -> Diagnostic {
+    restriction(
+        DiagnosticKind::LimitWithoutOrderBy,
+        &format!("{keyword} without ORDER BY returns an arbitrary set of rows"),
+        "Add an ORDER BY clause that puts the rows in a fixed order",
+        span,
+    )
 }
 
 /// Queries that limit their rows without ordering them: the limiting keyword and

@@ -97,6 +97,8 @@ fn e0028_limit_without_order_by() {
         "SELECT id FROM (SELECT id FROM users LIMIT 5) s ORDER BY id",
         "WITH s AS (SELECT id FROM users LIMIT 5) SELECT id FROM s ORDER BY id",
         "SELECT id FROM users UNION ALL SELECT id FROM archived LIMIT 5",
+        // Once, though the INSERT is checked as a statement of its own too
+        "WITH s AS (SELECT 1) INSERT INTO users (id, name) SELECT id, name FROM archived LIMIT 5",
     ] {
         assert_eq!(codes(sql), ["E0028"], "{sql}");
     }

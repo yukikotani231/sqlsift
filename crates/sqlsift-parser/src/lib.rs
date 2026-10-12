@@ -4,9 +4,9 @@
 //! doesn't cover yet become `OpaqueStmt` nodes, so one bad construct doesn't take the rest
 //! of the file with it.
 //!
-//! Not used by sqlsift yet. [`lower`] turns statements into sqlparser's AST, so the
-//! analyzer can run on this parser's output unchanged, and the differential test compares
-//! the two parsers on the same input. See issue #257.
+//! Used by sqlsift only behind its `inhouse-parser` feature. [`lower`] turns statements
+//! into sqlparser's AST, so the analyzer can run on this parser's output unchanged, and the
+//! differential test compares the two parsers on the same input. See issue #257.
 
 pub mod analysis;
 pub mod diff;

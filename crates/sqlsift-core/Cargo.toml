@@ -19,9 +19,14 @@ serde_json.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
 glob.workspace = true
+# Experimental (#257): the in-house PostgreSQL parser, behind the `inhouse-parser` feature.
+sqlsift-parser = { path = "../sqlsift-parser", optional = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+[features]
+inhouse-parser = ["dep:sqlsift-parser"]
 
 [lints]
 workspace = true

@@ -227,10 +227,9 @@ impl SchemaBuilder {
         // A `SET search_path` applies to the rest of its file only
         let search_path = self.catalog.search_path.clone();
 
-        if let Some(parser) = crate::parser_hook::statement_parser()
-            .filter(|_| self.dialect == SqlDialect::PostgreSQL)
-        {
-            self.parse_statements_with(parser, sql);
+        #[cfg(feature = "inhouse-parser")]
+        if self.dialect == SqlDialect::PostgreSQL && crate::parser_hook::enabled() {
+            self.parse_statements_inhouse(sql);
             self.catalog.search_path = search_path;
             return;
         }
@@ -303,25 +302,30 @@ impl SchemaBuilder {
         }
     }
 
-    /// Parses `sql` with the parser of [`crate::parser_hook`], sqlparser for the
+    /// Parses `sql` with the in-house parser ([`crate::parser_hook`]), sqlparser for the
     /// statements it leaves to it.
-    fn parse_statements_with(&mut self, parser: crate::parser_hook::StatementParser, sql: &str) {
-        use crate::parser_hook::Parsed;
-        for item in parser(sql) {
-            let raw_stmt = &sql[item.range.clone()];
-            match item.parsed {
+    #[cfg(feature = "inhouse-parser")]
+    fn parse_statements_inhouse(&mut self, sql: &str) {
+        use sqlsift_parser::analysis::Outcome;
+        let arena = sqlsift_parser::Arena::new();
+        for item in sqlsift_parser::analysis::statements(&arena, sql) {
+            let range = item.range.to_range();
+            let raw_stmt = &sql[range.clone()];
+            match item.outcome {
                 // Locations are relative to `sql`
-                Parsed::Statement(statement) => self.process_statement(&statement),
-                Parsed::Fallback => self.parse_one(sql, raw_stmt),
-                Parsed::SyntaxError { message, offset } => {
+                Outcome::Lowered(statement) => self.process_statement(&statement),
+                Outcome::Unsupported(_) => self.parse_one(sql, raw_stmt),
+                Outcome::SyntaxError(error) => {
+                    let message = error.message;
+                    let offset = error.range.start as usize;
                     let (line, column) = crate::parser_hook::line_column(
                         raw_stmt,
-                        offset.saturating_sub(item.range.start).min(raw_stmt.len()),
+                        offset.saturating_sub(range.start).min(raw_stmt.len()),
                     );
                     let error = sqlparser::parser::ParserError::ParserError(format!(
                         "{message} at Line: {line}, Column: {column}"
                     ));
-                    self.process_unparsed_statement(sql, item.range.start, raw_stmt, &error);
+                    self.process_unparsed_statement(sql, range.start, raw_stmt, &error);
                 }
             }
         }

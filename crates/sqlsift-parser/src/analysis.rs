@@ -5,7 +5,6 @@ use sqlparser::ast::Statement;
 
 use crate::lower::lower_statement;
 use crate::{parse, Arena, SyntaxError, SyntaxKind, SyntaxNode, TextRange};
-use std::cell::RefCell;
 
 /// What became of one statement.
 #[derive(Debug)]
@@ -18,35 +17,23 @@ pub enum Outcome {
     SyntaxError(SyntaxError),
 }
 
-/// One statement: its range in the source (without the `;`) and its outcome.
+/// One statement: its range in the source (without the `;`), its outcome and, when it is
+/// one node, its tree.
 #[derive(Debug)]
-pub struct AnalyzedStatement {
+pub struct AnalyzedStatement<'a> {
     pub range: TextRange,
     pub outcome: Outcome,
+    pub node: Option<&'a SyntaxNode<'a>>,
 }
 
-/// Parses `source` once and splits it at the top-level `;`s (so text the parser couldn't
-/// place stays with its statement).
-///
-/// The tree goes in a per-thread arena that is reset on each call, so parsing file after file
-/// reuses the same memory.
-pub fn statements(source: &str) -> Vec<AnalyzedStatement> {
-    thread_local! {
-        static ARENA: RefCell<Arena> = RefCell::new(Arena::new());
-    }
-    ARENA.with(|arena| {
-        let mut arena = arena.borrow_mut();
-        arena.reset();
-        statements_in(&arena, source)
-    })
-}
-
-fn statements_in(arena: &Arena, source: &str) -> Vec<AnalyzedStatement> {
+/// Parses `source` once into `arena` and splits it at the top-level `;`s (so text the
+/// parser couldn't place stays with its statement).
+pub fn statements<'a>(arena: &'a Arena, source: &str) -> Vec<AnalyzedStatement<'a>> {
     let parsed = parse(arena, source);
     let mut out = vec![];
-    let mut nodes: Vec<&SyntaxNode> = vec![];
+    let mut nodes: Vec<&'a SyntaxNode<'a>> = vec![];
     let mut range: Option<TextRange> = None;
-    let mut flush = |range: &mut Option<TextRange>, nodes: &mut Vec<&SyntaxNode>| {
+    let mut flush = |range: &mut Option<TextRange>, nodes: &mut Vec<&'a SyntaxNode<'a>>| {
         let Some(r) = range.take() else {
             return;
         };
@@ -62,7 +49,14 @@ fn statements_in(arena: &Arena, source: &str) -> Vec<AnalyzedStatement> {
             },
             (None, _) => Outcome::Unsupported("not one statement".into()),
         };
-        out.push(AnalyzedStatement { range: r, outcome });
+        out.push(AnalyzedStatement {
+            range: r,
+            outcome,
+            node: match nodes[..] {
+                [node] => Some(node),
+                _ => None,
+            },
+        });
         nodes.clear();
     };
     for child in parsed.root.children {
