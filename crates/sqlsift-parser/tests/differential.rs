@@ -94,7 +94,7 @@ fn select_subset_matches_sqlparser() {
 /// Where sqlparser departs from PostgreSQL, this parser follows PostgreSQL and the
 /// comparison reports a difference.
 #[test]
-fn create_table_matches_sqlparser() {
+fn ddl_matches_sqlparser() {
     for sql in [
         "CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL DEFAULT 'x')",
         "CREATE TABLE IF NOT EXISTS s.t (a int NULL CHECK (a > 0) NO INHERIT, b text COLLATE \"C\" UNIQUE)",
@@ -114,6 +114,21 @@ fn create_table_matches_sqlparser() {
         "CREATE TABLE t (a int) PARTITION BY RANGE (a)",
         "CREATE TABLE t AS SELECT 1 AS a",
         "CREATE TEMP TABLE t ON COMMIT DROP AS SELECT a FROM u WITH NO DATA",
+        "CREATE OR REPLACE VIEW s.v (a, b) AS SELECT 1, 2",
+        "CREATE TEMP VIEW v AS SELECT a FROM t",
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS v AS SELECT a FROM t",
+        "CREATE TYPE mood AS ENUM ('sad', 'it''s ok')",
+        "CREATE TYPE s.e AS ENUM ()",
+        "CREATE TYPE pair AS (a int, b text COLLATE \"C\")",
+        "CREATE TYPE opaque",
+        "CREATE UNIQUE INDEX IF NOT EXISTS i ON t (a, lower(b) DESC NULLS LAST) WHERE c IS NULL",
+        "CREATE INDEX ON s.t USING gin (doc jsonb_path_ops)",
+        "CREATE INDEX CONCURRENTLY i ON t USING btree ((a + b), c COLLATE \"C\") INCLUDE (d)",
+        "CREATE UNIQUE INDEX i ON t (a) NULLS NOT DISTINCT",
+        "DROP TABLE IF EXISTS a, s.b CASCADE",
+        "DROP MATERIALIZED VIEW v",
+        "DROP INDEX i RESTRICT",
+        "DROP TYPE IF EXISTS mood",
     ] {
         assert_same(sql);
     }

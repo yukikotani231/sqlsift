@@ -106,10 +106,22 @@ pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
     if node.has_errors() {
         return unsupported("syntax error");
     }
+    // sqlparser reads `/*+ ... */` (and `--+ ...`) comments as optimizer hints, even for
+    // PostgreSQL, where they are comments.
+    if node.descendant_tokens().iter().any(|t| {
+        matches!(t.kind, SyntaxKind::BlockComment | SyntaxKind::LineComment)
+            && matches!(t.text(source).get(..3), Some("/*+" | "--+"))
+    }) {
+        return unsupported("optimizer hint comment");
+    }
     match node.kind {
         SyntaxKind::SelectStmt => Ok(Statement::Query(Box::new(cx.query(node)?))),
         SyntaxKind::InsertStmt | SyntaxKind::UpdateStmt | SyntaxKind::DeleteStmt => cx.dml(node),
         SyntaxKind::CreateTableStmt => cx.create_table(node),
+        SyntaxKind::CreateViewStmt => cx.create_view(node),
+        SyntaxKind::CreateTypeStmt => cx.create_type(node),
+        SyntaxKind::CreateIndexStmt => cx.create_index(node),
+        SyntaxKind::DropStmt => cx.drop(node),
         SyntaxKind::OpaqueStmt => unsupported("statement"),
         kind => unsupported(format!("{kind:?}")),
     }

@@ -140,6 +140,19 @@ pub enum SyntaxKind {
     ConstraintAttribute,
     /// The rest of an `EXCLUDE` constraint, kept as tokens
     ExcludeBody,
+    /// `CREATE [MATERIALIZED] VIEW ...`
+    CreateViewStmt,
+    /// `CREATE TYPE ...` (enum labels in `EnumLabels`, composite attributes as
+    /// `ColumnDef`s in `TableElements`)
+    CreateTypeStmt,
+    EnumLabels,
+    /// `CREATE [UNIQUE] INDEX ...`
+    CreateIndexStmt,
+    /// The parenthesized `IndexElem`s of `CREATE INDEX`
+    IndexElems,
+    IndexElem,
+    /// `DROP TABLE / VIEW / INDEX / TYPE / ... names`
+    DropStmt,
     /// A dotted name (`schema.table`, `t.col`, `t.*`)
     Name,
     ColumnList,

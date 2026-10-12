@@ -3,13 +3,15 @@
 use sqlparser::ast::helpers::stmt_create_table::CreateTableBuilder;
 use sqlparser::ast::{
     CheckConstraint, ColumnDef, ColumnOption, ColumnOptionDef, ConstraintCharacteristics,
-    ConstraintReferenceMatchKind, DeferrableInitial, Expr, ForeignKeyConstraint, GeneratedAs,
-    GeneratedExpressionMode, Ident, IndexColumn, KeyOrIndexDisplay, NullsDistinctOption, OnCommit,
-    OrderByExpr, OrderByOptions, PrimaryKeyConstraint, ReferentialAction, Statement,
-    TableConstraint, UniqueConstraint, WithData,
+    ConstraintReferenceMatchKind, CreateIndex, CreateTableOptions, CreateView, DeferrableInitial,
+    Expr, ForeignKeyConstraint, GeneratedAs, GeneratedExpressionMode, Ident, IndexColumn,
+    IndexType, KeyOrIndexDisplay, NullsDistinctOption, ObjectType, OnCommit, OrderByExpr,
+    OrderByOptions, PrimaryKeyConstraint, ReferentialAction, Statement, TableConstraint,
+    UniqueConstraint, UserDefinedTypeCompositeAttributeDef, UserDefinedTypeRepresentation,
+    ViewColumnDef, WithData,
 };
 
-use super::{object_name, unsupported, Lowering, Result};
+use super::{object_name, unquote, unsupported, Lowering, Result};
 use crate::{SyntaxKind, SyntaxNode};
 
 /// Child nodes of a constraint that are not its expression.
@@ -440,6 +442,226 @@ impl Lowering<'_> {
                     .into()
             }
             _ => return unsupported(format!("table constraint {}", kws.join(" "))),
+        })
+    }
+
+    fn names(&self, node: &SyntaxNode) -> Result<Vec<sqlparser::ast::ObjectName>> {
+        node.nodes()
+            .filter(|n| n.kind == SyntaxKind::Name)
+            .map(|n| Ok(object_name(self.name_parts(n)?)))
+            .collect()
+    }
+
+    pub(super) fn create_view(&self, node: &SyntaxNode) -> Result<Statement> {
+        let kws = self.keywords(node);
+        let has = |kw: &str| kws.iter().any(|k| k == kw);
+        if has("recursive") || node.child(SyntaxKind::TableOption).is_some() {
+            return unsupported("view option");
+        }
+        let (Some(name), Some(query)) = (
+            node.child(SyntaxKind::Name),
+            node.child(SyntaxKind::SelectStmt),
+        ) else {
+            return unsupported("CREATE VIEW");
+        };
+        let columns = match node.child(SyntaxKind::ColumnList) {
+            Some(list) => self
+                .column_list(list)?
+                .into_iter()
+                .map(|name| ViewColumnDef {
+                    name,
+                    data_type: None,
+                    options: None,
+                })
+                .collect(),
+            None => vec![],
+        };
+        Ok(Statement::CreateView(CreateView {
+            or_alter: false,
+            or_replace: has("replace"),
+            materialized: has("materialized"),
+            secure: false,
+            name: object_name(self.name_parts(name)?),
+            name_before_not_exists: false,
+            columns,
+            query: Box::new(self.query(query)?),
+            options: CreateTableOptions::None,
+            cluster_by: vec![],
+            comment: None,
+            with_no_schema_binding: false,
+            if_not_exists: has("exists"),
+            temporary: has("temp") || has("temporary"),
+            copy_grants: false,
+            to: None,
+            params: None,
+        }))
+    }
+
+    pub(super) fn create_type(&self, node: &SyntaxNode) -> Result<Statement> {
+        let Some(name) = node.child(SyntaxKind::Name) else {
+            return unsupported("type name");
+        };
+        let representation = if let Some(labels) = node.child(SyntaxKind::EnumLabels) {
+            let labels = labels
+                .tokens()
+                .filter(|t| t.kind == SyntaxKind::String)
+                // sqlparser gives string labels no span.
+                .map(|t| sqlparser::ast::Ident {
+                    value: unquote(self.text(t), 0),
+                    quote_style: Some('\''),
+                    span: sqlparser::tokenizer::Span::empty(),
+                })
+                .collect();
+            Some(UserDefinedTypeRepresentation::Enum { labels })
+        } else if let Some(attributes) = node.child(SyntaxKind::TableElements) {
+            let attributes = attributes
+                .nodes()
+                .map(|a| {
+                    let (Some(name), Some(data_type)) =
+                        (a.tokens().next(), a.child(SyntaxKind::TypeName))
+                    else {
+                        return unsupported("attribute");
+                    };
+                    Ok(UserDefinedTypeCompositeAttributeDef {
+                        name: self.ident(name)?,
+                        data_type: self.data_type(data_type)?,
+                        collation: a
+                            .child(SyntaxKind::Name)
+                            .map(|c| Ok(object_name(self.name_parts(c)?)))
+                            .transpose()?,
+                    })
+                })
+                .collect::<Result<_>>()?;
+            Some(UserDefinedTypeRepresentation::Composite { attributes })
+        } else if node.child(SyntaxKind::TableOption).is_some() {
+            return unsupported("CREATE TYPE form");
+        } else {
+            None
+        };
+        Ok(Statement::CreateType {
+            name: object_name(self.name_parts(name)?),
+            representation,
+        })
+    }
+
+    pub(super) fn create_index(&self, node: &SyntaxNode) -> Result<Statement> {
+        let kws = self.keywords(node);
+        let has = |kw: &str| kws.iter().any(|k| k == kw);
+        if has("only") {
+            return unsupported("ON ONLY");
+        }
+        let names = self.names(node)?;
+        let (name, table_name) = match <[_; 2]>::try_from(names) {
+            Ok([name, table]) => (Some(name), table),
+            Err(mut names) if names.len() == 1 => (None, names.remove(0)),
+            Err(_) => return unsupported("index names"),
+        };
+        let mut using = None;
+        let mut include = vec![];
+        for params in node.nodes().filter(|n| n.kind == SyntaxKind::IndexParams) {
+            let words = self.keywords(params);
+            match words.first().map(String::as_str) {
+                Some("using") if using.is_none() => {
+                    let Some(method) = params
+                        .child(SyntaxKind::Name)
+                        .and_then(|n| n.tokens().next())
+                    else {
+                        return unsupported("USING");
+                    };
+                    using = Some(match self.text(method).to_ascii_lowercase().as_str() {
+                        _ if method.kind != SyntaxKind::Ident => {
+                            IndexType::Custom(self.ident(method)?)
+                        }
+                        "btree" => IndexType::BTree,
+                        "hash" => IndexType::Hash,
+                        "gin" => IndexType::GIN,
+                        "gist" => IndexType::GiST,
+                        "spgist" => IndexType::SPGiST,
+                        "brin" => IndexType::BRIN,
+                        "bloom" => IndexType::Bloom,
+                        _ => IndexType::Custom(self.ident(method)?),
+                    });
+                }
+                Some("include") if include.is_empty() => {
+                    let Some(list) = params.child(SyntaxKind::ColumnList) else {
+                        return unsupported("INCLUDE");
+                    };
+                    include = self.column_list(list)?;
+                }
+                _ => return unsupported("index parameters"),
+            }
+        }
+        let Some(elems) = node.child(SyntaxKind::IndexElems) else {
+            return unsupported("index columns");
+        };
+        let exprs = self.order_by_exprs(elems)?;
+        let columns = exprs
+            .into_iter()
+            .zip(elems.nodes())
+            .map(|(column, elem)| {
+                Ok(IndexColumn {
+                    column,
+                    operator_class: elem
+                        .nodes()
+                        .nth(1)
+                        .filter(|n| n.kind == SyntaxKind::Name)
+                        .map(|n| Ok(object_name(self.name_parts(n)?)))
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let nulls_distinct = if has("nulls") {
+            Some(!has("not"))
+        } else {
+            None
+        };
+        let predicate = match node.child(SyntaxKind::WhereClause) {
+            Some(w) => Some(self.constraint_expr(w)?),
+            None => None,
+        };
+        Ok(Statement::CreateIndex(CreateIndex {
+            name,
+            table_name,
+            using,
+            columns,
+            unique: has("unique"),
+            concurrently: has("concurrently"),
+            r#async: false,
+            if_not_exists: has("exists"),
+            include,
+            nulls_distinct,
+            with: vec![],
+            predicate,
+            index_options: vec![],
+            alter_options: vec![],
+        }))
+    }
+
+    pub(super) fn drop(&self, node: &SyntaxNode) -> Result<Statement> {
+        let kws = self.keywords(node);
+        let has = |kw: &str| kws.iter().any(|k| k == kw);
+        let object_type = match kws.get(1).map(String::as_str) {
+            Some("table") => ObjectType::Table,
+            Some("view") => ObjectType::View,
+            Some("materialized") => ObjectType::MaterializedView,
+            Some("index") => ObjectType::Index,
+            Some("type") => ObjectType::Type,
+            Some("sequence") => ObjectType::Sequence,
+            Some("schema") => ObjectType::Schema,
+            _ => return unsupported(format!("DROP {}", kws.get(1).map_or("", String::as_str))),
+        };
+        if has("concurrently") {
+            return unsupported("DROP INDEX CONCURRENTLY");
+        }
+        Ok(Statement::Drop {
+            object_type,
+            if_exists: has("exists"),
+            names: self.names(node)?,
+            cascade: has("cascade"),
+            restrict: has("restrict"),
+            purge: false,
+            temporary: false,
+            table: None,
         })
     }
 }
