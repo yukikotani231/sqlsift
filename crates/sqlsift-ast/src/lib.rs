@@ -15,6 +15,8 @@ mod ddl;
 mod display;
 mod dml;
 mod expr;
+#[cfg(feature = "sqlparser")]
+pub mod from_sqlparser;
 mod query;
 mod span;
 mod spans;

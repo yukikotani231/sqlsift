@@ -387,3 +387,26 @@ pub enum ObjectType {
     Warehouse,
     Other,
 }
+
+macro_rules! constraint_from {
+    ($($constraint:ident => $variant:ident,)*) => {$(
+        impl From<$constraint> for TableConstraint {
+            fn from(constraint: $constraint) -> Self {
+                TableConstraint::$variant(constraint)
+            }
+        }
+
+        impl From<$constraint> for ColumnOption {
+            fn from(constraint: $constraint) -> Self {
+                ColumnOption::$variant(constraint)
+            }
+        }
+    )*};
+}
+
+constraint_from! {
+    UniqueConstraint => Unique,
+    PrimaryKeyConstraint => PrimaryKey,
+    ForeignKeyConstraint => ForeignKey,
+    CheckConstraint => Check,
+}

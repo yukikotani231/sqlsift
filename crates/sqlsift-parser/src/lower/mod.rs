@@ -10,18 +10,19 @@
 // lifetime, and `with_sqlparser` creates the parser itself.
 #![allow(clippy::redundant_closure_for_method_calls)]
 
-use sqlparser::ast::{
-    self, BinaryOperator, CaseWhen, CastKind, Cte, CteAsMaterialized, Distinct, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
-    Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, Offset,
-    OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, Query, Select, SelectFlavor,
-    SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement,
-    TableAlias, TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value,
-    ValueWithSpan, WildcardAdditionalOptions, With,
-};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::ParserError;
-use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan};
+use sqlparser::tokenizer::TokenWithSpan;
+use sqlsift_ast::{
+    self as ast, BinaryOperator, CaseWhen, CastKind, Cte, CteAsMaterialized, Distinct, Expr,
+    Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr,
+    Ident, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, Offset,
+    OffsetRows, OrderBy, OrderByExpr, OrderByKind, OrderByOptions, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
+    TableAliasColumnDef, TableFactor, TableWithJoins, UnaryOperator, Value, ValueWithSpan,
+    WildcardAdditionalOptions, With,
+};
+use sqlsift_ast::{from_sqlparser, Location, Span};
 
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
@@ -158,12 +159,8 @@ impl Lowering<'_> {
         self.lines.span(range)
     }
 
-    fn attached(&self, token: &SyntaxToken) -> ast::helpers::attached_token::AttachedToken {
-        let word = Token::make_word(self.text(token), None);
-        ast::helpers::attached_token::AttachedToken(TokenWithSpan::new(
-            word,
-            self.span(token.range),
-        ))
+    fn attached(&self, token: &SyntaxToken) -> ast::AttachedToken {
+        ast::AttachedToken::new(self.span(token.range))
     }
 
     fn ident(&self, token: &SyntaxToken) -> Result<Ident> {
@@ -248,10 +245,7 @@ impl Lowering<'_> {
             limit_clause,
             fetch: None,
             locks,
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
+            other: vec![],
         })
     }
 
@@ -265,22 +259,21 @@ impl Lowering<'_> {
             [name] => Some(object_name(self.name_parts(name)?)),
             _ => return unsupported("FOR ... OF several tables"),
         };
-        let nonblock = if self.has_kw(node, "nowait") {
-            Some(ast::NonBlock::Nowait)
-        } else if self.has_kw(node, "skip") {
-            Some(ast::NonBlock::SkipLocked)
+        // The clause's text as sqlparser prints it
+        let mut text = String::from(if self.has_kw(node, "update") {
+            "FOR UPDATE"
         } else {
-            None
-        };
-        Ok(ast::LockClause {
-            lock_type: if self.has_kw(node, "update") {
-                ast::LockType::Update
-            } else {
-                ast::LockType::Share
-            },
-            of,
-            nonblock,
-        })
+            "FOR SHARE"
+        });
+        if let Some(of) = &of {
+            text = format!("{text} OF {of}");
+        }
+        if self.has_kw(node, "nowait") {
+            text.push_str(" NOWAIT");
+        } else if self.has_kw(node, "skip") {
+            text.push_str(" SKIP LOCKED");
+        }
+        Ok(ast::LockClause { text, of })
     }
 
     fn set_expr(&self, node: &SyntaxNode) -> Result<SetExpr> {
@@ -325,13 +318,9 @@ impl Lowering<'_> {
                         return unsupported("VALUES");
                     };
                     rows.push(ast::Parens {
-                        opening_token: ast::helpers::attached_token::AttachedToken(
-                            TokenWithSpan::new(Token::LParen, self.span(open.range)),
-                        ),
+                        opening_token: self.attached(open),
                         content: self.expr_list(row)?,
-                        closing_token: ast::helpers::attached_token::AttachedToken(
-                            TokenWithSpan::new(Token::RParen, self.span(close.range)),
-                        ),
+                        closing_token: self.attached(close),
                     });
                 }
                 Ok(SetExpr::Values(ast::Values {
@@ -384,9 +373,7 @@ impl Lowering<'_> {
                 query: Box::new(self.cte_query(cte)?),
                 from: None,
                 materialized,
-                closing_paren_token: ast::helpers::attached_token::AttachedToken(
-                    TokenWithSpan::new(Token::RParen, self.span(closing.range)),
-                ),
+                closing_paren_token: self.attached(closing),
             });
         }
         Ok(With {
@@ -417,10 +404,7 @@ impl Lowering<'_> {
             limit_clause: None,
             fetch: None,
             locks: vec![],
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
+            other: vec![],
         })
     }
 
@@ -482,8 +466,7 @@ impl Lowering<'_> {
                     .transpose()?;
                 Ok(Statement::Insert(ast::Insert {
                     insert_token: self.attached(tokens[0]),
-                    optimizer_hints: vec![],
-                    or: None,
+                    or: false,
                     ignore: false,
                     into: true,
                     table: ast::TableObject::TableName(table_name),
@@ -500,16 +483,8 @@ impl Lowering<'_> {
                     has_table_keyword: false,
                     on,
                     returning,
-                    output: None,
                     replace_into: false,
-                    priority: None,
                     insert_alias: None,
-                    settings: None,
-                    format_clause: None,
-                    multi_table_insert_type: None,
-                    multi_table_into_clauses: vec![],
-                    multi_table_when_clauses: vec![],
-                    multi_table_else_clause: None,
                 }))
             }
             SyntaxKind::UpdateStmt => {
@@ -524,7 +499,6 @@ impl Lowering<'_> {
                     .map(ast::UpdateTableFromKind::AfterSet);
                 Ok(Statement::Update(ast::Update {
                     update_token: self.attached(tokens[0]),
-                    optimizer_hints: vec![],
                     table: TableWithJoins {
                         relation: plain_table(table_name, alias),
                         joins: vec![],
@@ -536,8 +510,6 @@ impl Lowering<'_> {
                     from,
                     selection,
                     returning,
-                    output: None,
-                    or: None,
                     order_by: vec![],
                     limit: None,
                 }))
@@ -553,7 +525,6 @@ impl Lowering<'_> {
                     .transpose()?;
                 Ok(Statement::Delete(ast::Delete {
                     delete_token: self.attached(tokens[0]),
-                    optimizer_hints: vec![],
                     tables: vec![],
                     from: ast::FromTable::WithFromKeyword(vec![TableWithJoins {
                         relation: plain_table(table_name, alias),
@@ -562,7 +533,6 @@ impl Lowering<'_> {
                     using,
                     selection,
                     returning,
-                    output: None,
                     order_by: vec![],
                     limit: None,
                 }))
@@ -714,11 +684,8 @@ impl Lowering<'_> {
         }
         Ok(Select {
             select_token: self.attached(select_token),
-            optimizer_hints: vec![],
             distinct,
-            select_modifiers: None,
             top: None,
-            top_before_distinct: false,
             projection,
             exclude: None,
             into: None,
@@ -736,16 +703,13 @@ impl Lowering<'_> {
             named_window,
             qualify: None,
             value_table_mode: None,
-            flavor: SelectFlavor::Standard,
+            from_first: false,
         })
     }
 
     fn wildcard_options(&self, star: &SyntaxToken) -> WildcardAdditionalOptions {
         WildcardAdditionalOptions {
-            wildcard_token: ast::helpers::attached_token::AttachedToken(TokenWithSpan::new(
-                Token::Mul,
-                self.span(star.range),
-            )),
+            wildcard_token: self.attached(star),
             ..Default::default()
         }
     }
@@ -922,12 +886,11 @@ impl Lowering<'_> {
                     alias,
                     args: None,
                     with_hints: vec![],
-                    version: None,
+                    version: vec![],
                     with_ordinality: false,
                     partitions: vec![],
                     json_path: None,
-                    sample: None,
-                    index_hints: vec![],
+                    sample: vec![],
                 })
             }
             SyntaxKind::FuncTableRef => {
@@ -969,17 +932,13 @@ impl Lowering<'_> {
                     Ok(TableFactor::Table {
                         name,
                         alias,
-                        args: Some(ast::TableFunctionArgs {
-                            args,
-                            settings: None,
-                        }),
+                        args: Some(ast::TableFunctionArgs { args }),
                         with_hints: vec![],
-                        version: None,
+                        version: vec![],
                         with_ordinality,
                         partitions: vec![],
                         json_path: None,
-                        sample: None,
-                        index_hints: vec![],
+                        sample: vec![],
                     })
                 }
             }
@@ -991,7 +950,6 @@ impl Lowering<'_> {
                     lateral,
                     subquery: Box::new(self.query(query)?),
                     alias,
-                    sample: None,
                 })
             }
             SyntaxKind::ParenFromItem => {
@@ -1011,7 +969,6 @@ impl Lowering<'_> {
     fn order_by(&self, node: &SyntaxNode) -> Result<OrderBy> {
         Ok(OrderBy {
             kind: OrderByKind::Expressions(self.order_by_exprs(node)?),
-            interpolate: None,
         })
     }
 
@@ -1039,7 +996,6 @@ impl Lowering<'_> {
             exprs.push(OrderByExpr {
                 expr: self.expr(expr_child(item)?)?,
                 options: OrderByOptions { sort, nulls_first },
-                with_fill: None,
             });
         }
         Ok(exprs)
@@ -1325,10 +1281,7 @@ impl Lowering<'_> {
                 if type_node.text(self.source).eq_ignore_ascii_case("interval") {
                     Expr::Interval(ast::Interval {
                         value: Box::new(Expr::Value(value)),
-                        leading_field: None,
-                        leading_precision: None,
-                        last_field: None,
-                        fractional_seconds_precision: None,
+                        qualifier: None,
                     })
                 } else {
                     Expr::TypedString(ast::TypedString {
@@ -1341,7 +1294,9 @@ impl Lowering<'_> {
             SyntaxKind::ExtractExpr => {
                 let field = tokens.get(2).ok_or_else(|| Unsupported("EXTRACT".into()))?;
                 Expr::Extract {
-                    field: self.with_sqlparser(field.range, |p| p.parse_date_time_field())?,
+                    field: self
+                        .with_sqlparser(field.range, |p| p.parse_date_time_field())?
+                        .to_string(),
                     syntax: ast::ExtractSyntax::From,
                     expr: Box::new(self.expr(child(0)?)?),
                 }
@@ -1636,7 +1591,9 @@ impl Lowering<'_> {
             | SyntaxKind::BitString
             | SyntaxKind::HexString
             | SyntaxKind::UnicodeString => {
-                return self.with_sqlparser(token.range, |p| p.parse_value());
+                return self
+                    .with_sqlparser(token.range, |p| p.parse_value())
+                    .map(|v| from_sqlparser::value_with_span(&v));
             }
             kind => return unsupported(format!("{kind:?} literal")),
         };
@@ -1649,6 +1606,7 @@ impl Lowering<'_> {
     /// Type names are leaves for the analyzer: sqlparser parses the text of the node.
     fn data_type(&self, node: &SyntaxNode) -> Result<ast::DataType> {
         self.with_sqlparser(node.range, |p| p.parse_data_type())
+            .map(|t| from_sqlparser::data_type(&t))
     }
 
     /// Runs a sqlparser parse function on the text of `range` (a leaf such as a type name or
@@ -1666,7 +1624,8 @@ impl Lowering<'_> {
         let dialect = PostgreSqlDialect {};
         let mut p = sqlparser::parser::Parser::new(&dialect).with_tokens_with_locations(tokens);
         let value = f(&mut p).map_err(fail)?;
-        p.expect_token(&Token::EOF).map_err(fail)?;
+        p.expect_token(&sqlparser::tokenizer::Token::EOF)
+            .map_err(fail)?;
         Ok(value)
     }
 
@@ -1678,7 +1637,7 @@ impl Lowering<'_> {
             .map_err(|e| Unsupported(format!("{text}: {e}")))?;
         // Moved to where the text is in the statement.
         let origin = self.lines.location(range.start);
-        let shift = |l: &mut Location| {
+        let shift = |l: &mut sqlparser::tokenizer::Location| {
             if l.line == 1 {
                 l.column += origin.column - 1;
             }
@@ -1787,12 +1746,11 @@ fn plain_table(name: ObjectName, alias: Option<TableAlias>) -> TableFactor {
         alias,
         args: None,
         with_hints: vec![],
-        version: None,
+        version: vec![],
         with_ordinality: false,
         partitions: vec![],
         json_path: None,
-        sample: None,
-        index_hints: vec![],
+        sample: vec![],
     }
 }
 

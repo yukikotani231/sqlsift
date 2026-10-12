@@ -313,9 +313,7 @@ impl SchemaBuilder {
             let raw_stmt = &sql[range.clone()];
             match item.outcome {
                 // Locations are relative to `sql`
-                Outcome::Lowered(statement) => {
-                    self.process_statement(&crate::convert::statement(&statement));
-                }
+                Outcome::Lowered(statement) => self.process_statement(&statement),
                 Outcome::Unsupported(_) => self.parse_one(sql, raw_stmt),
                 Outcome::SyntaxError(error) => {
                     let message = error.message;

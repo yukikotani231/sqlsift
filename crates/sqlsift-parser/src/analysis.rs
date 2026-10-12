@@ -1,7 +1,7 @@
-//! A source file's statements for the analyzer: each one lowered to sqlparser's AST,
+//! A source file's statements for the analyzer: each one lowered to the analyzer's AST,
 //! left to sqlparser, or a syntax error.
 
-use sqlparser::ast::Statement;
+use sqlsift_ast::Statement;
 
 use crate::lower::lower_statement;
 use crate::{parse, Arena, SyntaxError, SyntaxKind, SyntaxNode, TextRange};

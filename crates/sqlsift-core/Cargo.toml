@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 sqlparser.workspace = true
-sqlsift-ast = { path = "../sqlsift-ast" }
+sqlsift-ast = { path = "../sqlsift-ast", features = ["sqlparser"] }
 thiserror.workspace = true
 miette.workspace = true
 serde.workspace = true

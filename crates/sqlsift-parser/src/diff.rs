@@ -1,6 +1,7 @@
 //! Differential testing against sqlparser: each statement is parsed by both parsers and
-//! the lowered AST compared with sqlparser's, first by structure (sqlparser's `==` ignores
-//! spans), then with spans (the `Debug` output includes them).
+//! the lowered AST compared with sqlparser's, converted to the same AST
+//! ([`sqlsift_ast::from_sqlparser`]), first by structure (`==` ignores identifier and
+//! token spans), then with spans (the `Debug` output includes them).
 
 use sqlparser::dialect::PostgreSqlDialect;
 
@@ -83,7 +84,7 @@ pub fn compare_statement(text: &str) -> Outcome {
     let theirs = sqlparser::parser::Parser::parse_sql(&PostgreSqlDialect {}, text)
         .ok()
         .filter(|stmts| stmts.len() == 1)
-        .map(|mut stmts| stmts.remove(0));
+        .map(|mut stmts| sqlsift_ast::from_sqlparser::statement(&stmts.remove(0)));
     let arena = Arena::new();
     let parsed = parse(&arena, text);
     let mut stmts = parsed.statements();

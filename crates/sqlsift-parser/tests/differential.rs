@@ -1,11 +1,9 @@
 //! The parser against sqlparser: statements the lowering handles must give exactly
-//! sqlparser's AST, spans included.
+//! sqlparser's AST (converted to the analyzer's), spans included.
 
 use std::path::Path;
 
-use sqlparser::dialect::PostgreSqlDialect;
 use sqlsift_parser::diff::{compare_source, compare_statement, first_difference, Outcome};
-use sqlsift_parser::lower::lower_statement;
 
 #[track_caller]
 fn assert_same(sql: &str) {
@@ -148,17 +146,6 @@ fn ddl_matches_sqlparser() {
     ] {
         assert_same(sql);
     }
-}
-
-/// `ALTER TABLE` keeps the token after it (the `;`) in sqlparser's AST.
-#[test]
-fn alter_table_end_token_is_the_semicolon() {
-    let sql = "ALTER TABLE t DROP a  ;\nSELECT 1";
-    let theirs = sqlparser::parser::Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
-    let arena = sqlsift_parser::Arena::new();
-    let parsed = sqlsift_parser::parse(&arena, sql);
-    let ours = lower_statement(sql, parsed.statements().next().unwrap()).unwrap();
-    assert_eq!(format!("{ours:?}"), format!("{:?}", theirs[0]));
 }
 
 #[test]

@@ -543,15 +543,7 @@ impl<'a> Analyzer<'a> {
         // Parse the SQL
         let lines = LineIndex::new(text);
         let arena = syntax::Arena::new();
-        let (parsed, mut skipped) = self.parse_statements(text, &lines, &arena);
-        // MySQL's INSERT ... SET, checked as INSERT ... VALUES, then the analyzer's AST
-        let statements: Vec<(Statement, Origin, syntax::Syntax<'_>)> = parsed
-            .into_iter()
-            .map(|(mut statement, origin, syntax)| {
-                mysql::insert_set_as_values(&mut statement);
-                (crate::convert::statement(&statement), origin, syntax)
-            })
-            .collect();
+        let (statements, mut skipped) = self.parse_statements(text, &lines, &arena);
         // Applied in source order, before the statements that follow them
         skipped.reverse();
 
@@ -863,7 +855,7 @@ impl<'a> Analyzer<'a> {
             Ok(statements) => {
                 let statements = statements
                     .into_iter()
-                    .map(|s| (s, Origin::START, None))
+                    .map(|s| (analyzed(s), Origin::START, None))
                     .collect();
                 return (statements, Vec::new());
             }
@@ -900,7 +892,7 @@ impl<'a> Analyzer<'a> {
         sql: &str,
         range: Range<usize>,
         lines: &LineIndex,
-        statements: &mut Vec<(sqlparser::ast::Statement, Origin, syntax::Syntax<'_>)>,
+        statements: &mut Vec<(Statement, Origin, syntax::Syntax<'_>)>,
         skipped: &mut Vec<(Origin, SkippedDefinition)>,
         report_error: bool,
     ) {
@@ -910,7 +902,7 @@ impl<'a> Analyzer<'a> {
         let text = &sql[range.clone()];
         let error = match Parser::parse_sql(dialect.as_ref(), text) {
             Ok(parsed) => {
-                statements.extend(parsed.into_iter().map(|s| (s, origin, None)));
+                statements.extend(parsed.into_iter().map(|s| (analyzed(s), origin, None)));
                 return;
             }
             Err(error) => error,
@@ -929,7 +921,7 @@ impl<'a> Analyzer<'a> {
                 _ => None,
             });
         if let Some(parsed) = retried {
-            statements.extend(parsed.into_iter().map(|s| (s, origin, None)));
+            statements.extend(parsed.into_iter().map(|s| (analyzed(s), origin, None)));
             return;
         }
         // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
@@ -968,7 +960,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// [`Self::parse_statements`] with the in-house parser: the statements it lowers to
-    /// sqlparser's AST with their tree, sqlparser for the ones it leaves to it.
+    /// the analyzer's AST with their tree, sqlparser for the ones it leaves to it.
     #[cfg(feature = "inhouse-parser")]
     fn parse_statements_inhouse<'t>(
         &mut self,
@@ -1008,6 +1000,13 @@ impl<'a> Analyzer<'a> {
         }
         (statements, skipped)
     }
+}
+
+/// A statement sqlparser parsed, as the analyzer reads it: MySQL's `INSERT ... SET` as
+/// `INSERT ... VALUES`, converted to the analyzer's AST
+fn analyzed(mut statement: sqlparser::ast::Statement) -> Statement {
+    mysql::insert_set_as_values(&mut statement);
+    crate::convert::statement(&statement)
 }
 
 /// Significant tokens of `text` with their byte ranges (`None` if it can't be
@@ -1133,7 +1132,7 @@ fn explain_template_parse_error(d: &mut Diagnostic, template: &Template, not_mas
 /// each with the position where its text starts (and the tree of a statement the
 /// in-house parser read)
 type ParsedStatements<'t> = (
-    Vec<(sqlparser::ast::Statement, Origin, syntax::Syntax<'t>)>,
+    Vec<(Statement, Origin, syntax::Syntax<'t>)>,
     Vec<(Origin, SkippedDefinition)>,
 );
 

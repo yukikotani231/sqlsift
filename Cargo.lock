@@ -982,6 +982,9 @@ dependencies = [
 [[package]]
 name = "sqlsift-ast"
 version = "0.2.0"
+dependencies = [
+ "sqlparser",
+]
 
 [[package]]
 name = "sqlsift-cli"
@@ -1039,6 +1042,7 @@ version = "0.2.0"
 dependencies = [
  "bumpalo",
  "sqlparser",
+ "sqlsift-ast",
 ]
 
 [[package]]

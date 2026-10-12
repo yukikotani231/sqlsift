@@ -1,16 +1,13 @@
 //! Lowering of schema statements (`CREATE TABLE / VIEW / TYPE / INDEX`, `ALTER TABLE`,
 //! `DROP`).
 
-use sqlparser::ast::helpers::stmt_create_table::CreateTableBuilder;
-use sqlparser::ast::{
+use sqlsift_ast::{
     AlterColumnOperation, AlterTable, AlterTableOperation, CheckConstraint, ColumnDef,
-    ColumnOption, ColumnOptionDef, ConstraintCharacteristics, ConstraintReferenceMatchKind,
-    CreateIndex, CreateTableOptions, CreateView, DeferrableInitial, DropBehavior, Expr,
-    ForeignKeyConstraint, GeneratedAs, GeneratedExpressionMode, Ident, IndexColumn, IndexType,
-    KeyOrIndexDisplay, NullsDistinctOption, ObjectType, OnCommit, OrderByExpr, OrderByOptions,
-    Owner, PrimaryKeyConstraint, ReferentialAction, RenameTableNameKind, Statement,
-    TableConstraint, UniqueConstraint, UserDefinedTypeCompositeAttributeDef,
-    UserDefinedTypeRepresentation, ViewColumnDef, WithData,
+    ColumnOption, ColumnOptionDef, CreateIndex, CreateTable, CreateView, Expr,
+    ForeignKeyConstraint, GeneratedAs, HiveDistributionStyle, Ident, IndexColumn,
+    NullsDistinctOption, ObjectName, ObjectType, OrderByExpr, OrderByOptions, PrimaryKeyConstraint,
+    ReferentialAction, RenameTableNameKind, Statement, TableConstraint, UniqueConstraint,
+    UserDefinedTypeCompositeAttributeDef, UserDefinedTypeRepresentation, ViewColumnDef,
 };
 
 use super::{object_name, unquote, unsupported, Lowering, Result};
@@ -41,17 +38,21 @@ impl Lowering<'_> {
         let Some(name) = node.child(SyntaxKind::Name) else {
             return unsupported("table name");
         };
-        let mut builder = CreateTableBuilder::new(object_name(self.name_parts(name)?))
-            .temporary(has("temp") || has("temporary"))
-            .unlogged(has("unlogged"))
-            .global(if has("global") {
-                Some(true)
-            } else if has("local") {
-                Some(false)
-            } else {
-                None
-            })
-            .if_not_exists(has("exists"));
+        let mut create = CreateTable {
+            or_replace: false,
+            temporary: has("temp") || has("temporary"),
+            if_not_exists: has("exists"),
+            name: object_name(self.name_parts(name)?),
+            columns: vec![],
+            constraints: vec![],
+            hive_distribution: HiveDistributionStyle::NONE,
+            query: None,
+            like: None,
+            clone: None,
+            inherits: None,
+            partition_of: None,
+            other: vec![],
+        };
         if node.child(SyntaxKind::ColumnList).is_some() {
             return unsupported("CREATE TABLE ... AS column list");
         }
@@ -67,65 +68,53 @@ impl Lowering<'_> {
                     kind => return unsupported(format!("{kind:?}")),
                 }
             }
-            builder = builder.columns(columns).constraints(constraints);
+            create.columns = columns;
+            create.constraints = constraints;
         }
         if let Some(query) = node.child(SyntaxKind::SelectStmt) {
-            builder = builder.query(Some(Box::new(self.query(query)?)));
+            create.query = Some(Box::new(self.query(query)?));
         }
+        // Options the analyzer doesn't read are checked, each at most once (as sqlparser
+        // takes them), and dropped
+        let (mut with_data, mut on_commit, mut partition_by) = (false, false, false);
         for option in node.nodes().filter(|n| n.kind == SyntaxKind::TableOption) {
-            builder = self.table_option(builder, option)?;
+            let words = self.keywords(option);
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            match words[..] {
+                ["with", "data"] | ["with", "no", "data"]
+                    if create.query.is_some() && !with_data =>
+                {
+                    with_data = true;
+                }
+                ["on", "commit", ref action @ ..] if !on_commit => {
+                    if !matches!(action, ["drop"] | ["delete" | "preserve", "rows"]) {
+                        return unsupported("ON COMMIT");
+                    }
+                    on_commit = true;
+                }
+                ["inherits"] if create.inherits.is_none() => {
+                    let parents = option
+                        .nodes()
+                        .map(|n| Ok(object_name(self.name_parts(n)?)))
+                        .collect::<Result<_>>()?;
+                    create.inherits = Some(parents);
+                }
+                ["partition", "by"] if !partition_by => {
+                    let Some(expr) = option.nodes().next() else {
+                        return unsupported("PARTITION BY");
+                    };
+                    create.other.insert(0, self.expr(expr)?);
+                    partition_by = true;
+                }
+                _ => {
+                    return unsupported(format!(
+                        "table option {}",
+                        words.first().copied().unwrap_or("")
+                    ))
+                }
+            }
         }
-        Ok(Statement::CreateTable(builder.build()))
-    }
-
-    fn table_option(
-        &self,
-        builder: CreateTableBuilder,
-        option: &SyntaxNode,
-    ) -> Result<CreateTableBuilder> {
-        let words = self.keywords(option);
-        let words: Vec<&str> = words.iter().map(String::as_str).collect();
-        let has_query = builder.query.is_some();
-        Ok(match words[..] {
-            ["with", "data"] if has_query && builder.with_data.is_none() => {
-                builder.with_data(Some(WithData {
-                    data: true,
-                    statistics: None,
-                }))
-            }
-            ["with", "no", "data"] if has_query && builder.with_data.is_none() => builder
-                .with_data(Some(WithData {
-                    data: false,
-                    statistics: None,
-                })),
-            ["on", "commit", ref action @ ..] if builder.on_commit.is_none() => {
-                builder.on_commit(Some(match action {
-                    ["drop"] => OnCommit::Drop,
-                    ["delete", "rows"] => OnCommit::DeleteRows,
-                    ["preserve", "rows"] => OnCommit::PreserveRows,
-                    _ => return unsupported("ON COMMIT"),
-                }))
-            }
-            ["inherits"] if builder.inherits.is_none() => {
-                let parents = option
-                    .nodes()
-                    .map(|n| Ok(object_name(self.name_parts(n)?)))
-                    .collect::<Result<_>>()?;
-                builder.inherits(Some(parents))
-            }
-            ["partition", "by"] if builder.partition_by.is_none() => {
-                let Some(expr) = option.nodes().next() else {
-                    return unsupported("PARTITION BY");
-                };
-                builder.partition_by(Some(Box::new(self.expr(expr)?)))
-            }
-            _ => {
-                return unsupported(format!(
-                    "table option {}",
-                    words.first().copied().unwrap_or("")
-                ))
-            }
-        })
+        Ok(Statement::CreateTable(create))
     }
 
     fn column_def(&self, node: &SyntaxNode) -> Result<ColumnDef> {
@@ -182,7 +171,11 @@ impl Lowering<'_> {
                 let Some(collation) = node.child(SyntaxKind::Name) else {
                     return unsupported("collation");
                 };
-                ColumnOption::Collation(object_name(self.name_parts(collation)?))
+                // Not modelled: its text, as sqlparser prints it
+                ColumnOption::Other(
+                    format!("COLLATE {}", object_name(self.name_parts(collation)?)),
+                    vec![],
+                )
             }
             ["not", "null", ..] if characteristics.is_none() => ColumnOption::NotNull,
             ["null", ..] if characteristics.is_none() => ColumnOption::Null,
@@ -204,11 +197,7 @@ impl Lowering<'_> {
                 PrimaryKeyConstraint {
                     name: None,
                     index_name: None,
-                    index_type: None,
                     columns: vec![],
-                    include: vec![],
-                    index_options: vec![],
-                    characteristics,
                 }
                 .into()
             }
@@ -219,12 +208,7 @@ impl Lowering<'_> {
                 UniqueConstraint {
                     name: None,
                     index_name: None,
-                    index_type_display: KeyOrIndexDisplay::None,
-                    index_type: None,
                     columns: vec![],
-                    include: vec![],
-                    index_options: vec![],
-                    characteristics,
                     nulls_distinct: NullsDistinctOption::None,
                 }
                 .into()
@@ -233,8 +217,7 @@ impl Lowering<'_> {
                 let Some(refs) = node.child(SyntaxKind::ReferencesClause) else {
                     return unsupported("REFERENCES");
                 };
-                self.foreign_key(None, vec![], refs, characteristics)?
-                    .into()
+                self.foreign_key(None, vec![], refs)?.into()
             }
             _ => return unsupported(format!("column constraint {}", kws.join(" "))),
         };
@@ -247,20 +230,14 @@ impl Lowering<'_> {
         }
         let identity = |generated_as| ColumnOption::Generated {
             generated_as,
-            sequence_options: Some(vec![]),
             generation_expr: None,
-            generation_expr_mode: None,
-            generated_keyword: true,
         };
         Ok(match kws {
             ["generated", "always", "as", "identity"] => identity(GeneratedAs::Always),
             ["generated", "by", "default", "as", "identity"] => identity(GeneratedAs::ByDefault),
             ["generated", "always", "as", "stored"] => ColumnOption::Generated {
                 generated_as: GeneratedAs::ExpStored,
-                sequence_options: None,
                 generation_expr: Some(self.constraint_expr(node)?),
-                generation_expr_mode: Some(GeneratedExpressionMode::Stored),
-                generated_keyword: true,
             },
             _ => return unsupported(format!("column constraint {}", kws.join(" "))),
         })
@@ -277,8 +254,10 @@ impl Lowering<'_> {
             .is_some_and(|a| self.keywords(a) == ["not", "valid"])
     }
 
-    fn characteristics(&self, node: &SyntaxNode) -> Result<Option<ConstraintCharacteristics>> {
-        let mut cc = ConstraintCharacteristics::default();
+    /// Whether a constraint has characteristics (`DEFERRABLE`, `INITIALLY ...`, each at
+    /// most once, as sqlparser takes them); the analyzer doesn't read them.
+    fn characteristics(&self, node: &SyntaxNode) -> Result<Option<()>> {
+        let (mut deferrable, mut initially) = (false, false);
         let mut any = false;
         let mut attributes: Vec<_> = node
             .nodes()
@@ -291,18 +270,12 @@ impl Lowering<'_> {
             any = true;
             let kws = self.keywords(attribute);
             match kws.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                ["deferrable"] if cc.deferrable.is_none() => cc.deferrable = Some(true),
-                ["not", "deferrable"] if cc.deferrable.is_none() => cc.deferrable = Some(false),
-                ["initially", "deferred"] if cc.initially.is_none() => {
-                    cc.initially = Some(DeferrableInitial::Deferred);
-                }
-                ["initially", "immediate"] if cc.initially.is_none() => {
-                    cc.initially = Some(DeferrableInitial::Immediate);
-                }
+                ["deferrable"] | ["not", "deferrable"] if !deferrable => deferrable = true,
+                ["initially", "deferred" | "immediate"] if !initially => initially = true,
                 _ => return unsupported(format!("constraint attribute {}", kws.join(" "))),
             }
         }
-        Ok(any.then_some(cc))
+        Ok(any.then_some(()))
     }
 
     fn foreign_key(
@@ -310,7 +283,6 @@ impl Lowering<'_> {
         name: Option<Ident>,
         columns: Vec<Ident>,
         refs: &SyntaxNode,
-        characteristics: Option<ConstraintCharacteristics>,
     ) -> Result<ForeignKeyConstraint> {
         let Some(table) = refs.child(SyntaxKind::Name) else {
             return unsupported("referenced table");
@@ -319,20 +291,18 @@ impl Lowering<'_> {
             Some(list) => self.column_list(list)?,
             None => vec![],
         };
-        let mut match_kind = None;
+        let mut match_kind = false;
         let mut on_delete = None;
         let mut on_update = None;
         for part in refs.nodes() {
             let kws = self.keywords(part);
             let kws: Vec<&str> = kws.iter().map(String::as_str).collect();
             match part.kind {
-                SyntaxKind::MatchClause if match_kind.is_none() => {
-                    match_kind = Some(match kws[..] {
-                        [_, "full"] => ConstraintReferenceMatchKind::Full,
-                        [_, "partial"] => ConstraintReferenceMatchKind::Partial,
-                        [_, "simple"] => ConstraintReferenceMatchKind::Simple,
-                        _ => return unsupported("MATCH"),
-                    });
+                SyntaxKind::MatchClause if !match_kind => {
+                    if !matches!(kws[..], [_, "full" | "partial" | "simple"]) {
+                        return unsupported("MATCH");
+                    }
+                    match_kind = true;
                 }
                 SyntaxKind::ReferentialAction => {
                     if part.child(SyntaxKind::ColumnList).is_some() {
@@ -368,8 +338,6 @@ impl Lowering<'_> {
             referred_columns,
             on_delete,
             on_update,
-            match_kind,
-            characteristics,
         })
     }
 
@@ -387,7 +355,6 @@ impl Lowering<'_> {
                         sort: None,
                         nulls_first: None,
                     },
-                    with_fill: None,
                 },
                 operator_class: None,
             })
@@ -423,25 +390,22 @@ impl Lowering<'_> {
                 enforced: None,
             }
             .into(),
-            ["primary", "key", ..] if !kws.contains(&"using") => PrimaryKeyConstraint {
-                name,
-                index_name: None,
-                index_type: None,
-                columns: self.index_columns(node)?,
-                include: self.include(node)?,
-                index_options: vec![],
-                characteristics,
+            ["primary", "key", ..] if !kws.contains(&"using") => {
+                self.include(node)?;
+                PrimaryKeyConstraint {
+                    name,
+                    index_name: None,
+                    columns: self.index_columns(node)?,
+                }
+                .into()
             }
-            .into(),
             ["unique", ..] if !kws.contains(&"using") => UniqueConstraint {
                 name,
                 index_name: None,
-                index_type_display: KeyOrIndexDisplay::None,
-                index_type: None,
-                columns: self.index_columns(node)?,
-                include: self.include(node)?,
-                index_options: vec![],
-                characteristics,
+                columns: {
+                    self.include(node)?;
+                    self.index_columns(node)?
+                },
                 nulls_distinct: match kws[1..] {
                     ["nulls", "distinct"] => NullsDistinctOption::Distinct,
                     ["nulls", "not", "distinct"] => NullsDistinctOption::NotDistinct,
@@ -456,14 +420,14 @@ impl Lowering<'_> {
                 ) else {
                     return unsupported("FOREIGN KEY");
                 };
-                self.foreign_key(name, self.column_list(columns)?, refs, characteristics)?
+                self.foreign_key(name, self.column_list(columns)?, refs)?
                     .into()
             }
             _ => return unsupported(format!("table constraint {}", kws.join(" "))),
         })
     }
 
-    fn names(&self, node: &SyntaxNode) -> Result<Vec<sqlparser::ast::ObjectName>> {
+    fn names(&self, node: &SyntaxNode) -> Result<Vec<ObjectName>> {
         node.nodes()
             .filter(|n| n.kind == SyntaxKind::Name)
             .map(|n| Ok(object_name(self.name_parts(n)?)))
@@ -489,29 +453,18 @@ impl Lowering<'_> {
                 .map(|name| ViewColumnDef {
                     name,
                     data_type: None,
-                    options: None,
                 })
                 .collect(),
             None => vec![],
         };
         Ok(Statement::CreateView(CreateView {
-            or_alter: false,
             or_replace: has("replace"),
             materialized: has("materialized"),
-            secure: false,
             name: object_name(self.name_parts(name)?),
-            name_before_not_exists: false,
             columns,
             query: Box::new(self.query(query)?),
-            options: CreateTableOptions::None,
-            cluster_by: vec![],
-            comment: None,
-            with_no_schema_binding: false,
             if_not_exists: has("exists"),
             temporary: has("temp") || has("temporary"),
-            copy_grants: false,
-            to: None,
-            params: None,
         }))
     }
 
@@ -524,11 +477,7 @@ impl Lowering<'_> {
                 .tokens()
                 .filter(|t| t.kind == SyntaxKind::String)
                 // sqlparser gives string labels no span.
-                .map(|t| sqlparser::ast::Ident {
-                    value: unquote(self.text(t), 0),
-                    quote_style: Some('\''),
-                    span: sqlparser::tokenizer::Span::empty(),
-                })
+                .map(|t| Ident::with_quote('\'', unquote(self.text(t), 0)))
                 .collect();
             Some(UserDefinedTypeRepresentation::Enum { labels })
         } else if let Some(attributes) = node.child(SyntaxKind::TableElements) {
@@ -574,31 +523,21 @@ impl Lowering<'_> {
             Err(mut names) if names.len() == 1 => (None, names.remove(0)),
             Err(_) => return unsupported("index names"),
         };
-        let mut using = None;
+        let mut using = false;
         let mut include = vec![];
         for params in node.nodes().filter(|n| n.kind == SyntaxKind::IndexParams) {
             let words = self.keywords(params);
             match words.first().map(String::as_str) {
-                Some("using") if using.is_none() => {
+                // The index method isn't read by the analyzer
+                Some("using") if !using => {
                     let Some(method) = params
                         .child(SyntaxKind::Name)
                         .and_then(|n| n.tokens().next())
                     else {
                         return unsupported("USING");
                     };
-                    using = Some(match self.text(method).to_ascii_lowercase().as_str() {
-                        _ if method.kind != SyntaxKind::Ident => {
-                            IndexType::Custom(self.ident(method)?)
-                        }
-                        "btree" => IndexType::BTree,
-                        "hash" => IndexType::Hash,
-                        "gin" => IndexType::GIN,
-                        "gist" => IndexType::GiST,
-                        "spgist" => IndexType::SPGiST,
-                        "brin" => IndexType::BRIN,
-                        "bloom" => IndexType::Bloom,
-                        _ => IndexType::Custom(self.ident(method)?),
-                    });
+                    self.ident(method)?;
+                    using = true;
                 }
                 Some("include") if include.is_empty() => {
                     let Some(list) = params.child(SyntaxKind::ColumnList) else {
@@ -640,18 +579,12 @@ impl Lowering<'_> {
         Ok(Statement::CreateIndex(CreateIndex {
             name,
             table_name,
-            using,
             columns,
             unique: has("unique"),
-            concurrently: has("concurrently"),
-            r#async: false,
             if_not_exists: has("exists"),
             include,
             nulls_distinct,
-            with: vec![],
             predicate,
-            index_options: vec![],
-            alter_options: vec![],
         }))
     }
 
@@ -676,10 +609,7 @@ impl Lowering<'_> {
             if_exists: has("exists"),
             names: self.names(node)?,
             cascade: has("cascade"),
-            restrict: has("restrict"),
-            purge: false,
             temporary: false,
-            table: None,
         })
     }
 
@@ -707,44 +637,17 @@ impl Lowering<'_> {
             .filter(|n| n.kind == SyntaxKind::AlterTableAction)
             .map(|a| self.alter_table_action(a))
             .collect::<Result<_>>()?;
-        // sqlparser keeps the `;` after the statement, or else its last token.
-        let end = node.range.end as usize;
-        let rest = self.source[end..].trim_start_matches([' ', '\t', '\r', '\n']);
-        let end_token = if rest.starts_with(';') {
-            let at = (self.source.len() - rest.len()) as u32;
-            sqlparser::tokenizer::TokenWithSpan::new(
-                sqlparser::tokenizer::Token::SemiColon,
-                self.span(crate::TextRange::new(at, at + 1)),
-            )
-        } else {
-            let Some(last) = super::all_tokens(node).last().copied() else {
-                return unsupported("ALTER TABLE");
-            };
-            match self.sqlparser_tokens(last.range)?.pop() {
-                Some(token) => token,
-                None => return unsupported("last token"),
-            }
-        };
         Ok(Statement::AlterTable(AlterTable {
             name: object_name(self.name_parts(name)?),
             if_exists: kws.get(2).is_some_and(|k| k == "if"),
             only: kws.iter().any(|k| k == "only"),
             operations,
-            location: None,
-            on_cluster: None,
-            table_type: None,
-            end_token: sqlparser::ast::helpers::attached_token::AttachedToken(end_token),
         }))
     }
 
     fn alter_table_action(&self, node: &SyntaxNode) -> Result<AlterTableOperation> {
         let kws = self.keywords(node);
         let kws: Vec<&str> = kws.iter().map(String::as_str).collect();
-        let behavior = || match kws.last() {
-            Some(&"cascade") => Some(DropBehavior::Cascade),
-            Some(&"restrict") => Some(DropBehavior::Restrict),
-            _ => None,
-        };
         let names = self.simple_names(node)?;
         let one_name = || match &names[..] {
             [name] => Ok(name.clone()),
@@ -752,30 +655,22 @@ impl Lowering<'_> {
         };
         if let Some(option) = node.child(SyntaxKind::TableOption) {
             let words = self.keywords(option);
-            return Ok(
-                match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                    ["enable", "row", "level", "security"] => {
-                        AlterTableOperation::EnableRowLevelSecurity {}
-                    }
-                    ["disable", "row", "level", "security"] => {
-                        AlterTableOperation::DisableRowLevelSecurity {}
-                    }
-                    ["force", "row", "level", "security"] => {
-                        AlterTableOperation::ForceRowLevelSecurity
-                    }
-                    ["no", "force", "row", "level", "security"] => {
-                        AlterTableOperation::NoForceRowLevelSecurity
-                    }
-                    ["set", "logged"] => AlterTableOperation::SetLogged,
-                    ["set", "unlogged"] => AlterTableOperation::SetUnlogged,
-                    _ => {
-                        return unsupported(format!(
-                            "ALTER TABLE {}",
-                            words.first().map_or("", String::as_str)
-                        ))
-                    }
-                },
-            );
+            // Not modelled: their text, as sqlparser prints it
+            let text = match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                ["enable", "row", "level", "security"] => "ENABLE ROW LEVEL SECURITY",
+                ["disable", "row", "level", "security"] => "DISABLE ROW LEVEL SECURITY",
+                ["force", "row", "level", "security"] => "FORCE ROW LEVEL SECURITY",
+                ["no", "force", "row", "level", "security"] => "NO FORCE ROW LEVEL SECURITY",
+                ["set", "logged"] => "SET LOGGED",
+                ["set", "unlogged"] => "SET UNLOGGED",
+                _ => {
+                    return unsupported(format!(
+                        "ALTER TABLE {}",
+                        words.first().map_or("", String::as_str)
+                    ))
+                }
+            };
+            return Ok(AlterTableOperation::Other(text.to_string(), vec![]));
         }
         Ok(match kws[..] {
             ["add", ..] if node.child(SyntaxKind::TableConstraint).is_some() => {
@@ -795,20 +690,17 @@ impl Lowering<'_> {
                     column_keyword: kws.get(1) == Some(&"column"),
                     if_not_exists: kws.contains(&"exists"),
                     column_def: self.column_def(column)?,
-                    column_position: None,
                 }
             }
             ["drop", "constraint", ..] => AlterTableOperation::DropConstraint {
                 if_exists: kws.contains(&"exists"),
                 name: one_name()?,
-                drop_behavior: behavior(),
             },
             ["drop", ..] => AlterTableOperation::DropColumn {
                 has_column_keyword: kws.get(1) == Some(&"column"),
                 column_names: vec![one_name()?],
                 if_exists: kws.get(1..3) == Some(&["if", "exists"][..])
                     || kws.get(2..4) == Some(&["if", "exists"][..]),
-                drop_behavior: behavior(),
             },
             ["alter", ..] => {
                 let Some(column_name) = names.first().cloned() else {
@@ -839,19 +731,19 @@ impl Lowering<'_> {
             ["owner", "to", ..] => {
                 let owner = one_name()?;
                 let new_owner = if owner.quote_style.is_some() {
-                    Owner::Ident(owner)
+                    owner.to_string()
                 } else {
                     match owner.value.to_ascii_lowercase().as_str() {
-                        "current_user" => Owner::CurrentUser,
-                        "current_role" => Owner::CurrentRole,
-                        "session_user" => Owner::SessionUser,
-                        _ => Owner::Ident(owner),
+                        special @ ("current_user" | "current_role" | "session_user") => {
+                            special.to_ascii_uppercase()
+                        }
+                        _ => owner.to_string(),
                     }
                 };
-                AlterTableOperation::OwnerTo { new_owner }
+                AlterTableOperation::Other(format!("OWNER TO {new_owner}"), vec![])
             }
             ["validate", "constraint", ..] => {
-                AlterTableOperation::ValidateConstraint { name: one_name()? }
+                AlterTableOperation::Other(format!("VALIDATE CONSTRAINT {}", one_name()?), vec![])
             }
             _ => return unsupported(format!("ALTER TABLE {}", kws.join(" "))),
         })
@@ -894,7 +786,6 @@ impl Lowering<'_> {
                     } else {
                         GeneratedAs::ByDefault
                     }),
-                    sequence_options: None,
                 }
             }
             _ => return unsupported(format!("ALTER COLUMN {}", rest.join(" "))),
