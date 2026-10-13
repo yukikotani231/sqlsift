@@ -62,6 +62,14 @@
   - [E0031 join-fan-out](rules/E0031.md)
   - [E1000 parse-error](rules/E1000.md)
 
+# How it works
+
+- [Overview](how-it-works/index.md)
+  - [Name resolution and types](how-it-works/names-and-types.md)
+  - [Building the schema](how-it-works/schema.md)
+  - [Preprocessing and locations](how-it-works/preprocessing.md)
+  - [Testing and the real-world corpus](how-it-works/testing.md)
+
 ---
 
 [Contributing](contributing.md)
