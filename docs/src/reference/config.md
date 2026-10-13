@@ -5,7 +5,7 @@
 ```toml
 # Schema
 schema = ["db/schema/*.sql"]      # schema files (glob patterns supported)
-schema_dir = "db/migrations"      # all .sql files under this directory, in file-name order
+schema_dir = "db/migrations"      # all .sql files under this directory, in version order
 
 # Query files
 files = ["queries/**/*.sql"]      # query files to check when none are given on the command line
@@ -38,7 +38,7 @@ correctness = "error"
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `schema` | list of paths / globs | `[]` | Schema files, loaded in order |
-| `schema_dir` | path | none | Directory of schema files, loaded recursively in file-name order, skipping rollback migrations |
+| `schema_dir` | path | none | Directory of schema files, loaded recursively in version order (see [Schema](../guide/schema.md)), skipping rollback migrations |
 | `files` | list of paths / globs | `[]` | Query files to check when none are given on the command line |
 | `ignore` | list of globs | `[]` | Query files to skip. `**` matches any number of directories; a pattern matching a directory skips everything below it. `--ignore` adds to this list |
 | `dialect` | string | `"postgresql"` | `postgresql`, `mysql` or `sqlite` |

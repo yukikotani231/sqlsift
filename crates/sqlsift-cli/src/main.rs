@@ -397,7 +397,8 @@ fn output_format(config: &Config) -> Result<OutputFormat> {
 }
 
 /// Schema files from `schema` (glob patterns are expanded) followed by every
-/// `.sql` file under `schema_dir`, in filename order. Having none is an error
+/// `.sql` file under `schema_dir`, in migration version order
+/// (`sort_migration_files`). Having none is an error
 /// unless `optional` (a dbt catalog provides the tables).
 fn schema_files(config: &Config, optional: bool) -> Result<Vec<PathBuf>> {
     let mut schema_files: Vec<PathBuf> = Vec::new();

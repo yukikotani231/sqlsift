@@ -1,7 +1,8 @@
 //! Output of `sqlsift schema`: the catalog sqlsift built from the schema files.
 //!
 //! Objects are listed in definition order (schema files are read in the order
-//! given, and directories in filename order), so the output is deterministic.
+//! given, and directories in migration version order), so the output is
+//! deterministic.
 
 use std::path::PathBuf;
 

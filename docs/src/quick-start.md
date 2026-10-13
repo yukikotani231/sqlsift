@@ -41,7 +41,7 @@ sqlsift check --schema db/schema.sql queries/*.sql
 # Several schema files
 sqlsift check -s db/users.sql -s db/orders.sql queries/*.sql
 
-# A directory of migrations, applied in filename order
+# A directory of migrations, applied in version order
 sqlsift check --schema-dir db/migrations 'queries/**/*.sql'
 ```
 

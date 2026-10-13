@@ -160,7 +160,7 @@ Options:
 
 `impact` builds the schema twice, without and with the migrations, checks the query files against both and reports only the diagnostics that differ: those the change introduces and those it fixes. Problems the queries already had are not shown.
 
-- A migration that is one of the schema files is left out of the "before" schema together with every schema file after it (files are applied in filename order). A migration that isn't one of them is applied after all schema files.
+- A migration that is one of the schema files is left out of the "before" schema together with every schema file after it (files are applied in order: `--schema` files first, then `--schema-dir` files in version order). A migration that isn't one of them is applied after all schema files.
 - Only query files that name a changed table or view are checked, so the run stays fast on large projects. Changes that can affect any query (enum types, the search path, functions the schema defines) check every file.
 - A diagnostic whose message changes but stays at the same place (a different type in a type mismatch) counts as the same problem.
 

@@ -7,7 +7,9 @@ sqlsift never connects to a database. It builds an in-memory picture of your sch
 | Option | `sqlsift.toml` key | What it loads |
 |--------|--------------------|---------------|
 | `--schema <FILE>` / `-s` (repeatable, globs allowed) | `schema = [...]` | The listed files, in the order given |
-| `--schema-dir <DIR>` | `schema_dir = "..."` | Every `.sql` file under the directory, recursively, sorted by file name |
+| `--schema-dir <DIR>` | `schema_dir = "..."` | Every `.sql` file under the directory, recursively, sorted by migration version |
+
+`--schema-dir` sorts files by migration version: numeric prefixes and Flyway `V<version>__` names compare as numbers, so `2_create_table.sql` comes before `10_add_column.sql`. Each directory is sorted on its own, files first, then its subdirectories in name order.
 
 Both can be combined. Statements later in the order see the effect of earlier ones, so a migration that renames a column is reflected in the final schema.
 
