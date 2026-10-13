@@ -8,7 +8,7 @@
 //! schema defines a function of (it may overload the built-in one) or when the
 //! schema defines operators.
 
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments};
+use sqlsift_ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments};
 
 use crate::ast_ext::ObjectNamePartExt;
 use crate::dialect::SqlDialect;

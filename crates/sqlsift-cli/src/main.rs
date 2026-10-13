@@ -39,6 +39,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(args.verbose, args.quiet);
+    #[cfg(feature = "inhouse-parser")]
+    inhouse_parser::install();
 
     match run(args) {
         Ok(has_errors) => {
@@ -1534,6 +1536,17 @@ fn run(args: Args) -> Result<bool> {
             }
 
             Ok(false)
+        }
+    }
+}
+
+/// Experimental (#257): PostgreSQL text read by the in-house parser when
+/// `SQLSIFT_PARSER=inhouse`, statements it can't lower by sqlparser as before.
+#[cfg(feature = "inhouse-parser")]
+mod inhouse_parser {
+    pub fn install() {
+        if std::env::var("SQLSIFT_PARSER").is_ok_and(|v| v == "inhouse") {
+            sqlsift_core::parser_hook::set_enabled(true);
         }
     }
 }

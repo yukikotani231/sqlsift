@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     Expr, GroupByExpr, Ident, Query, Select, SelectItem, TableFactor, Value, ValueWithSpan, Visitor,
 };
 
@@ -255,7 +255,7 @@ impl Resolver<'_> {
     /// Catalog tables of a FROM clause with the (lowercase) key they are known by
     pub(super) fn catalog_tables_in(
         &self,
-        from: &[sqlparser::ast::TableWithJoins],
+        from: &[sqlsift_ast::TableWithJoins],
     ) -> Vec<(String, crate::schema::QualifiedName)> {
         fn walk(
             resolver: &Resolver<'_>,

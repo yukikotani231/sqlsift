@@ -9,6 +9,7 @@
 pub mod analyzer;
 mod ast_ext;
 pub mod baseline;
+mod convert;
 pub mod dbt;
 pub mod dialect;
 pub mod embedded;
@@ -18,6 +19,8 @@ pub mod ignore;
 pub mod impact;
 mod mysql;
 mod named_queries;
+#[cfg(feature = "inhouse-parser")]
+pub mod parser_hook;
 mod psql;
 pub mod python;
 pub mod rules;

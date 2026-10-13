@@ -1,0 +1,19 @@
+[package]
+name = "sqlsift-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Lossless, error-tolerant PostgreSQL parser for sqlsift (experimental)"
+publish = false
+
+[dependencies]
+sqlsift-ast = { path = "../sqlsift-ast", features = ["sqlparser"] }
+# Values, data types and date/time fields are still read by sqlparser (`lower`), and the
+# differential test compares with it
+sqlparser.workspace = true
+bumpalo = "3.20"
+
+[lints]
+workspace = true

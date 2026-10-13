@@ -1,7 +1,7 @@
 //! SQL type system
 
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{DataType, ExactNumberInfo};
+use sqlsift_ast::{DataType, ExactNumberInfo};
 
 use crate::ast_ext::ObjectNamePartExt;
 use crate::dialect::SqlDialect;
@@ -202,27 +202,25 @@ impl SqlType {
                 members
                     .iter()
                     .map(|m| match m {
-                        sqlparser::ast::EnumMember::Name(name)
-                        | sqlparser::ast::EnumMember::NamedValue(name, _) => name.clone(),
+                        sqlsift_ast::EnumMember::Name(name)
+                        | sqlsift_ast::EnumMember::NamedValue(name, _) => name.clone(),
                     })
                     .collect(),
             ),
 
             DataType::Array(inner) => match inner {
-                sqlparser::ast::ArrayElemTypeDef::AngleBracket(dt) => {
+                sqlsift_ast::ArrayElemTypeDef::AngleBracket(dt) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
-                sqlparser::ast::ArrayElemTypeDef::SquareBracket(dt, _) => {
+                sqlsift_ast::ArrayElemTypeDef::SquareBracket(dt, _) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
-                sqlparser::ast::ArrayElemTypeDef::Parenthesis(dt)
-                | sqlparser::ast::ArrayElemTypeDef::Qualified(dt, _) => {
+                sqlsift_ast::ArrayElemTypeDef::Parenthesis(dt)
+                | sqlsift_ast::ArrayElemTypeDef::Qualified(dt, _) => {
                     SqlType::Array(Box::new(SqlType::from_ast(dt)))
                 }
                 // A bare `ARRAY` is Snowflake's semi-structured array
-                sqlparser::ast::ArrayElemTypeDef::None => {
-                    SqlType::SemiStructured("array".to_string())
-                }
+                sqlsift_ast::ArrayElemTypeDef::None => SqlType::SemiStructured("array".to_string()),
             },
 
             // BigQuery STRUCT<...>: fields aren't modelled, so a struct is a type
@@ -547,18 +545,18 @@ impl SqlType {
 }
 
 /// Whether a TIME/TIMESTAMP type carries a time zone (`WITH TIME ZONE`, or the `TIMESTAMPTZ` / `TIMETZ` shorthand)
-fn has_time_zone(tz: sqlparser::ast::TimezoneInfo) -> bool {
+fn has_time_zone(tz: sqlsift_ast::TimezoneInfo) -> bool {
     matches!(
         tz,
-        sqlparser::ast::TimezoneInfo::WithTimeZone | sqlparser::ast::TimezoneInfo::Tz
+        sqlsift_ast::TimezoneInfo::WithTimeZone | sqlsift_ast::TimezoneInfo::Tz
     )
 }
 
 /// Extract character length from CharacterLength if present
-fn extract_char_length(info: Option<&sqlparser::ast::CharacterLength>) -> Option<u64> {
+fn extract_char_length(info: Option<&sqlsift_ast::CharacterLength>) -> Option<u64> {
     info.map(|i| match i {
-        sqlparser::ast::CharacterLength::IntegerLength { length, .. } => *length,
-        sqlparser::ast::CharacterLength::Max => u64::MAX,
+        sqlsift_ast::CharacterLength::IntegerLength { length, .. } => *length,
+        sqlsift_ast::CharacterLength::Max => u64::MAX,
     })
 }
 

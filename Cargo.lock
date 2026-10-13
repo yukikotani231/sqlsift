@@ -980,6 +980,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlsift-ast"
+version = "0.2.0"
+dependencies = [
+ "sqlparser",
+]
+
+[[package]]
 name = "sqlsift-cli"
 version = "0.2.0"
 dependencies = [
@@ -1007,6 +1014,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlparser",
+ "sqlsift-ast",
+ "sqlsift-parser",
  "thiserror",
  "tracing",
 ]
@@ -1025,6 +1034,15 @@ dependencies = [
  "tower-lsp",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sqlsift-parser"
+version = "0.2.0"
+dependencies = [
+ "bumpalo",
+ "sqlparser",
+ "sqlsift-ast",
 ]
 
 [[package]]

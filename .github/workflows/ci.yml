@@ -51,6 +51,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
         run: cargo test --doc
 
+      # Experimental in-house PostgreSQL parser (#257), not in releases
+      - name: Run tests with the in-house parser
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo test -p sqlsift-core --features inhouse-parser --test inhouse_parser_tests
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -70,6 +75,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy with the in-house parser
+        run: cargo clippy --all-targets --features sqlsift-cli/inhouse-parser -- -D warnings
 
   licenses:
     name: Licenses

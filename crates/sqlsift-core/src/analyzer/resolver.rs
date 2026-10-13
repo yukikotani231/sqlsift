@@ -5,7 +5,7 @@
 //! types, so CTEs, subqueries and views carry column types into the queries that use
 //! them. The type checks themselves live in `type_check.rs`.
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     AccessExpr, Assignment, AssignmentTarget, ConflictTarget, Delete, Distinct, ExcludeSelectItem,
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Insert,
     JoinConstraint, JoinOperator, NamedWindowDefinition, NamedWindowExpr, ObjectName,
@@ -597,7 +597,6 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            _ => return,
         };
         for assignment in assignments {
             if let AssignmentTarget::ColumnName(name) = &assignment.target {
@@ -745,8 +744,8 @@ impl<'a> Resolver<'a> {
     /// Resolve a DELETE statement in the current (statement) frame
     fn delete(&mut self, delete: &Delete) -> Option<Vec<Column>> {
         let tables = match &delete.from {
-            sqlparser::ast::FromTable::WithFromKeyword(tables) => tables,
-            sqlparser::ast::FromTable::WithoutKeyword(tables) => tables,
+            sqlsift_ast::FromTable::WithFromKeyword(tables) => tables,
+            sqlsift_ast::FromTable::WithoutKeyword(tables) => tables,
         };
 
         // USING clause first (PostgreSQL / MySQL: DELETE ... USING ...)
@@ -846,10 +845,10 @@ impl<'a> Resolver<'a> {
     }
 
     /// Whether the body of `cte` reads a relation with the CTE's (unqualified) name
-    fn references_itself(&self, cte: &sqlparser::ast::Cte) -> bool {
+    fn references_itself(&self, cte: &sqlsift_ast::Cte) -> bool {
         let name = self.catalog.ident_name(&cte.alias.name);
         let found =
-            sqlparser::ast::visit_relations(&cte.query, |relation| match relation.0.as_slice() {
+            sqlsift_ast::visit_relations(&cte.query, |relation| match relation.0.as_slice() {
                 [ident] if self.catalog.ident_name(ident.ident()) == name => {
                     std::ops::ControlFlow::Break(())
                 }
@@ -859,7 +858,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Register a CTE of the current query
-    fn define_cte(&mut self, cte: &sqlparser::ast::Cte, recursive: bool) {
+    fn define_cte(&mut self, cte: &sqlsift_ast::Cte, recursive: bool) {
         let name = self.catalog.ident_name(&cte.alias.name);
         let names: Vec<String> = cte
             .alias
@@ -1729,18 +1728,14 @@ impl<'a> Resolver<'a> {
                     Relation::new(RelationKind::Function, key, None),
                 );
             }
-            _ => {}
+            TableFactor::Other(_) => {}
         }
     }
 
     /// The output columns of a `JSON_TABLE` column list, `NESTED PATH` columns
     /// included
-    fn json_table_columns(
-        &self,
-        columns: &[sqlparser::ast::JsonTableColumn],
-        out: &mut Vec<Column>,
-    ) {
-        use sqlparser::ast::JsonTableColumn;
+    fn json_table_columns(&self, columns: &[sqlsift_ast::JsonTableColumn], out: &mut Vec<Column>) {
+        use sqlsift_ast::JsonTableColumn;
         for column in columns {
             match column {
                 JsonTableColumn::Named(named) => out.push(Column::new(
@@ -1966,9 +1961,9 @@ impl<'a> Resolver<'a> {
                 }
                 self.check_function_signature(func);
                 // ORDER BY inside aggregate arguments: array_agg(x ORDER BY y)
-                if let sqlparser::ast::FunctionArguments::List(list) = &func.args {
+                if let sqlsift_ast::FunctionArguments::List(list) = &func.args {
                     for clause in &list.clauses {
-                        if let sqlparser::ast::FunctionArgumentClause::OrderBy(order_by) = clause {
+                        if let sqlsift_ast::FunctionArgumentClause::OrderBy(order_by) = clause {
                             for ob in order_by {
                                 self.expr(&ob.expr);
                             }
@@ -1984,7 +1979,7 @@ impl<'a> Resolver<'a> {
                     self.expr(filter);
                 }
                 // OVER (PARTITION BY ... ORDER BY ...)
-                if let Some(sqlparser::ast::WindowType::WindowSpec(spec)) = &func.over {
+                if let Some(sqlsift_ast::WindowType::WindowSpec(spec)) = &func.over {
                     for e in &spec.partition_by {
                         self.expr(e);
                     }
@@ -2249,7 +2244,7 @@ impl<'a> Resolver<'a> {
     /// Position of a Snowflake or Redshift date part keyword argument
     /// (`DATEADD(day, ...)`, `DATE_TRUNC(month, ...)`, `LAST_DAY(d, week)`,
     /// `DATE_PART(h, ts)`), which the parser represents as a column reference
-    fn date_part_arg(&self, func: &sqlparser::ast::Function) -> Option<usize> {
+    fn date_part_arg(&self, func: &sqlsift_ast::Function) -> Option<usize> {
         let is_date_part: fn(&str) -> bool = match self.dialect {
             SqlDialect::Snowflake => is_snowflake_date_part,
             SqlDialect::Redshift => is_redshift_date_part,
@@ -2321,7 +2316,7 @@ impl<'a> Resolver<'a> {
         let is_identifier =
             name.0.len() == 1 && name.0[0].ident().value.eq_ignore_ascii_case("IDENTIFIER");
         let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
-            value: sqlparser::ast::Value::SingleQuotedString(literal),
+            value: sqlsift_ast::Value::SingleQuotedString(literal),
             ..
         })))] = args
         else {
@@ -2734,8 +2729,8 @@ fn defines_name(name: &str, table_name: &QualifiedName) -> bool {
 }
 
 /// Whether an operator is a comparison (=, <>, <, <=, >, >=)
-pub(super) fn is_comparison_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
-    use sqlparser::ast::BinaryOperator::*;
+pub(super) fn is_comparison_operator(op: &sqlsift_ast::BinaryOperator) -> bool {
+    use sqlsift_ast::BinaryOperator::*;
     matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
 }
 
@@ -2754,8 +2749,8 @@ fn relation_not_in_from(schema: Option<&Ident>, table: &Ident) -> Diagnostic {
 }
 
 /// Whether an operator is AND / OR
-fn is_logical_operator(op: &sqlparser::ast::BinaryOperator) -> bool {
-    use sqlparser::ast::BinaryOperator::*;
+fn is_logical_operator(op: &sqlsift_ast::BinaryOperator) -> bool {
+    use sqlsift_ast::BinaryOperator::*;
     matches!(op, And | Or)
 }
 
@@ -2896,7 +2891,7 @@ fn wildcard_excluded(options: &WildcardAdditionalOptions) -> Vec<&Ident> {
 }
 
 /// Columns renamed by `SELECT * RENAME (a AS b, ...)` (Snowflake)
-fn wildcard_renamed(options: &WildcardAdditionalOptions) -> Vec<&sqlparser::ast::IdentWithAlias> {
+fn wildcard_renamed(options: &WildcardAdditionalOptions) -> Vec<&sqlsift_ast::IdentWithAlias> {
     match &options.opt_rename {
         Some(RenameSelectItem::Single(rename)) => vec![rename],
         Some(RenameSelectItem::Multiple(renames)) => renames.iter().collect(),

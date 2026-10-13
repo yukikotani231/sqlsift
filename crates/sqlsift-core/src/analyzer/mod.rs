@@ -15,14 +15,15 @@ mod signatures;
 mod snowflake;
 mod structure;
 mod suspicious;
+mod syntax;
 mod type_check;
 
 use std::ops::Range;
 
-use sqlparser::ast::{Spanned, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlsift_ast::{Spanned, Statement};
 
 use crate::dialect::SqlDialect;
 use crate::error::{Diagnostic, DiagnosticKind, Span};
@@ -541,11 +542,8 @@ impl<'a> Analyzer<'a> {
 
         // Parse the SQL
         let lines = LineIndex::new(text);
-        let (mut statements, mut skipped) = self.parse_statements(text, &lines);
-        // MySQL's INSERT ... SET, checked as INSERT ... VALUES
-        for (statement, _) in &mut statements {
-            mysql::insert_set_as_values(statement);
-        }
+        let arena = syntax::Arena::new();
+        let (statements, mut skipped) = self.parse_statements(text, &lines, &arena);
         // Applied in source order, before the statements that follow them
         skipped.reverse();
 
@@ -563,11 +561,11 @@ impl<'a> Analyzer<'a> {
         let source_lines = LineIndex::new(sql);
         let starts: Vec<usize> = statements
             .iter()
-            .map(|(_, o)| source_lines.byte_offset(o.line as u64, o.column as u64))
+            .map(|(_, o, _)| source_lines.byte_offset(o.line as u64, o.column as u64))
             .collect();
 
         // Analyze each statement
-        for (index, (stmt, origin)) in statements.iter().enumerate() {
+        for (index, (stmt, origin, syntax)) in statements.iter().enumerate() {
             // Definitions before this statement that could not be parsed
             while skipped
                 .last()
@@ -607,7 +605,9 @@ impl<'a> Analyzer<'a> {
                 text.contains("{{") || text.contains("{%")
             };
             // Query fragments interpolated between clauses may join relations
-            let next = statements.get(index + 1).map(|(_, o)| (o.line, o.column));
+            let next = statements
+                .get(index + 1)
+                .map(|(_, o, _)| (o.line, o.column));
             let statement_fragments: Vec<bool> = fragments
                 .iter()
                 .filter(|&&(line, column, _)| {
@@ -621,11 +621,21 @@ impl<'a> Analyzer<'a> {
                 .with_templated_names(&templated_name);
             resolver.templated_statement = templated || !statement_fragments.is_empty();
             resolver.hidden_relations = statement_fragments.contains(&true);
-            resolver.restrictions = restrictions;
+            // The restriction rules read the tree of a statement the in-house parser read
+            resolver.restrictions = restrictions && syntax.is_none();
+            #[cfg(feature = "inhouse-parser")]
+            if let (true, Some(node)) = (restrictions, syntax) {
+                resolver
+                    .diagnostics
+                    .extend(syntax::restrictions(text, &lines, node));
+            }
             resolver.references = self.references.is_some().then(Vec::new);
             let describing = self.descriptions.is_some() && QueryKind::of(stmt).is_some();
             if describing {
                 resolver.parameter_types = Some(parameters::ParameterTypes::default());
+            }
+            if resolver.restrictions {
+                resolver.check_unordered_limits(stmt);
             }
             let output = resolver.statement(stmt);
             if let (Some(all), Some(found)) = (&mut self.references, resolver.references.take()) {
@@ -825,11 +835,28 @@ impl<'a> Analyzer<'a> {
     /// A CREATE TABLE / VIEW that doesn't parse is retried without clauses that don't
     /// change its columns (`UNLOGGED`, `WITH NO DATA`, ...); if it still doesn't
     /// parse, the table or view it defines is returned with its position.
-    fn parse_statements(&mut self, sql: &str, lines: &LineIndex) -> ParsedStatements {
+    ///
+    /// With the in-house parser ([`crate::parser_hook`]), PostgreSQL text is read by it
+    /// into `arena`, and the statements it read come with their tree.
+    fn parse_statements<'t>(
+        &mut self,
+        sql: &str,
+        lines: &LineIndex,
+        arena: &'t syntax::Arena,
+    ) -> ParsedStatements<'t> {
+        #[cfg(feature = "inhouse-parser")]
+        if self.dialect == SqlDialect::PostgreSQL && crate::parser_hook::enabled() {
+            return self.parse_statements_inhouse(sql, lines, arena);
+        }
+        #[cfg(not(feature = "inhouse-parser"))]
+        let _ = arena;
         let dialect = self.dialect.parser_dialect();
         let error = match Parser::parse_sql(dialect.as_ref(), sql) {
             Ok(statements) => {
-                let statements = statements.into_iter().map(|s| (s, Origin::START)).collect();
+                let statements = statements
+                    .into_iter()
+                    .map(|s| (analyzed(s), Origin::START, None))
+                    .collect();
                 return (statements, Vec::new());
             }
             Err(error) => error,
@@ -852,69 +879,134 @@ impl<'a> Analyzer<'a> {
         let mut statements = Vec::new();
         let mut skipped = Vec::new();
         for range in ranges {
-            let (line, column) = lines.line_column(range.start);
-            let origin = Origin { line, column };
-            let text = &sql[range.clone()];
-            let error = match Parser::parse_sql(dialect.as_ref(), text) {
-                Ok(parsed) => {
-                    statements.extend(parsed.into_iter().map(|s| (s, origin)));
-                    continue;
-                }
-                Err(error) => error,
-            };
-            let retried = mask_unsupported_clauses(self.dialect, text, false)
-                .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                .or_else(|| match self.dialect {
-                    // `t.$1` positional columns
-                    SqlDialect::Snowflake => {
-                        snowflake::mask_positional_columns(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                    }
-                    // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
-                    dialect_kind if dialect_kind.is_psql() => {
-                        mask_row_lock_strength(dialect.as_ref(), text)
-                            .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
-                    }
-                    _ => None,
-                });
-            if let Some(parsed) = retried {
-                statements.extend(parsed.into_iter().map(|s| (s, origin)));
-                continue;
-            }
-            // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
-            // statistics or procedural blocks only, nothing to check
-            if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
-                continue;
-            }
-            // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
-            // functions and types only, no relation to check
-            if self.dialect.is_psql()
-                && starts_with_words(dialect.as_ref(), text, &["CREATE", "EXTENSION"])
-            {
-                continue;
-            }
-            // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
-            if self.dialect == SqlDialect::Snowflake
-                && snowflake::is_unanalyzed_statement(dialect.as_ref(), text)
-            {
-                continue;
-            }
-            if let Some((kind, name)) = unparsed_definition(self.dialect, text) {
-                let start = range.start + (text.len() - text.trim_start().len());
-                skipped.push((
-                    origin,
-                    SkippedDefinition {
-                        kind,
-                        name: Some(name),
-                        line: Some(lines.line_column(start).0),
-                    },
-                ));
-            }
-            self.diagnostics
-                .push(parse_error_diagnostic(&error, sql, range, lines));
+            self.parse_range(sql, range, lines, &mut statements, &mut skipped, true);
         }
         (statements, skipped)
     }
+
+    /// Parses one statement's text (`sql[range]`) on its own with sqlparser, retrying
+    /// without clauses it doesn't parse; see [`Self::parse_statements`]. A syntax error
+    /// is reported if `report_error`.
+    fn parse_range(
+        &mut self,
+        sql: &str,
+        range: Range<usize>,
+        lines: &LineIndex,
+        statements: &mut Vec<(Statement, Origin, syntax::Syntax<'_>)>,
+        skipped: &mut Vec<(Origin, SkippedDefinition)>,
+        report_error: bool,
+    ) {
+        let dialect = self.dialect.parser_dialect();
+        let (line, column) = lines.line_column(range.start);
+        let origin = Origin { line, column };
+        let text = &sql[range.clone()];
+        let error = match Parser::parse_sql(dialect.as_ref(), text) {
+            Ok(parsed) => {
+                statements.extend(parsed.into_iter().map(|s| (analyzed(s), origin, None)));
+                return;
+            }
+            Err(error) => error,
+        };
+        let retried = mask_unsupported_clauses(self.dialect, text, false)
+            .and_then(|(masked, _)| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+            .or_else(|| match self.dialect {
+                // `t.$1` positional columns
+                SqlDialect::Snowflake => snowflake::mask_positional_columns(dialect.as_ref(), text)
+                    .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok()),
+                // `FOR NO KEY UPDATE` / `FOR KEY SHARE`
+                dialect_kind if dialect_kind.is_psql() => {
+                    mask_row_lock_strength(dialect.as_ref(), text)
+                        .and_then(|masked| Parser::parse_sql(dialect.as_ref(), &masked).ok())
+                }
+                _ => None,
+            });
+        if let Some(parsed) = retried {
+            statements.extend(parsed.into_iter().map(|s| (analyzed(s), origin, None)));
+            return;
+        }
+        // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
+        // statistics or procedural blocks only, nothing to check
+        if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
+            return;
+        }
+        // `CREATE EXTENSION ... VERSION '...'` (Supabase/pgTAP test files): loads
+        // functions and types only, no relation to check
+        if self.dialect.is_psql()
+            && starts_with_words(dialect.as_ref(), text, &["CREATE", "EXTENSION"])
+        {
+            return;
+        }
+        // Snowflake administration statements (ALTER SESSION, CREATE WAREHOUSE, ...)
+        if self.dialect == SqlDialect::Snowflake
+            && snowflake::is_unanalyzed_statement(dialect.as_ref(), text)
+        {
+            return;
+        }
+        if let Some((kind, name)) = unparsed_definition(self.dialect, text) {
+            let start = range.start + (text.len() - text.trim_start().len());
+            skipped.push((
+                origin,
+                SkippedDefinition {
+                    kind,
+                    name: Some(name),
+                    line: Some(lines.line_column(start).0),
+                },
+            ));
+        }
+        if report_error {
+            self.diagnostics
+                .push(parse_error_diagnostic(&error, sql, range, lines));
+        }
+    }
+
+    /// [`Self::parse_statements`] with the in-house parser: the statements it lowers to
+    /// the analyzer's AST with their tree, sqlparser for the ones it leaves to it.
+    #[cfg(feature = "inhouse-parser")]
+    fn parse_statements_inhouse<'t>(
+        &mut self,
+        sql: &str,
+        lines: &LineIndex,
+        arena: &'t syntax::Arena,
+    ) -> ParsedStatements<'t> {
+        use sqlsift_parser::analysis::Outcome;
+        let mut statements = Vec::new();
+        let mut skipped = Vec::new();
+        for item in sqlsift_parser::analysis::statements(arena, sql) {
+            let range = item.range.to_range();
+            match item.outcome {
+                Outcome::Lowered(statement) => {
+                    statements.push((*statement, Origin::START, item.node));
+                }
+                Outcome::Unsupported(_) => {
+                    // Valid PostgreSQL: a statement sqlparser can't parse isn't an error
+                    self.parse_range(sql, range, lines, &mut statements, &mut skipped, false);
+                }
+                Outcome::SyntaxError(error) => {
+                    // Located the way sqlparser locates its errors: in the statement's text
+                    let message = error.message;
+                    let offset = error.range.start as usize;
+                    let text = &sql[range.start..];
+                    let (line, column) = crate::parser_hook::line_column(
+                        text,
+                        offset.saturating_sub(range.start).min(text.len()),
+                    );
+                    let error = ParserError::ParserError(format!(
+                        "{message} at Line: {line}, Column: {column}"
+                    ));
+                    self.diagnostics
+                        .push(parse_error_diagnostic(&error, sql, range, lines));
+                }
+            }
+        }
+        (statements, skipped)
+    }
+}
+
+/// A statement sqlparser parsed, as the analyzer reads it: MySQL's `INSERT ... SET` as
+/// `INSERT ... VALUES`, converted to the analyzer's AST
+fn analyzed(mut statement: sqlparser::ast::Statement) -> Statement {
+    mysql::insert_set_as_values(&mut statement);
+    crate::convert::statement(&statement)
 }
 
 /// Significant tokens of `text` with their byte ranges (`None` if it can't be
@@ -1037,8 +1129,12 @@ fn explain_template_parse_error(d: &mut Diagnostic, template: &Template, not_mas
 }
 
 /// Parsed statements and the table / view definitions that could not be parsed,
-/// each with the position where its text starts
-type ParsedStatements = (Vec<(Statement, Origin)>, Vec<(Origin, SkippedDefinition)>);
+/// each with the position where its text starts (and the tree of a statement the
+/// in-house parser read)
+type ParsedStatements<'t> = (
+    Vec<(Statement, Origin, syntax::Syntax<'t>)>,
+    Vec<(Origin, SkippedDefinition)>,
+);
 
 /// `text` without a leading UTF-8 byte order mark (which editors on Windows and
 /// tools like SSMS write), and the byte length removed. Columns of the stripped
@@ -1200,7 +1296,7 @@ fn parse_error_diagnostic(
 pub(crate) fn query_output_columns(
     catalog: &Catalog,
     dialect: SqlDialect,
-    query: &sqlparser::ast::Query,
+    query: &sqlsift_ast::Query,
 ) -> Option<Vec<(String, crate::types::SqlType)>> {
     let mut resolver = Resolver::new(catalog, dialect);
     let columns = resolver.query(query, false)?;

@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     BinaryOperator, CaseWhen, Expr, GroupByExpr, Ident, JoinConstraint, JoinOperator, Select,
     SelectItem, Spanned, TableFactor, TableWithJoins, Value, ValueWithSpan, Visit, Visitor,
 };

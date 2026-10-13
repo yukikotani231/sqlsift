@@ -19,6 +19,30 @@ pub struct Span {
     pub column: usize,
 }
 
+/// A parser span: start and end line and column, 1-based (0 when unknown)
+pub trait ParserSpan {
+    /// `((start line, start column), (end line, end column))`
+    fn line_columns(&self) -> ((u64, u64), (u64, u64));
+}
+
+impl ParserSpan for sqlsift_ast::Span {
+    fn line_columns(&self) -> ((u64, u64), (u64, u64)) {
+        (
+            (self.start.line, self.start.column),
+            (self.end.line, self.end.column),
+        )
+    }
+}
+
+impl ParserSpan for sqlparser::tokenizer::Span {
+    fn line_columns(&self) -> ((u64, u64), (u64, u64)) {
+        (
+            (self.start.line, self.start.column),
+            (self.end.line, self.end.column),
+        )
+    }
+}
+
 impl Span {
     /// Create a span with byte offset (for backwards compatibility)
     pub fn new(offset: usize, length: usize) -> Self {
@@ -40,10 +64,11 @@ impl Span {
         }
     }
 
-    /// Create a span from sqlparser's Span
-    pub fn from_sqlparser(span: &sqlparser::tokenizer::Span) -> Self {
-        let start = span.start;
-        let end = span.end;
+    /// Create a span from a parser's span (the analyzer's AST or sqlparser's tokens)
+    pub fn from_sqlparser(span: &impl ParserSpan) -> Self {
+        let ((start_line, start_column), (_, end_column)) = span.line_columns();
+        let start = sqlsift_ast::Location::new(start_line, start_column);
+        let end = sqlsift_ast::Location::new(start_line, end_column);
         let length = if end.column > start.column {
             end.column as usize - start.column as usize
         } else {

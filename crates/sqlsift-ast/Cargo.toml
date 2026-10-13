@@ -1,0 +1,19 @@
+[package]
+name = "sqlsift-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The syntax tree sqlsift's analyzer reads, whichever parser produced it (experimental)"
+publish = false
+
+[dependencies]
+# Only for `from_sqlparser`: the conversion from sqlparser's AST
+sqlparser = { workspace = true, optional = true }
+
+[features]
+sqlparser = ["dep:sqlparser"]
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Ident, ObjectName};
+use sqlsift_ast::{Ident, ObjectName};
 use std::borrow::Cow;
 
 use crate::ast_ext::name_idents;

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Expr, Value, ValueWithSpan};
+use sqlsift_ast::{Expr, Value, ValueWithSpan};
 
 use super::resolver::Resolver;
 use super::scope::ExpressionType;

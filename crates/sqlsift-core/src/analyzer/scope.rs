@@ -10,7 +10,7 @@
 //! - CTEs are visible in the query that defines them and everything nested in it
 
 use indexmap::IndexMap;
-use sqlparser::ast::Ident;
+use sqlsift_ast::Ident;
 use std::collections::HashSet;
 
 use crate::dialect::SqlDialect;

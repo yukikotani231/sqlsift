@@ -3,7 +3,7 @@
 //! NOT NULL columns, literals, `count(*)`, `IS NULL` tests, ... `Some(true)` means
 //! the value may be NULL; `None` that it can't be told.
 
-use sqlparser::ast::{
+use sqlsift_ast::{
     BinaryOperator, CastKind, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value,
 };
 
@@ -191,7 +191,7 @@ impl Resolver<'_> {
         }
     }
 
-    fn function_nullable(&self, func: &sqlparser::ast::Function) -> Option<bool> {
+    fn function_nullable(&self, func: &sqlsift_ast::Function) -> Option<bool> {
         let name = func.name.0.last()?.ident().value.to_lowercase();
         let args: Vec<Option<bool>> = match &func.args {
             FunctionArguments::List(list) => list
