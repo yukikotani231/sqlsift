@@ -104,4 +104,18 @@ fn main() {
         whole * 1e3,
         fbytes as f64 / 1e6 / whole
     );
+    // As sqlsift reads a file: parsed once, each statement lowered (or left to sqlparser)
+    let t = Instant::now();
+    for _ in 0..reps {
+        for f in &files {
+            arena.reset();
+            std::hint::black_box(sqlsift_parser::analysis::statements(&arena, f));
+        }
+    }
+    let analysis = t.elapsed().as_secs_f64() / f64::from(reps);
+    println!(
+        "ours + lowering, all files: {:.1} ms, {:.1} MB/s",
+        analysis * 1e3,
+        fbytes as f64 / 1e6 / analysis
+    );
 }

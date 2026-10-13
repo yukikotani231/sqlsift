@@ -75,19 +75,30 @@ fn unsupported<T>(what: impl Into<String>) -> Result<T> {
 pub struct LineIndex<'a> {
     text: &'a str,
     line_starts: Vec<usize>,
+    /// Columns are byte distances (no character to count)
+    ascii: bool,
 }
 
 impl<'a> LineIndex<'a> {
     pub fn new(text: &'a str) -> Self {
         let mut line_starts = vec![0];
         line_starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
-        LineIndex { text, line_starts }
+        LineIndex {
+            text,
+            line_starts,
+            ascii: text.is_ascii(),
+        }
     }
 
     pub fn location(&self, offset: u32) -> Location {
         let offset = offset as usize;
         let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
-        let column = self.text[self.line_starts[line]..offset].chars().count() + 1;
+        let start = self.line_starts[line];
+        let column = if self.ascii {
+            offset - start
+        } else {
+            self.text[start..offset].chars().count()
+        } + 1;
         Location::new(line as u64 + 1, column as u64)
     }
 
@@ -100,19 +111,25 @@ impl<'a> LineIndex<'a> {
 ///
 /// `source` is the text the tree was parsed from. Spans are relative to it.
 pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
-    let cx = Lowering {
-        source,
-        lines: LineIndex::new(source),
-    };
+    lower_statement_in(&LineIndex::new(source), node)
+}
+
+/// [`lower_statement`] with the line index of the source, for the statements of one file.
+pub fn lower_statement_in(lines: &LineIndex<'_>, node: &SyntaxNode) -> Result<Statement> {
+    let source = lines.text;
+    let cx = Lowering { source, lines };
     if node.has_errors() {
         return unsupported("syntax error");
     }
     // sqlparser reads `/*+ ... */` (and `--+ ...`) comments as optimizer hints, even for
     // PostgreSQL, where they are comments.
-    if node.descendant_tokens().iter().any(|t| {
-        matches!(t.kind, SyntaxKind::BlockComment | SyntaxKind::LineComment)
-            && matches!(t.text(source).get(..3), Some("/*+" | "--+"))
-    }) {
+    let text = &source[node.range.to_range()];
+    if (text.contains("/*+") || text.contains("--+"))
+        && node.descendant_tokens().iter().any(|t| {
+            matches!(t.kind, SyntaxKind::BlockComment | SyntaxKind::LineComment)
+                && matches!(t.text(source).get(..3), Some("/*+" | "--+"))
+        })
+    {
         return unsupported("optimizer hint comment");
     }
     match node.kind {
@@ -131,7 +148,7 @@ pub fn lower_statement(source: &str, node: &SyntaxNode) -> Result<Statement> {
 
 struct Lowering<'a> {
     source: &'a str,
-    lines: LineIndex<'a>,
+    lines: &'a LineIndex<'a>,
 }
 
 /// The non-trivia tokens of a node, children's included.

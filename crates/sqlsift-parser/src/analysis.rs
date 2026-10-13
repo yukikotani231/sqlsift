@@ -3,7 +3,7 @@
 
 use sqlsift_ast::Statement;
 
-use crate::lower::lower_statement;
+use crate::lower::{lower_statement_in, LineIndex};
 use crate::{parse, Arena, SyntaxError, SyntaxKind, SyntaxNode, TextRange};
 
 /// What became of one statement.
@@ -30,6 +30,7 @@ pub struct AnalyzedStatement<'a> {
 /// parser couldn't place stays with its statement).
 pub fn statements<'a>(arena: &'a Arena, source: &str) -> Vec<AnalyzedStatement<'a>> {
     let parsed = parse(arena, source);
+    let lines = LineIndex::new(source);
     let mut out = vec![];
     let mut nodes: Vec<&'a SyntaxNode<'a>> = vec![];
     let mut range: Option<TextRange> = None;
@@ -43,7 +44,7 @@ pub fn statements<'a>(arena: &'a Arena, source: &str) -> Vec<AnalyzedStatement<'
             .find(|e| r.start <= e.range.start && e.range.start <= r.end);
         let outcome = match (error, &nodes[..]) {
             (Some(e), _) => Outcome::SyntaxError(e.clone()),
-            (None, [node]) => match lower_statement(source, node) {
+            (None, [node]) => match lower_statement_in(&lines, node) {
                 Ok(statement) => Outcome::Lowered(Box::new(statement)),
                 Err(e) => Outcome::Unsupported(e.0),
             },
