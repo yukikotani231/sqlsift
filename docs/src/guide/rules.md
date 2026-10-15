@@ -42,6 +42,7 @@ E0032  integer-division          pedantic     off      Division of integer colum
 E0033  timestamp-timezone-mismatch suspicious warn     Comparing or assigning timestamp with timestamptz depends on session TimeZone
 E0034  case-enum-missing-labels  pedantic     off      CASE over an enum column misses some labels and has no ELSE
 E0035  duplicate-insert-value    correctness  error    Duplicate primary key or unique values in an INSERT VALUES list
+E0036  illegal-mix-of-collations correctness  error    Comparison or expression combines incompatible collations in MySQL
 E1000  parse-error               correctness  error    SQL could not be parsed
 ```
 

@@ -65,6 +65,10 @@ pub(super) struct Column {
     pub(super) case_sensitive: bool,
     /// Whether the column may be NULL (`None` if that can't be told)
     pub(super) nullable: Option<bool>,
+    /// Character set for text columns (e.g. `utf8mb4`)
+    pub(super) character_set: Option<String>,
+    /// Collation for text columns (e.g. `utf8mb4_unicode_ci`)
+    pub(super) collation: Option<String>,
 }
 
 /// A column of unknown type and NULL-ability (a system column such as `ctid`)
@@ -74,6 +78,8 @@ static UNKNOWN_COLUMN: Column = Column {
     guessed_name: false,
     case_sensitive: false,
     nullable: None,
+    character_set: None,
+    collation: None,
 };
 
 impl Column {
@@ -84,6 +90,8 @@ impl Column {
             guessed_name: false,
             case_sensitive: false,
             nullable: None,
+            character_set: None,
+            collation: None,
         }
     }
 
@@ -181,6 +189,8 @@ impl Relation {
             .map(|c| Column {
                 case_sensitive: c.case_sensitive,
                 nullable: Some(nullable(c)),
+                character_set: c.character_set.clone(),
+                collation: c.collation.clone(),
                 ..Column::new(c.name.clone(), ExpressionType::of_column(&c.data_type))
             })
             .collect();

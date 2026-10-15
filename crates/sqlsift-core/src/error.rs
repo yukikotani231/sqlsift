@@ -221,6 +221,8 @@ pub enum DiagnosticKind {
     CaseEnumMissingLabels,
     /// E0035: Duplicate primary key or unique values in an INSERT VALUES list
     DuplicateInsertValue,
+    /// E0036: Comparison or set operation combines incompatible collations in MySQL
+    IllegalMixOfCollations,
     /// Parse error
     ParseError,
 }

@@ -63,4 +63,5 @@ CREATE TABLE coupons (
 | [E0033](E0033.md) | `timestamp-timezone-mismatch` | Comparing or assigning timestamp with timestamptz depends on session TimeZone |
 | [E0034](E0034.md) | `case-enum-missing-labels` | CASE over an enum column misses some labels and has no ELSE |
 | [E0035](E0035.md) | `duplicate-insert-value` | Duplicate primary key or unique values in an INSERT VALUES list |
+| [E0036](E0036.md) | `illegal-mix-of-collations` | Comparison or set operation combines incompatible collations in MySQL |
 | [E1000](E1000.md) | `parse-error` | SQL could not be parsed |

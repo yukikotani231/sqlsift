@@ -394,6 +394,13 @@ pub const RULES: &[Rule] = &[
         summary: "Duplicate primary key or unique values in an INSERT VALUES list",
     },
     Rule {
+        kind: DiagnosticKind::IllegalMixOfCollations,
+        code: "E0036",
+        name: "illegal-mix-of-collations",
+        category: RuleCategory::Correctness,
+        summary: "Comparison or set operation combines incompatible collations in MySQL",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

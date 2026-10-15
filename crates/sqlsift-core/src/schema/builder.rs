@@ -2,10 +2,10 @@
 
 use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, AlterType, AlterTypeAddValuePosition,
-    AlterTypeOperation, ColumnOption, ColumnOptionDef, CreateTableLikeKind, DataType, Expr, Ident,
-    IndexColumn, ObjectName, ObjectType, Query, RenameTableNameKind, Set, SetExpr, Statement,
-    TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
-    ValueWithSpan,
+    AlterTypeOperation, ColumnOption, ColumnOptionDef, CreateTableLikeKind, CreateTableOptions,
+    DataType, Expr, Ident, IndexColumn, ObjectName, ObjectType, Query, RenameTableNameKind, Set,
+    SetExpr, SqlOption, Statement, TableConstraint, TriggerEvent, TriggerPeriod, Use,
+    UserDefinedTypeRepresentation, Value, ValueWithSpan,
 };
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
@@ -643,6 +643,8 @@ impl SchemaBuilder {
         let mut table = TableDef::new(name);
         table.columns.clone_from(&parent_table.columns);
         table.primary_key.clone_from(&parent_table.primary_key);
+        table.character_set.clone_from(&parent_table.character_set);
+        table.collation.clone_from(&parent_table.collation);
         // A unique index of the parent is also an index of the partition
         table.unknown_unique_keys = true;
         table
@@ -969,9 +971,20 @@ impl SchemaBuilder {
                     table
                         .check_constraints
                         .clone_from(&source_table.check_constraints);
+                    table.character_set.clone_from(&source_table.character_set);
+                    table.collation.clone_from(&source_table.collation);
                 }
                 None => self.warn_like_source_missing(&name, &source),
             }
+        }
+
+        let (table_charset, table_collation) =
+            extract_table_charset_and_collation(&create.table_options);
+        if table_charset.is_some() {
+            table.character_set = table_charset;
+        }
+        if table_collation.is_some() {
+            table.collation = table_collation;
         }
 
         // Process columns (Hive-format `PARTITIONED BY (c TYPE)` adds partition columns)
@@ -993,6 +1006,8 @@ impl SchemaBuilder {
                 &column.name.value,
                 &column.data_type,
                 &column.options,
+                table.character_set.as_deref(),
+                table.collation.as_deref(),
             );
             col_def.case_sensitive = self.catalog.is_case_sensitive_column(&column.name);
             merge_constraints(&mut table, constraints);
@@ -1051,6 +1066,8 @@ impl SchemaBuilder {
         };
         table.columns.clone_from(&parent_table.columns);
         table.primary_key.clone_from(&parent_table.primary_key);
+        table.character_set.clone_from(&parent_table.character_set);
+        table.collation.clone_from(&parent_table.collation);
         // A unique index of the parent is also an index of the partition
         table.unknown_unique_keys = true;
         table
@@ -1067,10 +1084,19 @@ impl SchemaBuilder {
         match analyzer::query_output_columns(&self.catalog, self.dialect, query) {
             Some(columns) => {
                 for (col_name, data_type) in columns {
-                    table
-                        .columns
-                        .entry(col_name.clone())
-                        .or_insert_with(|| ColumnDef::new(col_name, data_type));
+                    table.columns.entry(col_name.clone()).or_insert_with(|| {
+                        let mut col = ColumnDef::new(col_name, data_type);
+                        if col.data_type.is_string() || matches!(col.data_type, SqlType::Enum(_)) {
+                            col.character_set.clone_from(&table.character_set);
+                            if let Some(tbl_coll) = table.collation.as_deref() {
+                                if collation_matches_charset(tbl_coll, col.character_set.as_deref())
+                                {
+                                    col.collation = Some(tbl_coll.to_string());
+                                }
+                            }
+                        }
+                        col
+                    });
                 }
             }
             None if self.query_file => {
@@ -1153,6 +1179,12 @@ impl SchemaBuilder {
                 // INCLUDING options; NOT NULL always is
                 col.is_primary_key = false;
                 table.columns.insert(col_name.clone(), col);
+            }
+            if table.character_set.is_none() {
+                table.character_set.clone_from(&source_table.character_set);
+            }
+            if table.collation.is_none() {
+                table.collation.clone_from(&source_table.collation);
             }
         } else if let Some(view) = self.catalog.get_view(&source) {
             for col_name in &view.columns {
@@ -1254,6 +1286,12 @@ impl SchemaBuilder {
         for operation in operations {
             match operation {
                 AlterTableOperation::AddColumn { column_def, .. } => {
+                    let (default_charset, default_collation) = self
+                        .catalog
+                        .get_table(&table_name)
+                        .map_or((None, None), |t| {
+                            (t.character_set.as_deref(), t.collation.as_deref())
+                        });
                     let (mut col, constraints) = build_column(
                         &self.catalog,
                         self.dialect,
@@ -1261,6 +1299,8 @@ impl SchemaBuilder {
                         &column_def.name.value,
                         &column_def.data_type,
                         &column_def.options,
+                        default_charset,
+                        default_collation,
                     );
                     col.case_sensitive = self.catalog.is_case_sensitive_column(&column_def.name);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
@@ -1328,6 +1368,12 @@ impl SchemaBuilder {
                             option: option.clone(),
                         })
                         .collect();
+                    let (default_charset, default_collation) = self
+                        .catalog
+                        .get_table(&table_name)
+                        .map_or((None, None), |t| {
+                            (t.character_set.as_deref(), t.collation.as_deref())
+                        });
                     let (col, constraints) = build_column(
                         &self.catalog,
                         self.dialect,
@@ -1335,6 +1381,8 @@ impl SchemaBuilder {
                         &new_name.value,
                         data_type,
                         &options,
+                        default_charset,
+                        default_collation,
                     );
                     let location = self.location(col_name.span);
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
@@ -1513,6 +1561,7 @@ fn is_deferrable(characteristics: Option<&sqlparser::ast::ConstraintCharacterist
 /// Build a column definition from its name, type and options. Table-level
 /// constraints declared inline (PRIMARY KEY, UNIQUE, REFERENCES, CHECK) are
 /// collected into the returned `TableDef`, to be merged into the owning table.
+#[allow(clippy::too_many_arguments)]
 fn build_column(
     catalog: &Catalog,
     dialect: SqlDialect,
@@ -1520,6 +1569,8 @@ fn build_column(
     col_name: &str,
     data_type: &DataType,
     options: &[ColumnOptionDef],
+    default_charset: Option<&str>,
+    default_collation: Option<&str>,
 ) -> (ColumnDef, TableDef) {
     let mut col = ColumnDef::new(col_name, SqlType::from_ast_in(data_type, dialect));
     let mut constraints = TableDef::new(QualifiedName::new(table_name));
@@ -1527,6 +1578,12 @@ fn build_column(
     for option in options {
         let constraint_name = option.name.as_ref().map(|n| n.value.clone());
         match &option.option {
+            ColumnOption::CharacterSet(name) => {
+                col.character_set = Some(object_name_to_string(name));
+            }
+            ColumnOption::Collation(name) => {
+                col.collation = Some(object_name_to_string(name));
+            }
             ColumnOption::Null => col.nullable = true,
             ColumnOption::NotNull => col.nullable = false,
             ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
@@ -1612,7 +1669,133 @@ fn build_column(
         }
     }
 
+    let is_text = col.data_type.is_string() || matches!(col.data_type, SqlType::Enum(_));
+    if is_text && col.character_set.is_none() {
+        if let Some(col_coll) = &col.collation {
+            col.character_set = charset_from_collation(col_coll);
+        } else {
+            col.character_set = default_charset.map(ToString::to_string);
+            if col.collation.is_none() {
+                if let Some(tbl_coll) = default_collation {
+                    if collation_matches_charset(tbl_coll, col.character_set.as_deref()) {
+                        col.collation = Some(tbl_coll.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     (col, constraints)
+}
+
+pub(crate) fn normalize_charset(charset: &str) -> String {
+    let lower = charset.to_ascii_lowercase();
+    if lower == "utf8" {
+        "utf8mb3".to_string()
+    } else {
+        lower
+    }
+}
+
+pub(crate) fn normalize_collation(coll: &str) -> String {
+    let lower = coll.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("utf8_") {
+        format!("utf8mb3_{rest}")
+    } else {
+        lower
+    }
+}
+
+pub(crate) fn charset_from_collation(collation: &str) -> Option<String> {
+    let lower = collation.to_ascii_lowercase();
+    if lower == "binary" {
+        return Some("binary".to_string());
+    }
+    lower.split('_').next().map(|s| {
+        if s == "utf8" {
+            "utf8mb3".to_string()
+        } else {
+            s.to_string()
+        }
+    })
+}
+
+fn collation_matches_charset(collation: &str, charset: Option<&str>) -> bool {
+    let Some(cs) = charset else {
+        return true;
+    };
+    let norm_cs = normalize_charset(cs);
+    let norm_coll = normalize_collation(collation);
+    norm_coll.eq_ignore_ascii_case(&norm_cs)
+        || norm_coll
+            .to_ascii_lowercase()
+            .starts_with(&format!("{}_", norm_cs.to_ascii_lowercase()))
+}
+
+/// Extract character set and collation from CREATE TABLE options.
+/// Handles MySQL options: `DEFAULT CHARSET`, `CHARSET`, `DEFAULT CHARACTER SET`,
+/// `CHARACTER SET`, `DEFAULT COLLATE`, `COLLATE`.
+fn extract_table_charset_and_collation(
+    options: &CreateTableOptions,
+) -> (Option<String>, Option<String>) {
+    let mut charset = None;
+    let mut collation = None;
+    let list = match options {
+        CreateTableOptions::Plain(opts)
+        | CreateTableOptions::Options(opts)
+        | CreateTableOptions::With(opts)
+        | CreateTableOptions::TableProperties(opts) => opts.as_slice(),
+        CreateTableOptions::None => &[],
+    };
+    for opt in list {
+        if let SqlOption::KeyValue { key, value } = opt {
+            let key_norm = key
+                .value
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_uppercase();
+            if matches!(
+                key_norm.as_str(),
+                "DEFAULT CHARSET" | "CHARSET" | "DEFAULT CHARACTER SET" | "CHARACTER SET"
+            ) {
+                charset = expr_to_string(value);
+            } else if matches!(key_norm.as_str(), "DEFAULT COLLATE" | "COLLATE") {
+                collation = expr_to_string(value);
+            }
+        }
+    }
+    (charset, collation)
+}
+
+fn expr_to_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => Some(
+            idents
+                .iter()
+                .map(|i| i.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        ),
+        Expr::Value(ValueWithSpan {
+            value:
+                Value::SingleQuotedString(s)
+                | Value::DoubleQuotedString(s)
+                | Value::EscapedStringLiteral(s)
+                | Value::NationalStringLiteral(s),
+            ..
+        }) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn object_name_to_string(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .map(|p| p.ident().value.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// The `INTO` target of a `SELECT ... INTO t` query
@@ -2744,5 +2927,156 @@ mod tests {
             "new_items should exist"
         );
         assert!(warnings.is_empty(), "no warnings should be produced");
+    }
+
+    #[test]
+    fn test_character_set_and_collation_parsing() {
+        let sql = r"
+            CREATE TABLE t1 (
+                id INT PRIMARY KEY,
+                name VARCHAR(100),
+                content TEXT,
+                status ENUM('active', 'inactive'),
+                explicit_col VARCHAR(50) CHARACTER SET latin1,
+                custom_coll VARCHAR(50) COLLATE utf8mb4_bin
+            ) DEFAULT CHARSET = utf8mb4 DEFAULT COLLATE = utf8mb4_unicode_ci;
+
+            CREATE TABLE t2 (
+                id INT,
+                title VARCHAR(200)
+            ) CHARSET = latin1 COLLATE = latin1_general_ci;
+
+            CREATE TABLE t3 (
+                val VARCHAR(50)
+            ) DEFAULT CHARACTER SET 'utf8mb4' COLLATE 'utf8mb4_bin';
+
+            CREATE TABLE t4 (
+                id INT,
+                name VARCHAR(100)
+            ) CHARACTER SET utf8;
+
+            CREATE TABLE t5 (
+                id INT
+            ) DEFAULT CHARSET = utf8mb4;
+
+            ALTER TABLE t5 ADD COLUMN notes VARCHAR(200);
+            ALTER TABLE t5 ADD COLUMN legacy VARCHAR(200) CHARACTER SET latin1;
+
+            CREATE TABLE t6 LIKE t1;
+        ";
+
+        let mut builder = SchemaBuilder::with_dialect(SqlDialect::MySQL);
+        builder.parse(sql).unwrap();
+        let (catalog, warnings) = builder.build();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:#?}");
+
+        // Table t1
+        let t1 = catalog
+            .get_table(&QualifiedName::new("t1"))
+            .expect("t1 exists");
+        assert_eq!(t1.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(t1.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+
+        // Integer column should not inherit charset/collation
+        let id_col = t1.get_column("id").expect("id col");
+        assert_eq!(id_col.character_set, None);
+        assert_eq!(id_col.collation, None);
+
+        // String and enum columns should inherit table defaults
+        let name_col = t1.get_column("name").expect("name col");
+        assert_eq!(name_col.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(name_col.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+
+        let content_col = t1.get_column("content").expect("content col");
+        assert_eq!(content_col.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(content_col.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+
+        let status_col = t1.get_column("status").expect("status col");
+        assert_eq!(status_col.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(status_col.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+
+        // Explicit charset: does not inherit incompatible table collation
+        let explicit_col = t1.get_column("explicit_col").expect("explicit_col");
+        assert_eq!(explicit_col.character_set.as_deref(), Some("latin1"));
+        assert_eq!(explicit_col.collation, None);
+
+        // Explicit collation: inherits table charset if compatible
+        let custom_coll = t1.get_column("custom_coll").expect("custom_coll");
+        assert_eq!(custom_coll.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(custom_coll.collation.as_deref(), Some("utf8mb4_bin"));
+
+        // Table t2
+        let t2 = catalog
+            .get_table(&QualifiedName::new("t2"))
+            .expect("t2 exists");
+        assert_eq!(t2.character_set.as_deref(), Some("latin1"));
+        assert_eq!(t2.collation.as_deref(), Some("latin1_general_ci"));
+        let title_col = t2.get_column("title").expect("title col");
+        assert_eq!(title_col.character_set.as_deref(), Some("latin1"));
+        assert_eq!(title_col.collation.as_deref(), Some("latin1_general_ci"));
+
+        // Table t3 (quoted options)
+        let t3 = catalog
+            .get_table(&QualifiedName::new("t3"))
+            .expect("t3 exists");
+        assert_eq!(t3.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(t3.collation.as_deref(), Some("utf8mb4_bin"));
+
+        // Table t4
+        let t4 = catalog
+            .get_table(&QualifiedName::new("t4"))
+            .expect("t4 exists");
+        assert_eq!(t4.character_set.as_deref(), Some("utf8"));
+        assert_eq!(t4.collation, None);
+        let t4_name = t4.get_column("name").expect("t4 name");
+        assert_eq!(t4_name.character_set.as_deref(), Some("utf8"));
+        assert_eq!(t4_name.collation, None);
+
+        // Table t5 (ALTER TABLE ADD COLUMN)
+        let t5 = catalog
+            .get_table(&QualifiedName::new("t5"))
+            .expect("t5 exists");
+        let notes_col = t5.get_column("notes").expect("notes col");
+        assert_eq!(notes_col.character_set.as_deref(), Some("utf8mb4"));
+        let legacy_col = t5.get_column("legacy").expect("legacy col");
+        assert_eq!(legacy_col.character_set.as_deref(), Some("latin1"));
+
+        // Table t6 (LIKE t1)
+        let t6 = catalog
+            .get_table(&QualifiedName::new("t6"))
+            .expect("t6 exists");
+        assert_eq!(t6.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(t6.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+        let t6_name = t6.get_column("name").expect("t6 name");
+        assert_eq!(t6_name.character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(t6_name.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+    }
+
+    #[test]
+    fn test_column_collation_in_postgresql() {
+        let sql = r#"
+            CREATE TABLE items (
+                id INT PRIMARY KEY,
+                name TEXT COLLATE "en_US",
+                tag VARCHAR(50) COLLATE "C"
+            );
+        "#;
+
+        let mut builder = SchemaBuilder::with_dialect(SqlDialect::PostgreSQL);
+        builder.parse(sql).unwrap();
+        let (catalog, warnings) = builder.build();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:#?}");
+
+        let items = catalog
+            .get_table(&QualifiedName::new("items"))
+            .expect("items exists");
+        assert_eq!(items.character_set, None);
+        assert_eq!(items.collation, None);
+
+        let name_col = items.get_column("name").expect("name col");
+        assert_eq!(name_col.collation.as_deref(), Some("en_US"));
+
+        let tag_col = items.get_column("tag").expect("tag col");
+        assert_eq!(tag_col.collation.as_deref(), Some("C"));
     }
 }

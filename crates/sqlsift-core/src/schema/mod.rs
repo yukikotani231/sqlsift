@@ -6,7 +6,10 @@ mod migrations;
 mod warehouse;
 
 pub use builder::SchemaBuilder;
-pub(crate) use builder::{mask_unsupported_clauses, unparsed_definition};
+pub(crate) use builder::{
+    charset_from_collation, mask_unsupported_clauses, normalize_charset, normalize_collation,
+    unparsed_definition,
+};
 pub(crate) use catalog::split_name;
 pub use catalog::{
     case_mismatched_column, split_dotted_idents, Catalog, CheckConstraintDef, ColumnDef,
