@@ -1677,6 +1677,15 @@ fn maintenance_and_procedural_statements_skipped_without_diagnostics() {
         /* procedural block */
         DO $$ BEGIN RAISE NOTICE 'hi'; END $$;
         do $$ begin null; end $$;
+        CHECKPOINT;
+        checkpoint;
+        CLUSTER events;
+        CLUSTER events USING events_pkey;
+        -- storage maintenance
+        cluster events;
+        REINDEX TABLE events;
+        REINDEX INDEX CONCURRENTLY events_pkey;
+        reindex table events;
         SELECT bogus FROM events;
     ";
 

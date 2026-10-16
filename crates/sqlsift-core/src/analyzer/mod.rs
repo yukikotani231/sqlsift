@@ -887,8 +887,9 @@ impl<'a> Analyzer<'a> {
                 statements.extend(parsed.into_iter().map(|s| (s, origin)));
                 continue;
             }
-            // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO):
-            // statistics or procedural blocks only, nothing to check
+            // PostgreSQL maintenance and procedural statements (ANALYZE, VACUUM, CHECKPOINT, CLUSTER,
+            // REINDEX, REFRESH MATERIALIZED VIEW, DO): statistics, storage or procedural blocks only,
+            // nothing to check
             if self.dialect.is_psql() && is_skipped_statement(dialect.as_ref(), text) {
                 continue;
             }
@@ -944,10 +945,14 @@ fn significant_tokens(dialect: &dyn Dialect, text: &str) -> Option<Vec<(Token, R
 }
 
 /// Whether an unparseable PostgreSQL statement is a maintenance or procedural command
-/// that has no relations or schema elements to check (ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW, DO)
+/// that has no relations or schema elements to check (ANALYZE, VACUUM, CHECKPOINT, CLUSTER,
+/// REINDEX, REFRESH MATERIALIZED VIEW, DO)
 fn is_skipped_statement(dialect: &dyn Dialect, text: &str) -> bool {
     first_word_is(dialect, text, "ANALYZE")
         || first_word_is(dialect, text, "VACUUM")
+        || first_word_is(dialect, text, "CHECKPOINT")
+        || first_word_is(dialect, text, "CLUSTER")
+        || first_word_is(dialect, text, "REINDEX")
         || first_word_is(dialect, text, "DO")
         || starts_with_words(dialect, text, &["REFRESH", "MATERIALIZED", "VIEW"])
 }
