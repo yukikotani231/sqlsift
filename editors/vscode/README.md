@@ -69,6 +69,13 @@ schema = ["db/schema.sql"]
 # ambiguous-column = "warn"
 ```
 
+## Commands
+
+The extension contributes the following commands to the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
+
+- **sqlsift: Restart Language Server** (`sqlsift.restartServer`): Restarts the language server.
+- **sqlsift: Show Output** (`sqlsift.showOutput`): Opens the language server output channel.
+
 ## Extension Settings
 
 | Setting | Default | Description |

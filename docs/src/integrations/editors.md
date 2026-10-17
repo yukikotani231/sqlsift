@@ -14,6 +14,11 @@ Besides `.sql` files, the server checks:
 
 Install the **sqlsift** extension (`sqlsift.sqlsift`) from the Marketplace. Platform builds bundle the language server, so no extra setup is required. See [`editors/vscode`](https://github.com/yukikotani231/sqlsift/tree/main/editors/vscode) for settings. It activates on SQL, `jinja-sql`, Jinja `.sql` files and, unless `sqlsift.embeddedSql.enable` is `false`, TypeScript, JavaScript, Rust, Python and Go files.
 
+The extension provides commands in the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
+
+- **sqlsift: Restart Language Server** (`sqlsift.restartServer`): Restarts the language server.
+- **sqlsift: Show Output** (`sqlsift.showOutput`): Opens the language server output channel.
+
 ## Other editors
 
 Install the server:
