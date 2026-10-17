@@ -1,6 +1,6 @@
 # Output formats
 
-Choose a format with `--format` (`-f`) or `format` in `sqlsift.toml`. The machine-readable formats (`json`, `sarif`, `github`) write diagnostics to stdout and logs and the summary line to stderr, so stdout can be piped or redirected to a file. `human` output goes to stderr. Baseline summaries (the "*N* known diagnostic(s) hidden" and "no longer occur" notes) go to stderr only; they are not included in `--format json` or `sarif`.
+Choose a format with `--format` (`-f`) or `format` in `sqlsift.toml`. The machine-readable formats (`json`, `sarif`, `github`, `gitlab`) write diagnostics to stdout and logs and the summary line to stderr, so stdout can be piped or redirected to a file. `human` output goes to stderr. Baseline summaries (the "*N* known diagnostic(s) hidden" and "no longer occur" notes) go to stderr only; they are not included in `--format json` or `sarif`.
 
 ## `human` (default)
 
@@ -64,6 +64,29 @@ One [GitHub Actions workflow command](https://docs.github.com/en/actions/referen
 ```
 
 Warnings become `::warning`, errors `::error`. Use it when you run sqlsift inside your own job step; the [GitHub Action](../integrations/ci.md) sets up annotations for you.
+
+## `gitlab`
+
+A [GitLab Code Quality report](https://docs.gitlab.com/ci/testing/code_quality/#code-quality-report-format) as a JSON array of issue objects:
+
+```json
+[
+  {
+    "description": "Column 'user_id' not found in table 'users'",
+    "check_name": "E0002",
+    "fingerprint": "a1b2c3d4e5f67890",
+    "severity": "major",
+    "location": {
+      "path": "queries/fetch.sql",
+      "lines": {
+        "begin": 3
+      }
+    }
+  }
+]
+```
+
+`severity` is `major` for errors and `minor` for warnings. `fingerprint` is a 64-bit FNV-1a hash of the file path, rule code and message, stable across line moves. In GitLab CI, redirect stdout to `gl-code-quality-report.json` and upload it under `artifacts:reports:codequality` (see [GitLab CI](../integrations/ci.md#gitlab-ci-code-quality)).
 
 ## Schema JSON
 

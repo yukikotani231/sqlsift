@@ -2725,6 +2725,105 @@ fn github_format_from_config() {
 }
 
 // ---------------------------------------------------------------------------
+// GitLab Code Quality report (#252)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gitlab_format_prints_valid_code_quality_report() {
+    let t = with_users_schema("gitlab");
+    t.write(
+        "sql/q.sql",
+        "SELECT nme FROM users;\nSELECT id FROM users WHERE id = 'x';\n",
+    );
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "sql/q.sql"]);
+    run.assert_code(1)
+        .assert_stderr_contains("Found 2 error(s)");
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON array");
+    let items = v.as_array().expect("array of issues");
+    assert_eq!(items.len(), 2);
+
+    let first = &items[0];
+    assert!(first["description"]
+        .as_str()
+        .unwrap()
+        .contains("Column 'nme' not found"));
+    assert_eq!(first["check_name"], "E0002");
+    assert_eq!(first["severity"], "major");
+    assert_eq!(first["location"]["path"], "sql/q.sql");
+    assert_eq!(first["location"]["lines"]["begin"], 1);
+    assert!(first["fingerprint"].as_str().is_some_and(|s| s.len() == 16));
+
+    let second = &items[1];
+    assert_eq!(second["check_name"], "E0003");
+    assert_eq!(second["severity"], "major");
+    assert_eq!(second["location"]["path"], "sql/q.sql");
+    assert_eq!(second["location"]["lines"]["begin"], 2);
+}
+
+#[test]
+fn gitlab_format_reports_warnings_as_minor() {
+    let t = with_users_schema("gitlab-warn");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "-f",
+        "gitlab",
+        "-W",
+        "E0002",
+        "q.sql",
+    ]);
+    run.assert_code(0);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON array");
+    assert_eq!(v[0]["severity"], "minor");
+}
+
+#[test]
+fn gitlab_format_fingerprint_is_stable_across_line_moves_and_runs() {
+    let t = with_users_schema("gitlab-fp");
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run1 = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run1.assert_code(1);
+    let v1: Value = serde_json::from_str(&run1.stdout).expect("valid JSON");
+    let fp1 = v1[0]["fingerprint"].as_str().unwrap().to_string();
+
+    // Move query to line 4
+    t.write("q.sql", "\n\n\nSELECT nme FROM users;\n");
+    let run2 = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run2.assert_code(1);
+    let v2: Value = serde_json::from_str(&run2.stdout).expect("valid JSON");
+    let fp2 = v2[0]["fingerprint"].as_str().unwrap().to_string();
+
+    assert_eq!(v2[0]["location"]["lines"]["begin"], 4);
+    assert_eq!(fp1, fp2, "fingerprint must be stable across line moves");
+}
+
+#[test]
+fn gitlab_format_with_no_diagnostics_prints_empty_array() {
+    let t = with_users_schema("gitlab-clean");
+    t.write("q.sql", "SELECT id FROM users;\n");
+    let run = t.run(&["check", "-s", "schema.sql", "-f", "gitlab", "q.sql"]);
+    run.assert_code(0);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v, serde_json::json!([]));
+}
+
+#[test]
+fn gitlab_format_from_config() {
+    let t = with_users_schema("gitlab-cfg");
+    t.write(
+        "sqlsift.toml",
+        "schema = [\"schema.sql\"]\nformat = \"gitlab\"\n",
+    );
+    t.write("q.sql", "SELECT nme FROM users;\n");
+    let run = t.run(&["check", "q.sql"]);
+    run.assert_code(1);
+    let v: Value = serde_json::from_str(&run.stdout).expect("valid JSON");
+    assert_eq!(v[0]["check_name"], "E0002");
+}
+
+// ---------------------------------------------------------------------------
 // --max-warnings (#93)
 // ---------------------------------------------------------------------------
 

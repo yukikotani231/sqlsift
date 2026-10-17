@@ -395,6 +395,8 @@ pub enum OutputFormat {
     Sarif,
     /// GitHub Actions workflow commands (annotations on pull requests)
     Github,
+    /// GitLab Code Quality report
+    Gitlab,
 }
 
 /// Output format of `sqlsift schema`

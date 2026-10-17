@@ -402,8 +402,10 @@ pub fn run(config: &Config, options: &ImpactOptions) -> Result<bool> {
             &resolved,
             options.references.then_some(referencing.as_slice()),
         ),
-        // Annotations and code scanning results show what the change breaks
-        OutputFormat::Sarif | OutputFormat::Github => formatter.print(&introduced),
+        // Annotations, code scanning, and code quality results show what the change breaks
+        OutputFormat::Sarif | OutputFormat::Github | OutputFormat::Gitlab => {
+            formatter.print(&introduced);
+        }
     }
     Ok(introduced_errors > 0)
 }

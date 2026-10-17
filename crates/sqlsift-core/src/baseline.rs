@@ -651,7 +651,7 @@ fn hash_version(version: u32, statement: &str) -> String {
 }
 
 /// FNV-1a, 64 bit
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0100_0000_01b3;
     bytes.iter().fold(OFFSET_BASIS, |hash, &b| {
