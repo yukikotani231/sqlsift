@@ -544,6 +544,16 @@ fn misspelled_rule_in_disable_comment_is_explained() {
     // Correctly spelled names don't add anything
     let d = single_pg(&c, "SELECT bdy FROM posts -- sqlsift:disable E0006");
     assert_eq!(d.help.as_deref(), Some("Did you mean 'body'?"));
+
+    // Misspelled directive names get a suggestion
+    let d = single_pg(&c, "-- sqlsift:disabel E0002\nSELECT bdy FROM posts");
+    assert_eq!(
+        d.help.as_deref(),
+        Some(
+            "Did you mean 'body'?\n\
+             'sqlsift:disabel' is not a sqlsift directive. Did you mean 'sqlsift:disable'?"
+        )
+    );
 }
 
 #[test]

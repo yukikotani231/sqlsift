@@ -6,7 +6,7 @@ Sometimes a query is right and sqlsift is wrong, or a legacy file isn't worth fi
 
 ## One line: `sqlsift:disable`
 
-A `-- sqlsift:disable` comment on its own line applies to the next line; at the end of a line, it applies to that line.
+A `-- sqlsift:disable` comment on its own line applies to the next line; at the end of a line, it applies to that line. A space after the colon (`-- sqlsift: disable`) is accepted as well. Misspelled directive names (such as `-- sqlsift:disabel`) are reported with suggestions in diagnostic help notes.
 
 ```sql
 -- Suppress a specific rule on the next line
@@ -33,7 +33,7 @@ SELECT bad_col FROM missing_table;
 -- sqlsift:disable-file
 ```
 
-A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it. It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file.
+A `disable-file` comment may appear anywhere in the file (conventionally at the top) and applies to every line, before and after it (a space after the colon, `-- sqlsift: disable-file`, is accepted as well). It is separate from `sqlsift:disable`: it never acts as a next-line directive, and `sqlsift:disable` never disables a rule for the whole file.
 
 In TypeScript, JavaScript, Vue and Svelte files, write the directives as code comments (`// sqlsift:disable-file`, `/* sqlsift:disable E0002 */`) or as SQL comments inside a template; a `disable-file` comment inside one template applies to the whole file (see [SQL in TypeScript and JavaScript](queries.md#directives)). In Rust files, write them as Rust comments (`// sqlsift:disable E0002` on the line before a query), in Python files as Python comments (`# sqlsift:disable E0002`), and in Go files as Go comments (`// sqlsift:disable E0002`).
 
