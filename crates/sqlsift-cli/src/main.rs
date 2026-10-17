@@ -762,6 +762,7 @@ fn collect_query_files(
 
 fn run(args: Args) -> Result<bool> {
     let quiet = args.quiet;
+    let verbose = args.verbose;
 
     match args.command {
         Command::Check {
@@ -1116,7 +1117,7 @@ fn run(args: Args) -> Result<bool> {
             // Diagnostics hidden by the baseline, the entries they matched and the
             // files they were looked up in
             let mut baselined = 0;
-            let mut stale = 0;
+            let mut stale_entries = Vec::new();
             let mut checked_keys = HashSet::new();
 
             for (query_file, analyzed) in query_files.iter().zip(analyzed) {
@@ -1138,7 +1139,7 @@ fn run(args: Args) -> Result<bool> {
                         let key = file_key(query_file);
                         let filtered = filter.filter(&key, sql, diagnostics);
                         baselined += filtered.suppressed.len();
-                        stale += filtered.stale.len();
+                        stale_entries.extend(filtered.stale);
                         checked_keys.insert(key);
                         (filtered.kept, filtered.suppressed)
                     }
@@ -1189,15 +1190,28 @@ fn run(args: Args) -> Result<bool> {
 
             // Entries of a file that was only partly checked can't be stale; those
             // of files not checked are when the file is gone
+            if !limit_reached {
+                if let Some(filter) = &baseline_filter {
+                    for entry in filter.stale_unchecked(&checked_keys, baseline_file_gone) {
+                        stale_entries.push((*entry).clone());
+                    }
+                }
+            }
             let stale = baseline_filter
                 .as_ref()
                 .filter(|_| !limit_reached)
-                .map(|filter| {
-                    stale
-                        + filter
-                            .stale_unchecked(&checked_keys, baseline_file_gone)
-                            .len()
-                });
+                .map(|_| stale_entries.len());
+
+            stale_entries.sort_by(|a, b| {
+                (&a.file, a.line, &a.code, &a.statement_hash, &a.message).cmp(&(
+                    &b.file,
+                    b.line,
+                    &b.code,
+                    &b.statement_hash,
+                    &b.message,
+                ))
+            });
+
             if baseline_filter.is_some() {
                 formatter.set_baseline(BaselineSummary {
                     hidden: baselined,
@@ -1238,6 +1252,15 @@ fn run(args: Args) -> Result<bool> {
                         if stale == 1 { "s" } else { "" },
                         if stale == 1 { "it" } else { "them" },
                     );
+                    if verbose >= 1 {
+                        for entry in &stale_entries {
+                            if let Some(line) = entry.line {
+                                eprintln!("  {}:{line} {}", entry.file, entry.code);
+                            } else {
+                                eprintln!("  {} {}", entry.file, entry.code);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1251,6 +1274,15 @@ fn run(args: Args) -> Result<bool> {
                     if stale == 1 { "s" } else { "" },
                     if stale == 1 { "it" } else { "them" },
                 );
+                if verbose >= 1 {
+                    for entry in &stale_entries {
+                        if let Some(line) = entry.line {
+                            eprintln!("  {}:{line} {}", entry.file, entry.code);
+                        } else {
+                            eprintln!("  {} {}", entry.file, entry.code);
+                        }
+                    }
+                }
             }
             let too_many_entries = max_baseline_entries
                 .zip(baseline_entries)

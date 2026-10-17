@@ -106,6 +106,10 @@ pub struct BaselineEntry {
     /// Message of the diagnostic
     #[serde(default)]
     pub message: String,
+    /// 1-indexed line number (informational, read from version 1 baseline files
+    /// or resolved from current SQL)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 /// What [`Baseline::keep_unchecked`] did with the entries of the files that
@@ -153,6 +157,9 @@ impl Baseline {
     /// diffs well and doesn't change when lines move
     pub fn to_json(&self) -> String {
         let mut sorted = self.clone();
+        for entry in &mut sorted.entries {
+            entry.line = None;
+        }
         sorted.entries.sort_by(|a, b| {
             (&a.file, &a.code, &a.statement_hash, &a.message).cmp(&(
                 &b.file,
@@ -177,6 +184,7 @@ impl Baseline {
                 code: diagnostic.code().to_string(),
                 statement_hash,
                 message: diagnostic.message.clone(),
+                line: None,
             });
         }
     }
@@ -380,6 +388,17 @@ impl BaselineFilter {
             }
         }
 
+        let ranges = statement_ranges(sql);
+        let lines = line_starts(sql);
+        let mut statement_lines: HashMap<String, usize> = HashMap::new();
+        for range in ranges {
+            let hash = hash_version(self.version, &sql[range.clone()]);
+            let trimmed_offset =
+                range.start + (sql[range.clone()].len() - sql[range.clone()].trim_start().len());
+            let line = lines.partition_point(|&offset| offset <= trimmed_offset);
+            statement_lines.entry(hash).or_insert(line);
+        }
+
         let mut filtered = Filtered::default();
         for (diagnostic, matched) in diagnostics.into_iter().zip(matched) {
             if matched {
@@ -392,7 +411,13 @@ impl BaselineFilter {
             .iter()
             .zip(used)
             .filter(|(_, used)| !used)
-            .map(|(entry, _)| entry.clone())
+            .map(|(entry, _)| {
+                let mut entry = entry.clone();
+                if entry.line.is_none() {
+                    entry.line = statement_lines.get(&entry.statement_hash).copied();
+                }
+                entry
+            })
             .collect();
         filtered
     }
@@ -1379,5 +1404,27 @@ mod tests {
             hash_of(before),
             statement_hash("SELECT frist_name FROM actor WHERE actor_id = $1")
         );
+    }
+
+    #[test]
+    fn stale_entries_resolve_line_or_keep_v1_line() {
+        // v1 baseline with line
+        let json = r#"{"version": 1, "entries": [
+            {"file": "q.sql", "code": "E0002", "statement_hash": "abc", "occurrence": 0, "line": 42, "message": "old"}
+        ]}"#;
+        let baseline = Baseline::from_json(json).unwrap();
+        let filter = BaselineFilter::new(&baseline);
+        let filtered = filter.filter("q.sql", "SELECT 1;", vec![]);
+        assert_eq!(filtered.stale.len(), 1);
+        assert_eq!(filtered.stale[0].line, Some(42));
+
+        // v2 baseline resolves line if statement still in sql
+        let sql = "SELECT id FROM users;\nSELECT name FROM users;";
+        let mut baseline = Baseline::default();
+        baseline.add_file("q.sql", sql, &[diag(DiagnosticKind::ColumnNotFound, 2, 8)]);
+        let filter = BaselineFilter::new(&baseline);
+        let filtered = filter.filter("q.sql", sql, vec![]);
+        assert_eq!(filtered.stale.len(), 1);
+        assert_eq!(filtered.stale[0].line, Some(2));
     }
 }

@@ -111,6 +111,7 @@ mod tests {
             code: code.into(),
             statement_hash: "0".into(),
             message: String::new(),
+            line: None,
         }
     }
 

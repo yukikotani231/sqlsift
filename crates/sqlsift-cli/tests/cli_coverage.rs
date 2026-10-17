@@ -3123,18 +3123,58 @@ fn fixed_baseline_entries_are_a_note_not_a_failure() {
     t.run(&["check", "-s", "schema.sql", "--write-baseline", "q.sql"])
         .assert_code(0);
     t.write("q.sql", "SELECT name FROM users;\nSELECT id FROM userz;\n");
-    t.run(&[
+    let without_v = t.run(&[
         "check",
         "-s",
         "schema.sql",
         "--baseline",
         "sqlsift-baseline.json",
         "q.sql",
-    ])
-    .assert_code(0)
-    .assert_stderr_contains(
+    ]);
+    without_v.assert_code(0).assert_stderr_contains(
         "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
     );
+    assert!(!without_v.stderr.contains("E0002"));
+
+    let with_v = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+        "-v",
+    ]);
+    with_v
+        .assert_code(0)
+        .assert_stderr_contains(
+            "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
+        )
+        .assert_stderr_contains("  q.sql E0002");
+}
+
+#[test]
+fn fixed_baseline_entries_with_verbose_shows_line_when_known() {
+    let t = with_users_schema("bl-stale-line");
+    t.write("q.sql", "SELECT id FROM users;\nSELECT name FROM users;\n");
+    let json = r#"{"version": 1, "entries": [
+        {"file": "q.sql", "code": "E0002", "statement_hash": "abc", "occurrence": 0, "line": 2, "message": "Column 'name' not found"}
+    ]}"#;
+    t.write("sqlsift-baseline.json", json);
+    let run = t.run(&[
+        "check",
+        "-s",
+        "schema.sql",
+        "--baseline",
+        "sqlsift-baseline.json",
+        "q.sql",
+        "-v",
+    ]);
+    run.assert_code(0)
+        .assert_stderr_contains(
+            "Note: 1 baseline entry no longer occurs; re-run with --prune-baseline to remove it",
+        )
+        .assert_stderr_contains("  q.sql:2 E0002");
 }
 
 #[test]
