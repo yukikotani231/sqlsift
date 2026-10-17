@@ -118,17 +118,50 @@ fn unqualified_column_names_the_only_relation() {
 }
 
 #[test]
-fn unqualified_column_with_several_relations_names_none() {
+fn unqualified_column_with_several_relations_names_them() {
     let c = pg(POSTS);
     let d = single_pg(&c, "SELECT title FROM posts CROSS JOIN authors");
-    assert_eq!(d.message, "Column 'title' not found");
+    assert_eq!(d.message, "Column 'title' not found in posts, authors");
+
+    let d = single_pg(
+        &c,
+        "SELECT p.id, body, nam FROM posts p JOIN authors a ON a.id = p.id",
+    );
+    assert_eq!(d.message, "Column 'nam' not found in posts, authors");
+    assert_eq!(d.help.as_deref(), Some("Did you mean 'name'?"));
 
     // A correlated subquery also sees the outer query's relations
     let d = single_pg(
         &c,
         "SELECT id FROM authors a WHERE EXISTS (SELECT 1 FROM posts WHERE title = a.name)",
     );
-    assert_eq!(d.message, "Column 'title' not found");
+    assert_eq!(d.message, "Column 'title' not found in posts, authors");
+
+    // Self-join deduplicates the table name
+    let d = single_pg(
+        &c,
+        "SELECT title FROM posts p1 JOIN posts p2 ON p1.id = p2.id",
+    );
+    assert_eq!(d.message, "Column 'title' not found in table 'posts'");
+
+    // Wide join caps the list at 5 tables
+    let wide = pg("
+        CREATE TABLE t1 (id INT);
+        CREATE TABLE t2 (id INT);
+        CREATE TABLE t3 (id INT);
+        CREATE TABLE t4 (id INT);
+        CREATE TABLE t5 (id INT);
+        CREATE TABLE t6 (id INT);
+        CREATE TABLE t7 (id INT);
+    ");
+    let d = single_pg(
+        &wide,
+        "SELECT nope FROM t1 CROSS JOIN t2 CROSS JOIN t3 CROSS JOIN t4 CROSS JOIN t5 CROSS JOIN t6 CROSS JOIN t7",
+    );
+    assert_eq!(
+        d.message,
+        "Column 'nope' not found in t1, t2, t3, t4, t5 and 2 more"
+    );
 }
 
 #[test]

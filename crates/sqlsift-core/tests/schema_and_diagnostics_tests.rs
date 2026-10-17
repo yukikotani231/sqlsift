@@ -1829,10 +1829,10 @@ fn e0002_multiple_columns_reported_in_source_order() {
     assert_eq!(
         names,
         vec![
-            "Column 'zz' not found",
-            "Column 'yy' not found",
-            "Column 'qq' not found",
-            "Column 'ww' not found"
+            "Column 'zz' not found in users, orders",
+            "Column 'yy' not found in users, orders",
+            "Column 'qq' not found in users, orders",
+            "Column 'ww' not found in users, orders"
         ]
     );
     let cols: Vec<usize> = diags.iter().map(|d| loc(d).1).collect();

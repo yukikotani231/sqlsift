@@ -30,6 +30,10 @@ inputs:
     description: "Rules to disable (space-separated, e.g. `E0006 E0008`)."
     required: false
     default: ""
+  baseline:
+    description: "Baseline file of known diagnostics to hide (see `--baseline`). Optional when `baseline` is set in sqlsift.toml."
+    required: false
+    default: ""
   sarif-file:
     description: "Also write a SARIF report to this path (for github/codeql-action/upload-sarif)."
     required: false
@@ -72,6 +76,7 @@ runs:
         INPUT_DIALECT: ${{ inputs.dialect }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_DISABLE: ${{ inputs.disable }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
         INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
         INPUT_VERSION: ${{ inputs.version }}
@@ -116,6 +121,7 @@ runs:
         [[ -n "$INPUT_CONFIG" ]] && args+=(--config "$INPUT_CONFIG")
         read -ra rules <<< "$INPUT_DISABLE"
         for r in "${rules[@]}"; do args+=(--disable "$r"); done
+        [[ -n "$INPUT_BASELINE" && -z "$INPUT_DIFF_BASE" ]] && args+=(--baseline "$INPUT_BASELINE")
         read -ra files <<< "$INPUT_FILES"
         if [[ "$INPUT_MODE" == "impact" ]]; then
           # impact takes the query files as --queries

@@ -2528,16 +2528,35 @@ impl<'a> Resolver<'a> {
                     .current_ref()
                     .map(|f| f.relations.values().collect())
                     .unwrap_or_default();
-                // Name the relation that was searched when there is only one in reach
-                let mut visible = self.scope.visible().flat_map(|f| f.relations.values());
-                let message = match (visible.next(), visible.next()) {
-                    (Some(only), None) => format!(
+                // Name the relations that were searched
+                let mut searched: Vec<&Relation> = Vec::new();
+                for r in self.scope.visible().flat_map(|f| f.relations.values()) {
+                    if !searched.iter().any(|prev| prev.name == r.name) {
+                        searched.push(r);
+                    }
+                }
+                let message = match searched.as_slice() {
+                    [] => format!("Column '{column_name}' not found"),
+                    [only] => format!(
                         "Column '{}' not found in {} '{}'",
                         column_name,
                         only.kind_name(),
                         only.name
                     ),
-                    _ => format!("Column '{column_name}' not found"),
+                    many => {
+                        const MAX_LISTED: usize = 5;
+                        let listed: Vec<&str> = many
+                            .iter()
+                            .take(MAX_LISTED)
+                            .map(|r| r.name.as_str())
+                            .collect();
+                        let tables = if many.len() > MAX_LISTED {
+                            format!("{} and {} more", listed.join(", "), many.len() - MAX_LISTED)
+                        } else {
+                            listed.join(", ")
+                        };
+                        format!("Column '{column_name}' not found in {tables}")
+                    }
                 };
                 let former = relations.iter().find_map(|r| r.former_column(column_name));
                 let candidates = relations.iter().flat_map(|r| r.column_names());

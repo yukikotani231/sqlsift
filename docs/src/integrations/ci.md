@@ -26,6 +26,7 @@ Errors are shown as annotations on the pull request diff. All inputs are optiona
 | `dialect` | `postgresql`, `mysql`, `sqlite`, or (alpha) `snowflake`, `bigquery`, `redshift`, `databricks` |
 | `config` | Path to `sqlsift.toml` |
 | `disable` | Rules to disable, e.g. `E0006 E0008` |
+| `baseline` | Baseline file of known diagnostics to hide (see [below](#adopting-sqlsift-on-an-existing-codebase)) |
 | `sarif-file` | Also write a SARIF report (see below) |
 | `fail-on-error` | Fail the step on errors (default `true`) |
 | `diff-base` | Report only diagnostics that are new compared with this branch, tag or commit, e.g. `${{ github.base_ref }}` (see [below](#report-only-what-a-pull-request-introduces)) |
@@ -106,6 +107,16 @@ sqlsift check --write-baseline          # writes sqlsift-baseline.json; commit i
 ```toml
 # sqlsift.toml
 baseline = "sqlsift-baseline.json"
+```
+
+In GitHub Actions, you can also pass the file via the `baseline` input:
+
+```yaml
+      - uses: yukikotani231/sqlsift@main
+        with:
+          schema: db/schema.sql
+          files: queries/**/*.sql
+          baseline: sqlsift-baseline.json
 ```
 
 From then on `sqlsift check` (and the editor) hides the recorded diagnostics, and new ones fail the check as usual. When a recorded problem is fixed, sqlsift prints a note; run `--prune-baseline` to shrink the file. Add `--strict-baseline` to the CI command to make that note an error, so the baseline only ever shrinks. See [Baseline](../guide/suppression.md#an-existing-backlog-baseline).

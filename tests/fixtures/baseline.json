@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "file": "invalid_query.sql",
+      "code": "E0001",
+      "statement_hash": "34985bbc4e0e8e0d",
+      "message": "Table 'nonexistent_table' not found"
+    },
+    {
+      "file": "invalid_query.sql",
+      "code": "E0002",
+      "statement_hash": "43740f16488d6674",
+      "message": "Column 'user_id' not found in table 'users'"
+    },
+    {
+      "file": "invalid_query.sql",
+      "code": "E0002",
+      "statement_hash": "d726b4c1726e6234",
+      "message": "Column 'naem' not found in table 'users'"
+    }
+  ]
+}

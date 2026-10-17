@@ -3,9 +3,9 @@ name: GitHub Action
 on:
   push:
     branches: [main]
-    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/action-diff/**"]
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/**"]
   pull_request:
-    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/action-diff/**"]
+    paths: ["action.yml", ".github/sqlsift-problem-matcher.json", ".github/workflows/action-test.yml", "crates/**", "tests/fixtures/**"]
   workflow_dispatch:
 
 # Read-only token: these jobs only build and test
@@ -42,6 +42,16 @@ jobs:
           schema: tests/fixtures/schema.sql
           files: tests/fixtures/valid_*.sql
 
+      - name: Baseline hides known errors
+        id: baseline
+        uses: ./
+        with:
+          cli-path: target/debug/sqlsift
+          schema: tests/fixtures/schema.sql
+          files: tests/fixtures/invalid_query.sql
+          baseline: tests/fixtures/baseline.json
+          sarif-file: baseline.sarif
+
       - name: Invalid queries are reported
         id: invalid
         uses: ./
@@ -55,6 +65,8 @@ jobs:
       - name: Check outputs
         shell: bash
         run: |
+          test "${{ steps.baseline.outputs.exit-code }}" = "0"
+          python3 -c "import json; d = json.load(open('baseline.sarif')); assert d['runs'][0]['results'] and all('suppressions' in r for r in d['runs'][0]['results']), 'expected suppressed SARIF results'"
           test "${{ steps.invalid.outputs.exit-code }}" = "1"
           python3 -c "import json; d = json.load(open('results.sarif')); assert d['runs'][0]['results'], 'no SARIF results'"
 
