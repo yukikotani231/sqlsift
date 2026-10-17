@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{self, NumberOrString, Position, Range};
+use tower_lsp::lsp_types::{self, CodeDescription, NumberOrString, Position, Range, Url};
 
 use sqlsift_core::{Diagnostic, Severity, Span};
 
@@ -15,10 +15,15 @@ pub fn to_lsp_diagnostics(diagnostics: &[Diagnostic], text: &str) -> Vec<lsp_typ
 }
 
 fn to_lsp_diagnostic(diag: &Diagnostic, text: &str) -> lsp_types::Diagnostic {
+    let code_description = Url::parse(&sqlsift_core::rules::rule_doc_url(diag.code()))
+        .ok()
+        .map(|href| CodeDescription { href });
+
     lsp_types::Diagnostic {
         range: span_to_range(diag.span.as_ref(), text),
         severity: Some(to_lsp_severity(diag.severity)),
         code: Some(NumberOrString::String(diag.code().to_string())),
+        code_description,
         source: Some("sqlsift".to_string()),
         message: format_message(diag),
         ..Default::default()
@@ -170,5 +175,22 @@ mod tests {
         let diag = Diagnostic::error(DiagnosticKind::TableNotFound, "Table 'foo' not found");
         let msg = format_message(&diag);
         assert_eq!(msg, "Table 'foo' not found");
+    }
+
+    #[test]
+    fn test_to_lsp_diagnostic_code_description() {
+        let diag = Diagnostic::error(DiagnosticKind::ColumnNotFound, "Column 'x' not found");
+        let lsp_diag = to_lsp_diagnostic(&diag, "");
+        assert_eq!(
+            lsp_diag.code,
+            Some(NumberOrString::String("E0002".to_string()))
+        );
+        assert_eq!(
+            lsp_diag.code_description,
+            Some(CodeDescription {
+                href: Url::parse("https://yukikotani231.github.io/sqlsift/docs/rules/E0002.html")
+                    .unwrap(),
+            })
+        );
     }
 }

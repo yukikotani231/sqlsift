@@ -10,9 +10,6 @@ use sqlsift_core::{Diagnostic, DiagnosticKind, Severity};
 
 use crate::args::OutputFormat;
 
-/// Documentation anchor for diagnostic rules (used as SARIF `helpUri`)
-const RULES_HELP_URI: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#diagnostic-rules");
-
 /// Diagnostics produced for a single file
 #[derive(Default)]
 pub struct FileDiagnostics {
@@ -406,7 +403,7 @@ fn sarif_rule(kind: DiagnosticKind, description: &str) -> serde_json::Value {
         "id": kind.code(),
         "name": kind.name(),
         "shortDescription": { "text": description },
-        "helpUri": RULES_HELP_URI
+        "helpUri": sqlsift_core::rules::rule_doc_url(kind.code())
     })
 }
 

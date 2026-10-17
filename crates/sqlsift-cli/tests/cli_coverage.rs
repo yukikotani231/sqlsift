@@ -2249,9 +2249,9 @@ fn sarif_rules_describe_every_result_rule() {
         assert!(rule["shortDescription"]["text"]
             .as_str()
             .is_some_and(|s| !s.is_empty()));
-        assert!(rule["helpUri"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("https://")));
+        let id = rule["id"].as_str().expect("rule id");
+        let expected_url = format!("https://yukikotani231.github.io/sqlsift/docs/rules/{id}.html");
+        assert_eq!(rule["helpUri"].as_str(), Some(expected_url.as_str()));
     }
     let results = v["runs"][0]["results"].as_array().unwrap();
     assert!(!results.is_empty());
