@@ -318,6 +318,7 @@ fn initialize_advertises_capabilities() {
     assert_eq!(sync["change"], 1, "FULL sync expected");
     assert_eq!(sync["save"]["includeText"], true);
     assert_eq!(caps["hoverProvider"], true);
+    assert_eq!(caps["codeActionProvider"], true);
     let triggers = caps["completionProvider"]["triggerCharacters"]
         .as_array()
         .expect("trigger characters");
@@ -1217,4 +1218,162 @@ fn explicit_templating_none_wins_over_dbt_detection() {
     let uri = t.uri("analytics/models/m.sql");
     lsp.open_as(&uri, "jinja-sql", DBT_MODEL);
     assert!(codes(&lsp.diagnostics_for(&uri)).contains(&"E1000".to_string()));
+}
+
+#[test]
+fn code_action_quick_fix_suppresses_diagnostic() {
+    let t = workspace("code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let content = "SELECT 1;\n\nSELECT\n  nme FROM users;\n";
+    lsp.open(&uri, content);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    let d = &diags[0];
+    assert_eq!(d["code"], "E0002");
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    assert_eq!(actions.len(), 2, "{actions:#?}");
+
+    let line_fix = &actions[0];
+    assert_eq!(line_fix["title"], "Disable E0002 for this line");
+    assert_eq!(line_fix["kind"], "quickfix");
+    let edit = &line_fix["edit"]["changes"][&uri][0];
+    assert_eq!(edit["range"]["start"], json!({"line": 3, "character": 0}));
+    assert_eq!(edit["range"]["end"], json!({"line": 3, "character": 0}));
+    assert_eq!(edit["newText"], "  -- sqlsift:disable E0002\n");
+
+    let file_fix = &actions[1];
+    assert_eq!(file_fix["title"], "Disable E0002 for this file");
+    assert_eq!(file_fix["kind"], "quickfix");
+    let file_edit = &file_fix["edit"]["changes"][&uri][0];
+    assert_eq!(
+        file_edit["range"]["start"],
+        json!({"line": 0, "character": 0})
+    );
+    assert_eq!(file_edit["newText"], "-- sqlsift:disable-file E0002\n");
+
+    // Apply the line edit and verify the diagnostic is suppressed
+    let updated_content = "SELECT 1;\n\nSELECT\n  -- sqlsift:disable E0002\n  nme FROM users;\n";
+    lsp.change(&uri, 2, updated_content);
+    let new_diags = lsp.diagnostics_for(&uri);
+    assert!(
+        new_diags.is_empty(),
+        "expected 0 diagnostics, got: {new_diags:#?}"
+    );
+}
+
+#[test]
+fn code_actions_are_not_offered_for_typescript_documents() {
+    let t = workspace("ts-code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("src/q.ts");
+    lsp.open_as(
+        &uri,
+        "typescript",
+        "const q = sql`SELECT nme FROM users`;\n",
+    );
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": diags[0]["range"],
+            "context": {"diagnostics": [diags[0].clone()]}
+        }),
+    );
+    assert!(
+        resp["result"].is_null() || resp["result"].as_array().is_some_and(Vec::is_empty),
+        "{resp}"
+    );
+}
+
+#[test]
+fn code_action_with_bom_inserts_after_bom() {
+    let t = workspace("bom-code-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let content = "\u{feff}SELECT nme FROM users;\n";
+    lsp.open(&uri, content);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    let d = &diags[0];
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    assert_eq!(actions.len(), 2, "{actions:#?}");
+
+    // Line fix inserts at character 1 so BOM stays at index 0
+    let line_fix = &actions[0];
+    let edit = &line_fix["edit"]["changes"][&uri][0];
+    assert_eq!(edit["range"]["start"], json!({"line": 0, "character": 1}));
+    assert_eq!(edit["range"]["end"], json!({"line": 0, "character": 1}));
+
+    // File fix inserts at character 1
+    let file_fix = &actions[1];
+    let file_edit = &file_fix["edit"]["changes"][&uri][0];
+    assert_eq!(
+        file_edit["range"]["start"],
+        json!({"line": 0, "character": 1})
+    );
+    assert_eq!(
+        file_edit["range"]["end"],
+        json!({"line": 0, "character": 1})
+    );
+
+    // Apply the edit and verify it parses cleanly and suppresses diagnostic
+    let updated = "\u{feff}-- sqlsift:disable E0002\nSELECT nme FROM users;\n";
+    lsp.change(&uri, 2, updated);
+    let new_diags = lsp.diagnostics_for(&uri);
+    assert!(
+        new_diags.is_empty(),
+        "expected 0 diagnostics, got: {new_diags:#?}"
+    );
+}
+
+#[test]
+fn code_action_omits_line_fix_inside_multiline_string() {
+    let t = workspace("multiline-str-action", "");
+    let mut lsp = Lsp::spawn();
+    lsp.start(Some(&t.root_uri()));
+    let uri = t.uri("q.sql");
+    let content = "SELECT 'a\nb', nme FROM users;\n";
+    lsp.open(&uri, content);
+    let diags = lsp.diagnostics_for(&uri);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    let d = &diags[0];
+    assert_eq!(d["range"]["start"]["line"], 1);
+
+    let resp = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": d["range"],
+            "context": {"diagnostics": [d]}
+        }),
+    );
+    let actions = resp["result"].as_array().expect("array of code actions");
+    // Only file-level fix should be offered, line-level fix omitted
+    assert_eq!(actions.len(), 1, "{actions:#?}");
+    assert_eq!(actions[0]["title"], "Disable E0002 for this file");
 }

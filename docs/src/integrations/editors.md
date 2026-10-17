@@ -46,3 +46,10 @@ command = "sqlsift-lsp"
 name = "sql"
 language-servers = ["sqlsift"]
 ```
+
+## Quick fixes
+
+When your editor supports LSP code actions (e.g. VS Code's lightbulb, Neovim's `vim.lsp.buf.code_action()`), `sqlsift-lsp` offers quick fixes for diagnostics in `.sql` files:
+- **Disable `<RULE>` for this line**: inserts `-- sqlsift:disable <RULE>` above the diagnostic, indented to match the line.
+- **Disable `<RULE>` for this file**: inserts `-- sqlsift:disable-file <RULE>` as the first line of the file.
+

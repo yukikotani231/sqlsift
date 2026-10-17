@@ -24,6 +24,8 @@ SELECT bad_col FROM missing_table; -- sqlsift:disable E0001, column-not-found
 SELECT bad_col FROM missing_table;
 ```
 
+In editors using `sqlsift-lsp` (including the VS Code extension), the lightbulb / quick fix menu on a diagnostic in a `.sql` file offers to insert `-- sqlsift:disable <RULE>` above the line or `-- sqlsift:disable-file <RULE>` at the top of the file automatically.
+
 ## One file: `sqlsift:disable-file`
 
 ```sql
