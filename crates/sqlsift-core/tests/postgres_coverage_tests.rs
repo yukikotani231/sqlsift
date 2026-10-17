@@ -1783,3 +1783,37 @@ fn valid_enum_to_string_assignments() {
         );
     }
 }
+
+#[test]
+fn explain_prepare_and_declare_cursor_queries_are_checked() {
+    let schema = "CREATE TABLE users (id int PRIMARY KEY, name text NOT NULL);";
+
+    let invalid = "
+        EXPLAIN SELECT nope FROM users;
+        EXPLAIN ANALYZE SELECT nope FROM users;
+        PREPARE p AS SELECT nope FROM users WHERE id = $1;
+        DECLARE c CURSOR FOR SELECT nope FROM users;
+        EXPLAIN UPDATE users SET nope = 1;
+        PREPARE ins AS INSERT INTO users (id, nope) VALUES ($1, $2);
+    ";
+    let diagnostics = analyze_with(schema, invalid);
+    assert_eq!(
+        kinds_of(&diagnostics),
+        vec![DiagnosticKind::ColumnNotFound; 6],
+        "{diagnostics:#?}"
+    );
+    for d in &diagnostics {
+        assert_eq!(d.message, "Column 'nope' not found in table 'users'");
+    }
+
+    let valid = "
+        EXPLAIN SELECT id, name FROM users;
+        EXPLAIN ANALYZE SELECT id FROM users WHERE id = 1;
+        PREPARE p AS SELECT id, name FROM users WHERE id = $1;
+        DECLARE c CURSOR FOR SELECT id, name FROM users;
+        EXPLAIN UPDATE users SET name = 'a' WHERE id = 1;
+        PREPARE ins AS INSERT INTO users (id, name) VALUES ($1, $2);
+    ";
+    let diagnostics = analyze_with(schema, valid);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+}

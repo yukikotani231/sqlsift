@@ -217,6 +217,18 @@ impl<'a> Resolver<'a> {
                 self.query(&view.query, false);
                 None
             }
+            Statement::Explain { statement, .. } | Statement::Prepare { statement, .. } => {
+                self.statement(statement);
+                None
+            }
+            Statement::Declare { stmts } => {
+                for declare in stmts {
+                    if let Some(query) = &declare.for_query {
+                        self.query(query, false);
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
