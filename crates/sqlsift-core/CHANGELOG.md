@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- name searched tables for unqualified column in JOIN ([#409](https://github.com/yukikotani231/sqlsift/pull/409))
 - support /* name: X :cmd */ block comments for sqlc query names ([#390](https://github.com/yukikotani231/sqlsift/pull/390))
 - report type mismatches on SQLite STRICT tables as E0003 ([#380](https://github.com/yukikotani231/sqlsift/pull/380))
 - report duplicate primary key and unique values in INSERT VALUES list (E0035) ([#378](https://github.com/yukikotani231/sqlsift/pull/378))
