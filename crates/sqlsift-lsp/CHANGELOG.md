@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/yukikotani231/sqlsift/compare/v0.2.0...v0.3.0) - 2026-10-17
+
+### Added
+
+- report duplicate primary key and unique values in INSERT VALUES list (E0035) ([#378](https://github.com/yukikotani231/sqlsift/pull/378))
+- report CASE over enum column missing labels (E0034) ([#377](https://github.com/yukikotani231/sqlsift/pull/377))
+- report timestamp vs timestamptz comparisons and assignments (E0033) ([#376](https://github.com/yukikotani231/sqlsift/pull/376))
+- E0032 integer-division warns when integer columns are divided ([#375](https://github.com/yukikotani231/sqlsift/pull/375))
+- check SQL in Go code (database/sql, sqlx and pgx calls) ([#315](https://github.com/yukikotani231/sqlsift/pull/315))
+- E0031 join-fan-out warns on aggregates multiplied by another one-to-many join ([#310](https://github.com/yukikotani231/sqlsift/pull/310))
+- E0030 foreign-key-join-mismatch warns on joins that don't follow the foreign key ([#308](https://github.com/yukikotani231/sqlsift/pull/308))
+- check SQL in Python database calls ([#301](https://github.com/yukikotani231/sqlsift/pull/301))
+- check SQL in Rust sqlx query macros and functions ([#278](https://github.com/yukikotani231/sqlsift/pull/278))
+- *(analyzer)* limit-without-order-by restriction rule (E0028) ([#259](https://github.com/yukikotani231/sqlsift/pull/259))
+
+### Fixed
+
+- sort schema-dir migrations by natural version order ([#367](https://github.com/yukikotani231/sqlsift/pull/367))
+- report type mismatches MySQL and SQLite convert at run time as E0029 warnings ([#305](https://github.com/yukikotani231/sqlsift/pull/305))
+
+### Other
+
+- mention SQL in Go code and the Go example in README ([#317](https://github.com/yukikotani231/sqlsift/pull/317))
+- use mimalloc as global allocator in CLI and LSP ([#243](https://github.com/yukikotani231/sqlsift/pull/243))
+- link the action's Marketplace listing and add the social preview asset ([#262](https://github.com/yukikotani231/sqlsift/pull/262))
+- move the playground and user guide links to sqlsift.dev ([#261](https://github.com/yukikotani231/sqlsift/pull/261))
+- lead the README with the schema-aware punchline and a demo GIF ([#260](https://github.com/yukikotani231/sqlsift/pull/260))
+- update roadmap after v0.2 and plan the in-house PostgreSQL parser for v0.4 ([#258](https://github.com/yukikotani231/sqlsift/pull/258))
+
 ## [0.2.0](https://github.com/yukikotani231/sqlsift/compare/v0.1.5...v0.2.0) - 2026-10-11
 
 ### Added

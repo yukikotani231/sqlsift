@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/yukikotani231/sqlsift/compare/v0.2.0...v0.3.0) - 2026-10-17
+
+### Added
+
+- support /* name: X :cmd */ block comments for sqlc query names ([#390](https://github.com/yukikotani231/sqlsift/pull/390))
+- report type mismatches on SQLite STRICT tables as E0003 ([#380](https://github.com/yukikotani231/sqlsift/pull/380))
+- report duplicate primary key and unique values in INSERT VALUES list (E0035) ([#378](https://github.com/yukikotani231/sqlsift/pull/378))
+- report CASE over enum column missing labels (E0034) ([#377](https://github.com/yukikotani231/sqlsift/pull/377))
+- infer return types for built-in functions and operators ([#373](https://github.com/yukikotani231/sqlsift/pull/373))
+- report timestamp vs timestamptz comparisons and assignments (E0033) ([#376](https://github.com/yukikotani231/sqlsift/pull/376))
+- check type compatibility when comparing named enums (E0003/E0007) ([#374](https://github.com/yukikotani231/sqlsift/pull/374))
+- E0027 check numeric functions called with non-numeric arguments ([#314](https://github.com/yukikotani231/sqlsift/pull/314))
+- reject certainly invalid date and timestamp string literals (E0003) ([#372](https://github.com/yukikotani231/sqlsift/pull/372))
+- E0032 integer-division warns when integer columns are divided ([#375](https://github.com/yukikotani231/sqlsift/pull/375))
+- E0027 check the first argument of multi-argument text functions ([#313](https://github.com/yukikotani231/sqlsift/pull/313))
+- check SQL in Go code (database/sql, sqlx and pgx calls) ([#315](https://github.com/yukikotani231/sqlsift/pull/315))
+- E0031 join-fan-out warns on aggregates multiplied by another one-to-many join ([#310](https://github.com/yukikotani231/sqlsift/pull/310))
+- E0030 foreign-key-join-mismatch warns on joins that don't follow the foreign key ([#308](https://github.com/yukikotani231/sqlsift/pull/308))
+- sqlsift unused lists tables and columns no query uses ([#306](https://github.com/yukikotani231/sqlsift/pull/306))
+- check SQL in Python database calls ([#301](https://github.com/yukikotani231/sqlsift/pull/301))
+- *(baseline)* strict mode, pruning, per-rule rewrite, stats and SARIF suppressions ([#285](https://github.com/yukikotani231/sqlsift/pull/285))
+- check SQL in Rust sqlx query macros and functions ([#278](https://github.com/yukikotani231/sqlsift/pull/278))
+- *(describe)* infer parameter types and output column NULL-ability ([#273](https://github.com/yukikotani231/sqlsift/pull/273))
+- add sqlsift describe (output columns and types of each query) ([#269](https://github.com/yukikotani231/sqlsift/pull/269))
+- record the uses of catalog tables and columns; `sqlsift impact --references` ([#272](https://github.com/yukikotani231/sqlsift/pull/272))
+- *(cli)* add `sqlsift impact` to show the queries a schema change breaks or fixes ([#268](https://github.com/yukikotani231/sqlsift/pull/268))
+- *(analyzer)* limit-without-order-by restriction rule (E0028) ([#259](https://github.com/yukikotani231/sqlsift/pull/259))
+
+### Fixed
+
+- skip CHECKPOINT, CLUSTER and REINDEX instead of reporting E1000 ([#406](https://github.com/yukikotani231/sqlsift/pull/406))
+- raise parser recursion limit for deeply nested subqueries ([#384](https://github.com/yukikotani231/sqlsift/pull/384))
+- validate enum literals in IN and NOT IN lists ([#379](https://github.com/yukikotani231/sqlsift/pull/379))
+- sort schema-dir migrations by natural version order ([#367](https://github.com/yukikotani231/sqlsift/pull/367))
+- resolve JSON_TABLE, RETURNING old/new and MySQL INSERT AS new(a, b) ([#307](https://github.com/yukikotani231/sqlsift/pull/307))
+- report type mismatches MySQL and SQLite convert at run time as E0029 warnings ([#305](https://github.com/yukikotani231/sqlsift/pull/305))
+- don't report E0001 for tables whose CREATE statement could not be parsed ([#302](https://github.com/yukikotani231/sqlsift/pull/302))
+- *(analyzer)* skip ANALYZE, VACUUM, REFRESH MATERIALIZED VIEW and DO ([#240](https://github.com/yukikotani231/sqlsift/pull/240))
+
+### Other
+
+- mention SQL in Go code and the Go example in README ([#317](https://github.com/yukikotani231/sqlsift/pull/317))
+- link the action's Marketplace listing and add the social preview asset ([#262](https://github.com/yukikotani231/sqlsift/pull/262))
+- move the playground and user guide links to sqlsift.dev ([#261](https://github.com/yukikotani231/sqlsift/pull/261))
+- lead the README with the schema-aware punchline and a demo GIF ([#260](https://github.com/yukikotani231/sqlsift/pull/260))
+- update roadmap after v0.2 and plan the in-house PostgreSQL parser for v0.4 ([#258](https://github.com/yukikotani231/sqlsift/pull/258))
+- *(deps)* upgrade sqlparser to 0.63 ([#246](https://github.com/yukikotani231/sqlsift/pull/246))
+
 ## [0.2.0](https://github.com/yukikotani231/sqlsift/compare/v0.1.5...v0.2.0) - 2026-10-11
 
 ### Added
