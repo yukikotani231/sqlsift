@@ -133,6 +133,14 @@ impl SqlDialect {
         )
     }
 
+    /// Whether CHECK constraints are enforced (PostgreSQL, MySQL 8.0.16+, SQLite)
+    pub fn enforces_check_constraints(self) -> bool {
+        matches!(
+            self,
+            SqlDialect::PostgreSQL | SqlDialect::MySQL | SqlDialect::SQLite
+        )
+    }
+
     /// Whether `ORDER BY 2` / `GROUP BY 2` always name select list positions
     /// (Databricks can be configured to read them as constants)
     pub fn checks_ordinal_positions(self) -> bool {

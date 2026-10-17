@@ -64,7 +64,7 @@ sqlsift/
 4. **Resolver** (`analyzer/resolver.rs`): Walks each statement once: resolves table, view, CTE and column references and reports each query block's output columns with their types; with `Analyzer::with_references` it also records the uses of catalog tables, views and columns (`analyzer::Reference`, reads and writes, for `impact --references` and `sqlsift unused`)
 5. **Scope** (`analyzer/scope.rs`): Stack of query blocks (relations, CTEs, USING columns) shared by name resolution and type inference; encodes SQL visibility rules (correlation, non-LATERAL FROM subqueries, CTE scoping)
 6. **Type checks** (`analyzer/type_check.rs`): Expression type inference and E0003/E0004/E0007 checks, implemented on `Resolver`
-7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY), E0035 (duplicate primary key or unique values in INSERT VALUES list) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016 and `analyzer/ranges.rs` E0017, implemented on `Resolver`
+7. **Structural checks** (`analyzer/structure.rs`): E0009-E0015 (duplicate names and target columns, positions, misplaced aggregates, generated columns, ON CONFLICT targets, DISTINCT ORDER BY), E0035 (duplicate primary key or unique values in INSERT VALUES list) and the E0005 checks of column alias lists and subquery shapes; `analyzer/grouping.rs` has E0016 and `analyzer/ranges.rs` E0017 and E0037 (violating a CHECK constraint in INSERT or UPDATE), implemented on `Resolver`
 8. **SqlType** (`types/mod.rs`): Internal SQL type representation with compatibility checking
 9. **Config** (`config.rs`): Configuration file loader with hierarchical merging (file < CLI args)
 10. **LSP Backend** (`sqlsift-lsp/server.rs`): tower-lsp LanguageServer implementation with real-time diagnostics
@@ -271,6 +271,7 @@ Dependencies must have a license allowed by `deny.toml` (CI job "Licenses"). Aft
 - **E0033** (suspicious, warning): comparing or assigning `timestamp` (without time zone) with `timestamptz` (with time zone) depends on session TimeZone setting in PostgreSQL and Redshift (`analyzer/type_check.rs`)
 - **E0034** (pedantic, off by default): CASE over an enum column misses some labels and has no ELSE (`analyzer/pedantic.rs`)
 - **E0035**: Duplicate primary key or unique values in INSERT VALUES list (`analyzer/structure.rs`)
+- **E0037**: Literal that violates a CHECK constraint in INSERT VALUES or UPDATE SET (`analyzer/ranges.rs`)
 - **E1000**: Generic parse error
 
 ## Release Process

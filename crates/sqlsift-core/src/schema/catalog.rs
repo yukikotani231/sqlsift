@@ -896,6 +896,9 @@ pub struct ColumnDef {
     /// (see [`Catalog::is_case_sensitive_column`])
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub case_sensitive: bool,
+    /// Whether the column has an explicit `COLLATE` clause
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collated: bool,
 }
 
 impl ColumnDef {
@@ -910,6 +913,7 @@ impl ColumnDef {
             auto_increment: false,
             generated: false,
             case_sensitive: false,
+            collated: false,
         }
     }
 
@@ -970,11 +974,24 @@ pub struct UniqueConstraintDef {
     pub deferrable: bool,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// CHECK constraint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckConstraintDef {
     pub name: Option<String>,
     pub expression: String,
+    #[serde(default = "default_true")]
+    pub enforced: bool,
+    /// Column this CHECK constraint was declared inline on (`None` for table-level)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Database-generated constraint name when `name` is `None` (e.g., `t_x_check`,
+    /// `t_check`, `t_chk_1`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_name: Option<String>,
 }
 
 /// Enum type definition (CREATE TYPE ... AS ENUM)

@@ -221,6 +221,8 @@ pub enum DiagnosticKind {
     CaseEnumMissingLabels,
     /// E0035: Duplicate primary key or unique values in an INSERT VALUES list
     DuplicateInsertValue,
+    /// E0037: Literal that violates a CHECK constraint in INSERT VALUES or UPDATE SET
+    CheckConstraintViolation,
     /// Parse error
     ParseError,
 }

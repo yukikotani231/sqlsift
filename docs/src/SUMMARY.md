@@ -64,6 +64,7 @@
   - [E0033 timestamp-timezone-mismatch](rules/E0033.md)
   - [E0034 case-enum-missing-labels](rules/E0034.md)
   - [E0035 duplicate-insert-value](rules/E0035.md)
+  - [E0037 check-constraint-violation](rules/E0037.md)
   - [E1000 parse-error](rules/E1000.md)
 
 ---

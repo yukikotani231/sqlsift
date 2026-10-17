@@ -394,6 +394,13 @@ pub const RULES: &[Rule] = &[
         summary: "Duplicate primary key or unique values in an INSERT VALUES list",
     },
     Rule {
+        kind: DiagnosticKind::CheckConstraintViolation,
+        code: "E0037",
+        name: "check-constraint-violation",
+        category: RuleCategory::Correctness,
+        summary: "Literal assigned to column violates a CHECK constraint",
+    },
+    Rule {
         kind: DiagnosticKind::ParseError,
         code: "E1000",
         name: "parse-error",

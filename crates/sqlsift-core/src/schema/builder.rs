@@ -7,7 +7,7 @@ use sqlparser::ast::{
     TableConstraint, TriggerEvent, TriggerPeriod, Use, UserDefinedTypeRepresentation, Value,
     ValueWithSpan,
 };
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::analyzer;
@@ -507,7 +507,7 @@ impl SchemaBuilder {
                         | "PARTITION"
                 ),
                 "ALTER" | "RENAME" | "MODIFY" | "CHANGE" => {
-                    !matches!(word(op + 1), "CONSTRAINT" | "INDEX" | "KEY")
+                    !matches!(word(op + 1), "CONSTRAINT" | "CHECK" | "INDEX" | "KEY")
                 }
                 _ => false,
             };
@@ -564,7 +564,9 @@ impl SchemaBuilder {
     /// [`mask_unsupported_clauses`] removes, applying `INHERITS` itself. Returns true
     /// if something was removed and the statement then parsed and was applied.
     fn retry_without_unsupported_clauses(&mut self, stmt: &str) -> bool {
-        let Some((masked, parents)) = mask_unsupported_clauses(self.dialect, stmt, true) else {
+        let Some((masked, parents, include_constraints)) =
+            mask_unsupported_clauses(self.dialect, stmt, true)
+        else {
             return false;
         };
         let dialect = self.dialect.parser_dialect();
@@ -577,6 +579,26 @@ impl SchemaBuilder {
                 if !parents.is_empty() {
                     let child = self.catalog.qualified_name(&create.name);
                     self.inherit_columns(&child, &parents);
+                }
+                if include_constraints {
+                    let child = self.catalog.qualified_name(&create.name);
+                    let like_source = match &create.like {
+                        Some(
+                            CreateTableLikeKind::Parenthesized(like)
+                            | CreateTableLikeKind::Plain(like),
+                        ) => Some(&like.name),
+                        _ => create.columns.iter().find_map(like_pseudo_column),
+                    };
+                    if let Some(source_name) = like_source {
+                        let source = self.catalog.qualified_name(source_name);
+                        if let Some(source_table) = self.catalog.get_table(&source) {
+                            let check_constraints = source_table.check_constraints.clone();
+                            let dialect = self.dialect;
+                            if let Some(child_table) = self.catalog.get_table_mut(&child) {
+                                copy_check_constraints(child_table, check_constraints, dialect);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -968,23 +990,27 @@ impl SchemaBuilder {
             };
 
         // MySQL `CREATE TABLE t2 LIKE t`: copy the definition
-        let like = create.like.as_ref().map(|like| match like {
-            CreateTableLikeKind::Parenthesized(like) | CreateTableLikeKind::Plain(like) => {
-                &like.name
-            }
-        });
-        if let Some(like) = like.or(create.clone.as_ref()) {
+        let (like, is_mysql_like) = match &create.like {
+            Some(CreateTableLikeKind::Plain(like)) => (Some(&like.name), true),
+            Some(CreateTableLikeKind::Parenthesized(like)) => (Some(&like.name), false),
+            None => (create.clone.as_ref(), false),
+        };
+        if let Some(like) = like {
             let source = self.catalog.qualified_name(like);
             match self.catalog.get_table(&source) {
                 Some(source_table) => {
                     table.columns.clone_from(&source_table.columns);
-                    table.primary_key.clone_from(&source_table.primary_key);
-                    table
-                        .unique_constraints
-                        .clone_from(&source_table.unique_constraints);
-                    table
-                        .check_constraints
-                        .clone_from(&source_table.check_constraints);
+                    if is_mysql_like {
+                        table.primary_key.clone_from(&source_table.primary_key);
+                        table
+                            .unique_constraints
+                            .clone_from(&source_table.unique_constraints);
+                        copy_check_constraints(
+                            &mut table,
+                            source_table.check_constraints.clone(),
+                            self.dialect,
+                        );
+                    }
                     table.strict = source_table.strict;
                 }
                 None => self.warn_like_source_missing(&name, &source),
@@ -1012,7 +1038,7 @@ impl SchemaBuilder {
                 &column.options,
             );
             col_def.case_sensitive = self.catalog.is_case_sensitive_column(&column.name);
-            merge_constraints(&mut table, constraints);
+            merge_constraints(&mut table, constraints, self.dialect);
             table.columns.insert(col_def.name.clone(), col_def);
         }
 
@@ -1242,6 +1268,8 @@ impl SchemaBuilder {
                     | AlterTableOperation::RenameColumn { .. }
                     | AlterTableOperation::RenameTable { .. }
                     | AlterTableOperation::AddConstraint { .. }
+                    | AlterTableOperation::DropConstraint { .. }
+                    | AlterTableOperation::RenameConstraint { .. }
                     | AlterTableOperation::AlterColumn { .. }
                     | AlterTableOperation::ChangeColumn { .. }
                     | AlterTableOperation::ModifyColumn { .. }
@@ -1280,18 +1308,23 @@ impl SchemaBuilder {
                         &column_def.options,
                     );
                     col.case_sensitive = self.catalog.is_case_sensitive_column(&column_def.name);
+                    let dialect = self.dialect;
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        merge_constraints(table, constraints);
+                        merge_constraints(table, constraints, dialect);
                         table.forget_former_column(&col.name);
                         table.columns.insert(col.name.clone(), col);
                     }
                 }
                 AlterTableOperation::DropColumn { column_names, .. } => {
+                    let dialect = self.dialect;
                     for column_name in column_names {
                         let location = self.location(column_name.span);
                         if let Some(table) = self.catalog.get_table_mut(&table_name) {
                             if let Some(index) = column_index(table, &column_name.value) {
                                 if let Some((name, _)) = table.columns.shift_remove_index(index) {
+                                    table
+                                        .check_constraints
+                                        .retain(|c| !check_references_column(c, &name, dialect));
                                     table.record_column_drop(&name, location);
                                 }
                             }
@@ -1354,8 +1387,9 @@ impl SchemaBuilder {
                         &options,
                     );
                     let location = self.location(col_name.span);
+                    let dialect = self.dialect;
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
-                        merge_constraints(table, constraints);
+                        merge_constraints(table, constraints, dialect);
                         if let Some(index) = column_index(table, &col_name.value) {
                             let old_name = table.columns[index].name.clone();
                             table.record_column_rename(&old_name, &col.name, location);
@@ -1385,6 +1419,7 @@ impl SchemaBuilder {
                 AlterTableOperation::AddConstraint { constraint, .. } => {
                     let mut constraints = TableDef::new(table_name.clone());
                     self.process_table_constraint(&mut constraints, constraint);
+                    let dialect = self.dialect;
                     if let Some(table) = self.catalog.get_table_mut(&table_name) {
                         if let Some(pk) = &constraints.primary_key {
                             for col_name in &pk.columns {
@@ -1395,7 +1430,19 @@ impl SchemaBuilder {
                                 }
                             }
                         }
-                        merge_constraints(table, constraints);
+                        merge_constraints(table, constraints, dialect);
+                    }
+                }
+                AlterTableOperation::RenameConstraint { old_name, new_name } => {
+                    let dialect = self.dialect;
+                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
+                        rename_table_constraint(table, &old_name.value, &new_name.value, dialect);
+                    }
+                }
+                AlterTableOperation::DropConstraint { name, .. } => {
+                    let dialect = self.dialect;
+                    if let Some(table) = self.catalog.get_table_mut(&table_name) {
+                        drop_table_constraint(table, &name.value, dialect);
                     }
                 }
                 _ => {
@@ -1488,9 +1535,25 @@ impl SchemaBuilder {
                 table.unique_constraints.push(unique);
             }
             TableConstraint::Check(check) => {
+                let name = check.name.as_ref().map(|n| n.value.clone());
+                let expression = check.expr.to_string();
+                let generated_name = if name.is_none() {
+                    generated_check_name(
+                        self.dialect,
+                        &table.name.name,
+                        None,
+                        &expression,
+                        &table.check_constraints,
+                    )
+                } else {
+                    None
+                };
                 let check = CheckConstraintDef {
-                    name: check.name.as_ref().map(|n| n.value.clone()),
-                    expression: check.expr.to_string(),
+                    name,
+                    expression,
+                    enforced: check.enforced.unwrap_or(true),
+                    column: None,
+                    generated_name,
                 };
                 table.check_constraints.push(check);
             }
@@ -1547,6 +1610,7 @@ fn build_column(
             ColumnOption::Null => col.nullable = true,
             ColumnOption::NotNull => col.nullable = false,
             ColumnOption::Default(expr) => col.default = Some(expr_to_default(expr)),
+            ColumnOption::Collation(_) => col.collated = true,
             ColumnOption::PrimaryKey(pk) => {
                 col.is_primary_key = true;
                 col.nullable = false;
@@ -1581,6 +1645,9 @@ fn build_column(
                 constraints.check_constraints.push(CheckConstraintDef {
                     name: constraint_name,
                     expression: check.expr.to_string(),
+                    enforced: check.enforced.unwrap_or(true),
+                    column: Some(col_name.to_string()),
+                    generated_name: None,
                 });
             }
             ColumnOption::Generated {
@@ -1691,7 +1758,7 @@ fn is_serial_type(data_type: &DataType) -> bool {
 }
 
 /// Add the constraints collected in `constraints` to `table`
-fn merge_constraints(table: &mut TableDef, constraints: TableDef) {
+fn merge_constraints(table: &mut TableDef, constraints: TableDef, dialect: SqlDialect) {
     if constraints.primary_key.is_some() {
         table.primary_key = constraints.primary_key;
     }
@@ -1699,10 +1766,216 @@ fn merge_constraints(table: &mut TableDef, constraints: TableDef) {
     table
         .unique_constraints
         .extend(constraints.unique_constraints);
+    copy_check_constraints(table, constraints.check_constraints, dialect);
+    table.unknown_unique_keys |= constraints.unknown_unique_keys;
+}
+
+fn copy_check_constraints(
+    table: &mut TableDef,
+    checks: Vec<CheckConstraintDef>,
+    dialect: SqlDialect,
+) {
+    for mut check in checks {
+        if check.name.is_none() {
+            check.generated_name = generated_check_name(
+                dialect,
+                &table.name.name,
+                check.column.as_deref(),
+                &check.expression,
+                &table.check_constraints,
+            );
+        }
+        table.check_constraints.push(check);
+    }
+}
+
+fn generated_check_name(
+    dialect: SqlDialect,
+    table_name: &str,
+    col_name: Option<&str>,
+    expression: &str,
+    existing: &[CheckConstraintDef],
+) -> Option<String> {
+    let is_taken = |candidate: &str| {
+        existing.iter().any(|c| {
+            c.name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
+                || c.generated_name
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(candidate))
+        })
+    };
+    if dialect == SqlDialect::MySQL {
+        for i in 1.. {
+            let candidate = format!("{table_name}_chk_{i}");
+            if !is_taken(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    } else if dialect.is_psql() {
+        let inferred_col = if col_name.is_none() {
+            Parser::new(dialect.parser_dialect().as_ref())
+                .try_with_sql(expression)
+                .and_then(|mut p| p.parse_expr())
+                .ok()
+                .and_then(|expr| {
+                    let mut cols = std::collections::HashSet::new();
+                    analyzer::ranges::collect_referenced_columns(&expr, &mut cols);
+                    (cols.len() == 1).then(|| cols.into_iter().next()).flatten()
+                })
+        } else {
+            None
+        };
+        let base = match col_name.or(inferred_col.as_deref()) {
+            Some(col) => format!("{table_name}_{col}_check"),
+            None => format!("{table_name}_check"),
+        };
+        if !is_taken(&base) {
+            return Some(base);
+        }
+        for i in 1.. {
+            let candidate = format!("{base}{i}");
+            if !is_taken(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
+
+fn check_references_column(
+    check: &CheckConstraintDef,
+    col_name: &str,
+    dialect: SqlDialect,
+) -> bool {
+    if check
+        .column
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case(col_name))
+    {
+        return true;
+    }
+    if let Ok(expr) = Parser::new(dialect.parser_dialect().as_ref())
+        .try_with_sql(&check.expression)
+        .and_then(|mut p| p.parse_expr())
+    {
+        let mut cols = std::collections::HashSet::new();
+        analyzer::ranges::collect_referenced_columns(&expr, &mut cols);
+        return cols.iter().any(|c| c.eq_ignore_ascii_case(col_name));
+    }
+    check
+        .expression
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| w.eq_ignore_ascii_case(col_name))
+}
+
+fn check_matches_name(check: &CheckConstraintDef, target: &str) -> bool {
+    check
+        .name
+        .as_deref()
+        .is_some_and(|n| n.eq_ignore_ascii_case(target))
+        || (check.name.is_none()
+            && check
+                .generated_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(target)))
+}
+
+fn rename_table_constraint(
+    table: &mut TableDef,
+    old_name: &str,
+    new_name: &str,
+    dialect: SqlDialect,
+) {
+    if let Some(check) = table
+        .check_constraints
+        .iter_mut()
+        .find(|c| check_matches_name(c, old_name))
+    {
+        check.name = Some(new_name.to_string());
+        check.generated_name = None;
+        return;
+    }
+    if dialect.is_psql() && old_name.eq_ignore_ascii_case(&format!("{}_check", table.name.name)) {
+        if let Some(check) = table
+            .check_constraints
+            .iter_mut()
+            .find(|c| c.name.is_none() && c.column.is_none())
+        {
+            check.name = Some(new_name.to_string());
+            check.generated_name = None;
+            return;
+        }
+    }
+    for u in &mut table.unique_constraints {
+        if u.name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(old_name))
+        {
+            u.name = Some(new_name.to_string());
+            return;
+        }
+    }
+    for fk in &mut table.foreign_keys {
+        if fk
+            .name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(old_name))
+        {
+            fk.name = Some(new_name.to_string());
+            return;
+        }
+    }
+    if let Some(pk) = &mut table.primary_key {
+        if pk
+            .name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(old_name))
+        {
+            pk.name = Some(new_name.to_string());
+        }
+    }
+}
+
+fn drop_table_constraint(table: &mut TableDef, target: &str, dialect: SqlDialect) {
+    let before = table.check_constraints.len();
     table
         .check_constraints
-        .extend(constraints.check_constraints);
-    table.unknown_unique_keys |= constraints.unknown_unique_keys;
+        .retain(|c| !check_matches_name(c, target));
+    if table.check_constraints.len() == before
+        && dialect.is_psql()
+        && target.eq_ignore_ascii_case(&format!("{}_check", table.name.name))
+    {
+        if let Some(pos) = table
+            .check_constraints
+            .iter()
+            .position(|c| c.name.is_none() && c.column.is_none())
+        {
+            table.check_constraints.remove(pos);
+        }
+    }
+    table.unique_constraints.retain(|u| {
+        !u.name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(target))
+    });
+    table.foreign_keys.retain(|fk| {
+        !fk.name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(target))
+    });
+    if table
+        .primary_key
+        .as_ref()
+        .and_then(|pk| pk.name.as_deref())
+        .is_some_and(|n| n.eq_ignore_ascii_case(target))
+    {
+        table.primary_key = None;
+    }
 }
 
 /// Apply an `ALTER TABLE ... ALTER COLUMN` operation to a column
@@ -1795,7 +2068,7 @@ pub(crate) fn mask_unsupported_clauses(
     dialect: SqlDialect,
     stmt: &str,
     inherits: bool,
-) -> Option<(String, Vec<ObjectName>)> {
+) -> Option<(String, Vec<ObjectName>, bool)> {
     let parser_dialect = dialect.parser_dialect();
     let tokens = Tokenizer::new(parser_dialect.as_ref(), stmt)
         .with_unescape(false)
@@ -1812,8 +2085,9 @@ pub(crate) fn mask_unsupported_clauses(
             .is_some_and(|&i| is_word(&tokens[i].token, kw))
     };
     // PostgreSQL `ALTER TABLE ... ADD COLUMN c varchar ARRAY`, `... MATCH SIMPLE`,
-    // `... NOT VALID`
-    let alter = dialect.is_psql() && word(0, "ALTER") && word(1, "TABLE");
+    // `... NOT VALID`; MySQL `ALTER TABLE ... DROP CHECK k`, `... ALTER CHECK k NOT ENFORCED`
+    let alter =
+        (dialect.is_psql() || dialect == SqlDialect::MySQL) && word(0, "ALTER") && word(1, "TABLE");
     if !word(0, "CREATE") && !alter {
         return None;
     }
@@ -1822,12 +2096,20 @@ pub(crate) fn mask_unsupported_clauses(
     if word(1, "UNLOGGED") && word(2, "TABLE") {
         drop[significant[1]] = true;
     }
+    let mut include_constraints = false;
     for (n, &i) in significant.iter().enumerate() {
-        if is_word(&tokens[i].token, "INCLUDING") || is_word(&tokens[i].token, "EXCLUDING") {
+        let is_inc = is_word(&tokens[i].token, "INCLUDING");
+        let is_exc = is_word(&tokens[i].token, "EXCLUDING");
+        if is_inc || is_exc {
             if let Some(&next) = significant.get(n + 1) {
-                if matches!(tokens[next].token, Token::Word(_)) {
+                if let Token::Word(w) = &tokens[next].token {
                     drop[i] = true;
                     drop[next] = true;
+                    if w.value.eq_ignore_ascii_case("CONSTRAINTS")
+                        || w.value.eq_ignore_ascii_case("ALL")
+                    {
+                        include_constraints = is_inc;
+                    }
                 }
             }
         }
@@ -1922,23 +2204,36 @@ pub(crate) fn mask_unsupported_clauses(
     }
     // ... and the edited ranges, writing their replacement text over them
     let mut replaced = std::collections::HashMap::new();
+    let mut insertions: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
     for edit in &edits {
         let range = edit.range.start..edit.range.end.min(stmt.len());
         blank[range.clone()].fill(true);
-        let positions = stmt.get(range.clone())?.char_indices();
-        for ((i, _), c) in positions.zip(edit.text.chars()) {
-            replaced.insert(range.start + i, c);
+        let slice = stmt.get(range.clone())?;
+        let mut chars = edit.text.chars();
+        let mut last_idx = range.start;
+        for (i, _) in slice.char_indices() {
+            last_idx = range.start + i;
+            if let Some(c) = chars.next() {
+                replaced.insert(last_idx, c);
+            }
+        }
+        let remainder = chars.as_str();
+        if !remainder.is_empty() {
+            insertions.insert(last_idx, remainder);
         }
     }
-    let masked = stmt
-        .char_indices()
-        .map(|(i, c)| match replaced.get(&i) {
-            Some(&r) => r,
-            None if blank[i] && c != '\n' => ' ',
-            None => c,
-        })
-        .collect();
-    Some((masked, parents))
+    let mut masked = String::with_capacity(stmt.len());
+    for (i, c) in stmt.char_indices() {
+        match replaced.get(&i) {
+            Some(&r) => masked.push(r),
+            None if blank[i] && c != '\n' => masked.push(' '),
+            None => masked.push(c),
+        }
+        if let Some(extra) = insertions.get(&i) {
+            masked.push_str(extra);
+        }
+    }
+    Some((masked, parents, include_constraints))
 }
 
 /// Mark for dropping the parts of a CREATE TABLE's column and constraint list that
@@ -1972,6 +2267,40 @@ fn mask_table_elements(
         _ => String::new(),
     };
     let is = |n: usize, t: &Token| token(n) == Some(t);
+    if word(0) == "ALTER" && word(1) == "TABLE" {
+        for n in 2..significant.len() {
+            if mysql && word(n) == "DROP" && word(n + 1) == "CHECK" {
+                if let Some(start) = offset(&tokens[significant[n + 1]]) {
+                    edits.push(super::warehouse::Edit {
+                        range: start..start + "CHECK".len(),
+                        text: "CONSTRAINT",
+                    });
+                }
+            } else if word(n) == "ALTER"
+                && matches!(word(n + 1).as_str(), "CHECK" | "CONSTRAINT")
+                && matches!(token(n + 2), Some(Token::Word(_)))
+                && word(n + 3) == "NOT"
+                && word(n + 4) == "ENFORCED"
+            {
+                let kw_len = word(n + 1).len();
+                if let (Some(alter_start), Some(kind_start)) = (
+                    offset(&tokens[significant[n]]),
+                    offset(&tokens[significant[n + 1]]),
+                ) {
+                    edits.push(super::warehouse::Edit {
+                        range: alter_start..alter_start + "ALTER".len(),
+                        text: "DROP",
+                    });
+                    edits.push(super::warehouse::Edit {
+                        range: kind_start..kind_start + kw_len,
+                        text: "CONSTRAINT",
+                    });
+                    drop[significant[n + 3]] = true;
+                    drop[significant[n + 4]] = true;
+                }
+            }
+        }
+    }
     if dialect.is_psql() {
         for n in 1..significant.len() {
             match word(n).as_str() {
