@@ -6,4 +6,4 @@ Contributions are welcome. The most useful things right now are:
 - **Dialect coverage**: MySQL and SQLite edge cases, and the alpha warehouse dialects (Snowflake, BigQuery, Redshift, Databricks).
 - **Editor integrations**: setup guides or plugins for editors other than VS Code.
 
-The development setup, repository layout and how to add a rule are described in [CONTRIBUTING.md](https://github.com/yukikotani231/sqlsift/blob/main/CONTRIBUTING.md).
+To find your way around the code, start with [How sqlsift works](how-it-works/index.md). The development setup, repository layout and how to add a rule are described in [CONTRIBUTING.md](https://github.com/yukikotani231/sqlsift/blob/main/CONTRIBUTING.md).
