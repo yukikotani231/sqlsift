@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/yukikotani231/sqlsift/compare/v0.3.0...v0.3.1) - 2026-10-23
+
+### Added
+
+- report literal that violates a CHECK constraint in INSERT or UPDATE as E0037 ([#343](https://github.com/yukikotani231/sqlsift/pull/343)) ([#383](https://github.com/yukikotani231/sqlsift/pull/383))
+- report incompatible MySQL collations in comparisons and joins as E0036 ([#347](https://github.com/yukikotani231/sqlsift/pull/347)) ([#381](https://github.com/yukikotani231/sqlsift/pull/381))
+- link each diagnostic to its rule page in SARIF and LSP ([#248](https://github.com/yukikotani231/sqlsift/pull/248)) ([#385](https://github.com/yukikotani231/sqlsift/pull/385))
+- *(lsp)* add quick fixes to insert disable comments ([#251](https://github.com/yukikotani231/sqlsift/pull/251)) ([#388](https://github.com/yukikotani231/sqlsift/pull/388))
+
 ## [0.3.0](https://github.com/yukikotani231/sqlsift/compare/v0.2.0...v0.3.0) - 2026-10-17
 
 ### Added
