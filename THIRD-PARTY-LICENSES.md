@@ -2592,7 +2592,7 @@ SOFTWARE.
 
 Used by:
 
-- [tokio-macros 2.6.0](https://github.com/tokio-rs/tokio)
+- [tokio-macros 2.7.2](https://github.com/tokio-rs/tokio)
 
 ```text
 MIT License
@@ -2697,7 +2697,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [tokio-util 0.7.18](https://github.com/tokio-rs/tokio)
-- [tokio 1.49.0](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
 
 ```text
 MIT License
