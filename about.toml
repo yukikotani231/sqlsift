@@ -29,3 +29,14 @@ license = "MIT"
 path = "LICENSE-MIT.md"
 license = "MIT"
 checksum = "799e9ca9d179295ef372f25d3769cdda7d25bb2668add6a6a1e22d1e4c678b8d"
+
+# libmimalloc-sys has the binding's LICENSE.txt and mimalloc's own LICENSE (the
+# Microsoft C code compiled into the binary, under c_src/mimalloc/v2 and v3); pin
+# the latter so the notice doesn't depend on the directory order.
+[libmimalloc-sys.clarify]
+license = "MIT"
+
+[[libmimalloc-sys.clarify.files]]
+path = "c_src/mimalloc/v2/LICENSE"
+license = "MIT"
+checksum = "82ade5d7d9b029044b5fbbc326207fc47c2d44ee4dd71e8a559c36d728217de9"
