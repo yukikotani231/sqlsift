@@ -7,7 +7,7 @@ from `about.hbs`; do not edit it by hand.
 
 ## Overview
 
-- MIT License (148)
+- MIT License (147)
 - Unicode License v3 (19)
 - Apache License 2.0 (9)
 - ISC License (1)
@@ -1543,13 +1543,13 @@ THE SOFTWARE.
 
 Used by:
 
-- [futures-channel 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-core 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-io 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-macro 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-sink 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-task 0.3.31](https://github.com/rust-lang/futures-rs)
-- [futures-util 0.3.31](https://github.com/rust-lang/futures-rs)
+- [futures-channel 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-core 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-io 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-macro 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-sink 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-task 0.3.34](https://github.com/rust-lang/futures-rs)
+- [futures-util 0.3.34](https://github.com/rust-lang/futures-rs)
 - [futures 0.3.31](https://github.com/rust-lang/futures-rs)
 
 ```text
@@ -1939,41 +1939,6 @@ Used by:
 
 ```text
 Copyright (c) 2018 The Servo Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### MIT License
-
-Used by:
-
-- [pin-utils 0.1.0](https://github.com/rust-lang-nursery/pin-utils)
-
-```text
-Copyright (c) 2018 The pin-utils authors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
