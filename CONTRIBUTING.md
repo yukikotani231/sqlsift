@@ -58,7 +58,7 @@ cargo test --all-targets
 | `tests/fixtures` | SQL fixtures (the real-world corpus harness is in `tests/corpus`) |
 | `examples` | Example projects per stack, checked in CI by `scripts/check-examples.sh` (run it after `cargo build`; a change in their diagnostics means updating their `expected-diagnostics.txt` and README) |
 
-The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) and turned into an in-memory `Catalog` by `SchemaBuilder`; each query is then walked once by the `Resolver`, which resolves names through `Scope` and infers types, emitting diagnostics. [`CLAUDE.md`](CLAUDE.md) has a more detailed architecture overview and the current list of limitations.
+The flow is: schema SQL is parsed by [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) and turned into an in-memory `Catalog` by `SchemaBuilder`; each query is then walked once by the `Resolver`, which resolves names through `Scope` and infers types, emitting diagnostics. [How sqlsift works](https://sqlsift.dev/docs/how-it-works/) in the user guide explains the design in more detail, and [`CLAUDE.md`](CLAUDE.md) has a file-by-file architecture overview and the current list of limitations.
 
 ## Common changes
 
