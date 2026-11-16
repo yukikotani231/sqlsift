@@ -7,7 +7,7 @@ from `about.hbs`; do not edit it by hand.
 
 ## Overview
 
-- MIT License (147)
+- MIT License (146)
 - Unicode License v3 (19)
 - Apache License 2.0 (9)
 - ISC License (1)
@@ -1375,41 +1375,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [libc 0.2.180](https://github.com/rust-lang/libc)
-
-```text
-Copyright (c) 2014-2020 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### MIT License
-
-Used by:
-
 - [object 0.37.3](https://github.com/gimli-rs/object)
 - [object 0.39.1](https://github.com/gimli-rs/object)
 
@@ -2289,6 +2254,41 @@ SOFTWARE.
 
 Used by:
 
+- [libc 0.2.191](https://github.com/rust-lang/libc)
+
+```text
+Copyright (c) The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
 - [idna_adapter 1.2.1](https://github.com/hsivonen/idna_adapter)
 
 ```text
@@ -2624,7 +2624,6 @@ Used by:
 - [tower-lsp-macros 0.9.0](https://github.com/ebkalderon/tower-lsp)
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
 - [windows-sys 0.60.2](https://github.com/microsoft/windows-rs)
-- [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.53.5](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_gnullvm 0.53.1](https://github.com/microsoft/windows-rs)
 - [windows_aarch64_msvc 0.53.1](https://github.com/microsoft/windows-rs)
@@ -2731,14 +2730,14 @@ Used by:
 - [async-trait 0.1.89](https://github.com/dtolnay/async-trait)
 - [displaydoc 0.2.5](https://github.com/yaahc/displaydoc)
 - [itoa 1.0.17](https://github.com/dtolnay/itoa)
-- [linux-raw-sys 0.11.0](https://github.com/sunfishcode/linux-raw-sys)
+- [linux-raw-sys 0.12.1](https://github.com/sunfishcode/linux-raw-sys)
 - [once_cell 1.21.3](https://github.com/matklad/once_cell)
 - [pin-project-internal 1.1.10](https://github.com/taiki-e/pin-project)
 - [pin-project-lite 0.2.16](https://github.com/taiki-e/pin-project-lite)
 - [pin-project 1.1.10](https://github.com/taiki-e/pin-project)
 - [proc-macro2 1.0.106](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.44](https://github.com/dtolnay/quote)
-- [rustix 1.1.3](https://github.com/bytecodealliance/rustix)
+- [rustix 1.1.6](https://github.com/bytecodealliance/rustix)
 - [rustversion 1.0.23](https://github.com/dtolnay/rustversion)
 - [serde 1.0.228](https://github.com/serde-rs/serde)
 - [serde_core 1.0.228](https://github.com/serde-rs/serde)
